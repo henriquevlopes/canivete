@@ -218,8 +218,14 @@ bool Gif_Encode(const std::wstring& recording, const GifPreset& p, const std::ws
 // ---- recorder.cpp --------------------------------------------------------------------------
 void Recorder_Start(const RECT& r);  // records that screen area until Recorder_Stop
 bool Recorder_Active();              // recording, or its save window is open
-void Recorder_Stop();
-void Recorder_Shutdown();  // app is closing: stop and throw away anything in progress                // stop recording (or bring the save window forward)
+void Recorder_Stop();                // stop recording (or bring the save window forward)
+void Recorder_Shutdown();            // app is closing: stop and throw away anything in progress
 HWND Recorder_Window();              // the save window, for IsDialogMessage
 void Recorder_Test(const RECT& r, int ms);  // test mode: record r for ms, then the save window
 int Recorder_Bench(const RECT& r, int ms, const std::wstring& outDir);  // headless: record + all presets
+
+// ---- alpha.cpp -----------------------------------------------------------------------------
+void Alpha_Open(const Image& img, const CaptureResult& meta);  // "Make alpha" window for this picture
+HWND Alpha_Window();
+// Headless: picks = detail clicks (image pixels), box = area to use (empty = all). Writes the PNG.
+int Alpha_Bench(const std::wstring& in, const std::wstring& out, const std::vector<POINT>& picks, const RECT& box);

@@ -132,11 +132,15 @@ HWND Button(int id, const wchar_t* text, int x, int y, int w, int h, DWORD style
 
 LRESULT CALLBACK HotkeyBoxProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR);
 
+// Hotkey row 1 (Window screenshot) is gone: the region tool highlights windows, a click takes one.
+constexpr bool Shown(int i) { return i != 1; }
+
 void Build() {
     int y = 14;
     Heading(L"Hotkeys", y);
     y += 28;
     for (int i = 0; i < kHotkeyCount; ++i) {
+        if (!Shown(i)) continue;
         Label(kHkNames[i], y);
         HWND box = Edit(IDC_HK0 + i, kCX, y, 170, ES_READONLY);
         SetWindowSubclass(box, HotkeyBoxProc, 1, 0);
@@ -266,11 +270,11 @@ void ShowHotkey(int i) {
 void CheckHotkeys() {
     Hotkey owned[kHotkeyCount];  // what Canivete itself has registered (saved settings)
     ParseHotkey(g_settings.hkRegion, owned[0]);
-    ParseHotkey(g_settings.hkWindow, owned[1]);
     ParseHotkey(g_settings.hkFull, owned[2]);
     ParseHotkey(g_settings.hkColor, owned[3]);
     ParseHotkey(g_settings.hkGif, owned[4]);
     for (int i = 0; i < kHotkeyCount; ++i) {
+        if (!Shown(i)) continue;
         std::wstring st;
         bool bad = false;
         const Hotkey& hk = U.hk[i];
@@ -441,7 +445,7 @@ void UpdateEnable() {
 void Populate() {
     const Settings& s = g_settings;
     ParseHotkey(s.hkRegion, U.hk[0]);
-    ParseHotkey(s.hkWindow, U.hk[1]);
+    U.hk[1] = {};  // Window screenshot: now part of the region tool
     ParseHotkey(s.hkFull, U.hk[2]);
     ParseHotkey(s.hkColor, U.hk[3]);
     ParseHotkey(s.hkGif, U.hk[4]);

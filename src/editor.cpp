@@ -60,7 +60,7 @@ struct Shape {
     float scale = 1;  // text and markers: stretched by their corner handles
 };
 
-enum class Item { Tool, Color, Size, Undo, Redo, Copy, Save, Done };
+enum class Item { Tool, Color, Size, Undo, Redo, Copy, Save, Alpha, Done };
 struct ItemRect {
     Item kind;
     int index;
@@ -534,7 +534,7 @@ constexpr int kToolbarH = 44, kStatusH = 24;
 
 int ToolbarWidth(const Editor& e) {
     const int btn = e.Px(34), sw = e.Px(26), sep = e.Px(14);
-    return e.Px(8) + kToolCount * btn + sep + kColorCount * sw + sep + 3 * e.Px(28) + sep + 2 * btn + sep + 2 * btn +
+    return e.Px(8) + kToolCount * btn + sep + kColorCount * sw + sep + 3 * e.Px(28) + sep + 2 * btn + sep + 3 * btn +
            e.Px(6) + e.Px(78) + e.Px(8);
 }
 
@@ -604,6 +604,7 @@ void Layout(Editor& e) {
     x += sep;
     add(Item::Copy, 0, btn);
     add(Item::Save, 0, btn);
+    add(Item::Alpha, 0, btn);
     x += e.Px(6);
     add(Item::Done, 0, e.Px(78));
 
@@ -740,6 +741,7 @@ const wchar_t* Tip(const Editor& e, int i) {
     case Item::Redo: return L"Redo  (Ctrl+Y)";
     case Item::Copy: return L"Copy to the clipboard  (Ctrl+C)";
     case Item::Save: return L"Save to the screenshot file  (Ctrl+S)";
+    case Item::Alpha: return L"Make alpha: turn details into a white-on-black square for Substance  (M)";
     case Item::Done: return L"Copy, save and close  (Enter)";
     }
     return nullptr;
@@ -870,6 +872,14 @@ void Paint(Editor& e, HDC hdc) {
             case Item::Save:
                 Glyph(e, b, L"\xE74E", r, true);
                 break;
+            case Item::Alpha: {
+                HGDIOBJ old = SelectObject(b, e.bold);
+                SetTextColor(b, RGB(225, 225, 225));
+                RECT rr = r;
+                DrawTextW(b, L"\x03B1", 1, &rr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                SelectObject(b, old);
+                break;
+            }
             case Item::Done: {
                 HGDIOBJ old = SelectObject(b, e.ui);
                 SetTextColor(b, RGB(255, 255, 255));
@@ -1038,6 +1048,11 @@ void Done(Editor& e) {
     DestroyWindow(e.hwnd);
 }
 
+void MakeAlpha(Editor& e) {
+    FinishText(e);
+    Alpha_Open(CurrentImage(e), *e.src);
+}
+
 void Close(Editor& e) {
     if (e.dirty && !e.shapes.empty()) {
         const int a = MessageBoxW(e.hwnd, L"Close without saving or copying your edits?", L"Canivete Editor",
@@ -1063,6 +1078,7 @@ void Click(Editor& e, const ItemRect& it) {
     case Item::Redo: Redo(e); break;
     case Item::Copy: CopyNow(e); break;
     case Item::Save: SaveNow(e); break;
+    case Item::Alpha: MakeAlpha(e); break;
     case Item::Done: Done(e); return;
     }
     Redraw(e);
@@ -1290,6 +1306,9 @@ void OnKey(Editor& e, UINT vk) {
             s.a = G::PointF(s.a.X + dx, s.a.Y + dy);
             s.b = G::PointF(s.b.X + dx, s.b.Y + dy);
         });
+    } else if (vk == 'M') {
+        MakeAlpha(e);
+        return;
     } else if (vk >= '1' && vk < '1' + kColorCount) {
         SetColor(e, static_cast<int>(vk - '1'));
     } else if (vk == VK_OEM_4) {

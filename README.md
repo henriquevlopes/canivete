@@ -22,8 +22,7 @@ Plan and research notes: [PLAN.md](PLAN.md).
 
 | Hotkey | Action |
 |---|---|
-| Ctrl+PrtSc | Region: drag a box, or click a highlighted window / monitor. Esc cancels, arrows nudge 1 px (Shift = 10), right-click drops a drag |
-| Alt+PrtSc | The window under the mouse (the whole monitor over the desktop or taskbar) |
+| Ctrl+PrtSc | Region: drag a box, or click the highlighted window / monitor under the mouse to take just that (no separate window hotkey needed). Esc cancels, arrows nudge 1 px (Shift = 10), right-click drops a drag |
 | PrtSc | All monitors (or the one under the mouse, see settings) |
 | Win+C | Color picker: the screen freezes, a magnifier follows the mouse. Click, Enter or Space copies the color; Esc or right-click cancels; arrows nudge |
 | Ctrl+Shift+PrtSc | Record a GIF: pick an area like a region screenshot; press again (or Stop) to finish |
@@ -64,6 +63,15 @@ any shape. A selected shape can be dragged (Shift = straight), resized by its ha
 markers stretch from a corner), nudged with the arrow keys (Shift = 10 px), recolored or resized
 with the color and size buttons / keys / wheel, and removed with Delete; Esc unselects. Clicking a
 text with the Text tool, or double-clicking it with any tool, retypes it. Every change is one undo step.
+
+Make alpha (editor α button, or M): turns the screenshot into a square alpha for Substance Painter,
+details white on a black background. Drag on the picture to draw a mask around exactly what you
+want (several masks add up; outside goes dark); click a detail's color to pick it (up to 8), right-click
+the background color. With no clicks it guesses from the most common color. Buttons: Less / More
+detail (or the wheel, + / -), Sharper / Softer (`[` `]`), Invert (I), Size (auto picks 512-4096 from
+the detail size; the choice is remembered), Start over (Backspace), Copy (Ctrl+C), Save (Enter or
+Ctrl+S: `<capture name> alpha.png` in the screenshots folder, also copied). Ctrl+Z undoes the last
+pick or mask, Esc closes.
 
 Right-click menu: select files or folders in Explorer, right-click > Show more options > Canivete.
 On images:
@@ -108,7 +116,8 @@ digits needed (01 for up to 99 items, 001 above). Delete removes a row from the 
 All renames are one Windows operation, so Ctrl+Z in Explorer undoes the whole batch.
 
 Command line: `Canivete.exe --region | --window | --full | --color | --settings` acts in the running copy.
-`Canivete.exe --edit image.png` opens any image in the editor.
+`Canivete.exe --edit image.png` opens any image in the editor; `--alpha image.png` opens Make alpha.
+`Canivete.exe --alpha-bench in.png out.png [x y]... [box x y w h]` makes an alpha with no window (test).
 `Canivete.exe --resize a.jpg b.png folder` opens the resizer with those files (each copy hands its
 files to the running one, so Explorer's one-copy-per-file launch ends in one window).
 `Canivete.exe --rename a.txt folder` opens the renamer the same way.
@@ -139,4 +148,5 @@ Builds Release, installs to `%LOCALAPPDATA%\Programs\Canivete\Canivete.exe` and 
 - `src/renamer.cpp` — renamer window, live preview, regex/counter/date tokens, IFileOperation rename with undo
 - `src/gif.cpp` — GIF encoder: recording file, palette (exact colors or Wu + k-means), LZW, changed-area frames, presets
 - `src/recorder.cpp` — GIF recording border and bar, 25 fps capture thread, Save GIF window
+- `src/alpha.cpp` — Make alpha window: freehand mask, detail/background picks, threshold engine, square power-of-two output
 - `src/shell.cpp` — Explorer right-click Canivete submenu (image actions, Rename) and Send to shortcuts

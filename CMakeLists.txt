@@ -19,6 +19,7 @@ add_executable(Canivete WIN32
     src/shell.cpp
     src/gif.cpp
     src/recorder.cpp
+    src/alpha.cpp
     res/canivete.rc
     res/app.manifest
 )

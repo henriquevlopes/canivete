@@ -54,7 +54,6 @@ Default hotkeys (changeable):
 | Action | Hotkey |
 |---|---|
 | Region screenshot | Ctrl+PrtSc |
-| Window screenshot | Alt+PrtSc |
 | Full-screen screenshot | PrtSc |
 | Record MP4 (press again = stop) | Shift+PrtSc |
 | Record GIF (press again = stop) | Ctrl+Shift+PrtSc |

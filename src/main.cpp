@@ -145,7 +145,6 @@ std::wstring RegisterHotkeys() {
         const wchar_t* name;
     } const list[] = {
         {CaptureMode::Region, &g_settings.hkRegion, L"Region screenshot"},
-        {CaptureMode::Window, &g_settings.hkWindow, L"Window screenshot"},
         {CaptureMode::Full, &g_settings.hkFull, L"Full screenshot"},
         {CaptureMode::Color, &g_settings.hkColor, L"Color picker"},
         {CaptureMode::Gif, &g_settings.hkGif, L"Record GIF"},
@@ -241,7 +240,6 @@ void ShowMenu() {
         AppendMenuW(m, MF_STRING, id, s.c_str());
     };
     item(ID_REGION, L"Region screenshot", g_settings.hkRegion);
-    item(ID_WINDOW, L"Window screenshot", g_settings.hkWindow);
     item(ID_FULL, L"Full screenshot", g_settings.hkFull);
     item(ID_GIF, Recorder_Active() ? L"Stop GIF recording" : L"Record GIF", g_settings.hkGif);
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
@@ -411,6 +409,7 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (HWND w = SettingsUI_Window()) DestroyWindow(w);
         if (HWND w = Resizer_Window()) DestroyWindow(w);
         if (HWND w = Renamer_Window()) DestroyWindow(w);
+        if (HWND w = Alpha_Window()) DestroyWindow(w);
         Recorder_Shutdown();
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         for (int id = 1; id <= kHotkeyCount; ++id) UnregisterHotKey(h, id);
@@ -451,6 +450,24 @@ int RunEditor(const wchar_t* file) {
     GetCursorPos(&p);
     r->screenRect = {p.x, p.y, p.x + 1, p.y + 1};
     Editor_Open(r, file);
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    CoUninitialize();
+    return 0;
+}
+
+// Opens an image file in the Make alpha window, in this process, and exits when it closes.
+int RunAlpha(const wchar_t* file) {
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    LoadSettings();
+    Output_Init();
+    CaptureResult meta;
+    if (!LoadImageFile(file, meta.img)) return 2;
+    Alpha_Open(meta.img, meta);
+    if (!Alpha_Window()) return 3;
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         TranslateMessage(&msg);
@@ -510,6 +527,22 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
         }
         if (!_wcsicmp(argv[1], L"--grab") && argc >= 3) return RunGrabTest(argv[2]);
         if (!_wcsicmp(argv[1], L"--edit") && argc >= 3) return RunEditor(argv[2]);
+        if (!_wcsicmp(argv[1], L"--alpha") && argc >= 3) return RunAlpha(argv[2]);
+        if (!_wcsicmp(argv[1], L"--alpha-bench") && argc >= 4) {  // in out [x y]... [box x y w h]
+            std::vector<POINT> picks;
+            RECT box{};
+            for (int i = 4; i + 1 < argc; i += 2) {
+                if (!_wcsicmp(argv[i], L"box") && i + 4 < argc) {
+                    box = {_wtoi(argv[i + 1]), _wtoi(argv[i + 2]), _wtoi(argv[i + 1]) + _wtoi(argv[i + 3]),
+                           _wtoi(argv[i + 2]) + _wtoi(argv[i + 4])};
+                    break;
+                }
+                picks.push_back({_wtoi(argv[i]), _wtoi(argv[i + 1])});
+            }
+            CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            LoadSettings();
+            return Alpha_Bench(argv[2], argv[3], picks, box);
+        }
         if (!_wcsicmp(argv[1], L"--region")) cmd = static_cast<UINT>(CaptureMode::Region);
         else if (!_wcsicmp(argv[1], L"--window")) cmd = static_cast<UINT>(CaptureMode::Window);
         else if (!_wcsicmp(argv[1], L"--full")) cmd = static_cast<UINT>(CaptureMode::Full);

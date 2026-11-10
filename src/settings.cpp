@@ -141,7 +141,7 @@ void LoadSettings() {
     }
     Settings s;
     s.hkRegion = ReadStr(L"Hotkeys", L"RegionScreenshot", L"Ctrl+PrintScreen");
-    s.hkWindow = ReadStr(L"Hotkeys", L"WindowScreenshot", L"Alt+PrintScreen");
+    s.hkWindow = ReadStr(L"Hotkeys", L"WindowScreenshot", L"None");
     s.hkFull = ReadStr(L"Hotkeys", L"FullScreenshot", L"PrintScreen");
     s.hkColor = ReadStr(L"Hotkeys", L"ColorPicker", L"Win+C");
     s.hkGif = ReadStr(L"Hotkeys", L"RecordGif", L"Ctrl+Shift+PrintScreen");
