@@ -12,7 +12,8 @@ if (-not (Test-Path "$root\build\Canivete.sln") -and -not (Test-Path "$root\buil
 if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 
 Get-Process Canivete -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Milliseconds 300
+Get-Process Canivete -ErrorAction SilentlyContinue | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 500  # the file lock outlives the process briefly
 New-Item -ItemType Directory -Force $dest | Out-Null
 Copy-Item "$root\build\Release\Canivete.exe" $dest -Force
 Start-Process "$dest\Canivete.exe"
