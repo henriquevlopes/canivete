@@ -10,13 +10,21 @@
 
 #include <commctrl.h>
 #include <objbase.h>
+#include <objidl.h>  // GDI+ needs IStream, which WIN32_LEAN_AND_MEAN leaves out
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <uxtheme.h>
 #include <windowsx.h>
 
 #include <algorithm>
+namespace Gdiplus {
+using std::max;
+using std::min;
+}  // namespace Gdiplus
+#include <gdiplus.h>
 #include <cmath>
 #include <ctime>
+#include <map>
 #include <memory>
 #include <set>
 #include <thread>
@@ -85,7 +93,13 @@ enum : int {
     IDC_APREFRESH,
     IDC_APSETTINGS,
     IDC_APUNINSTALL,
+    IDC_JOBTEXT = 200,  // the job panel: one line of text, the progress bar, Cancel / Close
+    IDC_JOBBAR,
+    IDC_JOBCANCEL,
 };
+constexpr int kPanel = -2;     // Ctl::tab of the job panel's controls: shown on the job's tab
+constexpr int kPanelH = 52;    // its height (96-DPI pixels), taken from the bottom of the tab's content
+constexpr wchar_t kBarClass[] = L"CaniveteMaintBar";
 
 enum FontKind : int { kFontNormal, kFontBold, kFontTitle };
 
@@ -113,7 +127,30 @@ struct ScanResult {
     std::vector<StartupItem> startup;
     OverviewData ov;
     std::vector<InstalledApp> apps;
+    Health health;        // the Health tab
+    bool reboot = false;  // after an updates check: Windows waits for a restart
 };
+
+// The one job that may run at a time (installing, cleaning, …). Its panel (a line of text, the
+// progress bar and Cancel) shows on its tab; after the job it shows the result until closed.
+struct JobState {
+    int tab = -1;            // the tab showing the panel; -1 = no panel
+    bool running = false;
+    bool admin = false;      // runs in the elevated copy
+    bool cancellable = false, cancelling = false;
+    bool wasFront = false;   // the window was in front when the job started
+    bool locked = false;     // LockSetForegroundWindow is on (other apps can't jump in front)
+    std::wstring task, name; // name: the app being uninstalled
+    int pct = -1;            // thousandths of the whole job; -1 = no number known (moving bar)
+    int step = 0, steps = 0;
+    std::wstring stepKey, stepWhat;
+    ULONGLONG freed = 0;
+    bool haveFreed = false;
+    std::vector<std::wstring> ok, failed, skipped;    // item keys, as they ended
+    std::map<std::wstring, std::wstring> itemText;    // key -> its row's last text
+    std::wstring text;       // the panel's line
+    int outcome = 0;         // when it ended: 0 fine, 1 problems, 2 stopped or not allowed
+} J;
 // The daily check, done in the background without the window.
 struct BgResult {
     UpdateScan up;
@@ -131,10 +168,10 @@ struct UI {
     std::vector<Ctl> ctls;
     int tab = 0;
     WORD gen = 0;  // a new number each time the window opens: results for an older window are dropped
-    bool busy[kTabCount]{};
+    bool busy[kTabCount]{};  // a check (scan) is running for the tab; jobs are in J
     bool scanned[kTabCount]{};
-    bool adminBusy = false;
-    int adminTab = -1;
+    HANDLE cancel = nullptr;           // the named event Cancel sets (see CancelEventName)
+    ITaskbarList3* taskbar = nullptr;  // progress on the taskbar button
     bool filling = false;     // lists being filled: ignore check changes
     bool rebootNeeded = false;
     bool logPartial = false;  // the log's last line is a progress line the next one replaces
@@ -252,6 +289,10 @@ void Build() {
     HWND log = Add(WC_EDITW, L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_TABSTOP, IDC_HELOG,
                    kHealth, WS_EX_CLIENTEDGE);
     SendMessageW(log, EM_SETLIMITTEXT, 1 << 20, 0);
+
+    Static(IDC_JOBTEXT, L"", kPanel, SS_LEFT | SS_ENDELLIPSIS);
+    Add(kBarClass, L"", 0, IDC_JOBBAR, kPanel);
+    Button(IDC_JOBCANCEL, L"Cancel", kPanel);
 }
 
 // Round colored dots for the Overview rows, drawn smooth at this DPI.
@@ -334,15 +375,25 @@ void Layout() {
         }
         put(IDC_STATUS0 + t, L, by + 5, x - L - 8, 20);
     };
+    // The job panel sits above the footer of its tab; that tab's content ends higher.
+    auto ph = [](int t) { return J.tab == t ? kPanelH : 0; };
+    if (J.tab >= 0) {
+        const int P = by - kPanelH;
+        const bool btn = !J.running || J.cancellable;
+        const int tw = btn ? CW - 120 : CW;
+        put(IDC_JOBTEXT, L, P + 2, tw, 20);
+        put(IDC_JOBBAR, L, P + 28, tw, 10);
+        put(IDC_JOBCANCEL, R - 108, P + 8, 108, 28);
+    }
     // Overview, Installed apps
     footer(kOverview, {{IDC_OVDO, 170}, {IDC_OVCHECK, 140}});
-    put(IDC_LIST0 + kOverview, L, top, CW, by - 12 - top);
+    put(IDC_LIST0 + kOverview, L, top, CW, by - 12 - top - ph(kOverview));
     footer(kApps, {{IDC_APUNINSTALL, 110}, {IDC_APSETTINGS, 170}, {IDC_APREFRESH, 100}});
     put(IDC_APSEARCH, L, top, 280, 24);
-    put(IDC_LIST0 + kApps, L, top + 32, CW, by - 12 - top - 32);
+    put(IDC_LIST0 + kApps, L, top + 32, CW, by - 12 - top - 32 - ph(kApps));
     // Updates
     footer(kUpdates, {{IDC_UPINSTALL, 130}, {IDC_UPSTORE, 180}, {IDC_UPCHECK, 110}});
-    const int rowY = by - 38;
+    const int rowY = by - 38 - ph(kUpdates);
     put(IDC_UPRESTORE, L, rowY + 3, 240, 22);
     put(IDC_UPREBOOTBTN, R - 128, rowY, 128, 28);
     put(IDC_UPREBOOT, L + 250, rowY + 5, R - 136 - L - 250 - 8, 20);
@@ -352,9 +403,9 @@ void Layout() {
     put(IDC_LIST0 + kUpdates, L, top, CW, gpuY - 8 - top);
     // Cleanup, Startup
     footer(kCleanup, {{IDC_CLRUN, 130}, {IDC_CLSTORAGE, 190}, {IDC_CLMEASURE, 130}});
-    put(IDC_LIST0 + kCleanup, L, top, CW, by - 12 - top);
+    put(IDC_LIST0 + kCleanup, L, top, CW, by - 12 - top - ph(kCleanup));
     footer(kStartup, {{IDC_STAPPLY, 130}, {IDC_STTASKMGR, 150}, {IDC_STREFRESH, 100}});
-    put(IDC_LIST0 + kStartup, L, top, CW, by - 12 - top);
+    put(IDC_LIST0 + kStartup, L, top, CW, by - 12 - top - ph(kStartup));
     // Health
     footer(kHealth, {});
     put(IDC_HEINFO, L, top, CW, 96);
@@ -364,7 +415,7 @@ void Layout() {
         put(id, x, top + 104, w, 28);
         x += w + 8;
     }
-    put(IDC_HELOG, L, top + 144, CW, by - 12 - top - 144);
+    put(IDC_HELOG, L, top + 144, CW, by - 12 - top - 144 - ph(kHealth));
     if (d) EndDeferWindowPos(d);
     SendMessageW(U.nav, LB_SETITEMHEIGHT, 0, Px(kNavItem));
 
@@ -392,27 +443,38 @@ void Layout() {
 
 // ---- tab state ---------------------------------------------------------------------------
 
+// One job at a time: while one runs, every button that starts a job is off, and so is the check of
+// the job's own tab (its list must stay as the job knows it). Checks of other tabs still work.
 void UpdateButtons() {
-    const bool up = !U.busy[kUpdates], cl = !U.busy[kCleanup], st = !U.busy[kStartup], he = !U.busy[kHealth];
-    for (int id : {IDC_UPCHECK, IDC_UPINSTALL, IDC_UPRESTORE}) EnableWindow(Item(id), up);
-    EnableWindow(Item(IDC_UPINSTALL), up && U.scanned[kUpdates]);
-    for (int id : {IDC_CLMEASURE, IDC_CLRUN}) EnableWindow(Item(id), cl);
-    for (int id : {IDC_STREFRESH, IDC_STAPPLY}) EnableWindow(Item(id), st);
-    for (int id : {IDC_HEREPAIR, IDC_HEOPT, IDC_HERESTORE, IDC_HESCAN}) EnableWindow(Item(id), he);
+    const bool job = J.running;
+    auto idle = [&](int t) { return !U.busy[t] && !(job && J.tab == t); };  // the tab's check may run
+    EnableWindow(Item(IDC_UPCHECK), idle(kUpdates));
+    EnableWindow(Item(IDC_UPRESTORE), idle(kUpdates));
+    EnableWindow(Item(IDC_UPINSTALL), idle(kUpdates) && !job && U.scanned[kUpdates]);
+    EnableWindow(Item(IDC_CLMEASURE), idle(kCleanup));
+    EnableWindow(Item(IDC_CLRUN), idle(kCleanup) && !job);
+    EnableWindow(Item(IDC_STREFRESH), idle(kStartup));
+    EnableWindow(Item(IDC_STAPPLY), idle(kStartup) && !job);
+    for (int id : {IDC_HEREPAIR, IDC_HEOPT, IDC_HERESTORE, IDC_HESCAN}) EnableWindow(Item(id), !job);
     EnableWindow(Item(IDC_OVCHECK), !U.busy[kOverview]);
     const int ov = ListView_GetNextItem(List(kOverview), -1, LVNI_SELECTED);
-    const bool can = ov >= 0 && ov < static_cast<int>(U.ovRows.size()) && !U.ovRows[ov].todo.empty();
+    const bool can = ov >= 0 && ov < static_cast<int>(U.ovRows.size()) && !U.ovRows[ov].todo.empty() &&
+                     !(job && U.ovRows[ov].key == L"scan");
     EnableWindow(Item(IDC_OVDO), can);
-    SetText(IDC_OVDO, can ? U.ovRows[ov].todo : L"Do it");
-    EnableWindow(Item(IDC_APREFRESH), !U.busy[kApps]);
-    EnableWindow(Item(IDC_APUNINSTALL), !U.busy[kApps] && ListView_GetNextItem(List(kApps), -1, LVNI_SELECTED) >= 0);
+    SetText(IDC_OVDO, ov >= 0 && ov < static_cast<int>(U.ovRows.size()) && !U.ovRows[ov].todo.empty() ? U.ovRows[ov].todo : L"Do it");
+    EnableWindow(Item(IDC_APREFRESH), idle(kApps));
+    EnableWindow(Item(IDC_APUNINSTALL), idle(kApps) && !job && ListView_GetNextItem(List(kApps), -1, LVNI_SELECTED) >= 0);
+    // The panel's button: Cancel while a job that can stop runs, Close once it has ended.
+    SetText(IDC_JOBCANCEL, J.running ? (J.cancelling ? L"Stopping…" : L"Cancel") : L"Close");
+    EnableWindow(Item(IDC_JOBCANCEL), !J.running || (J.cancellable && !J.cancelling));
 }
 
 void ShowTab(int t) {
     U.tab = g_lastTab = std::clamp(t, 0, kTabCount - 1);
     for (const Ctl& c : U.ctls) {
-        bool show = c.tab < 0 || c.tab == U.tab;
+        bool show = c.tab == -1 || c.tab == U.tab;
         const int id = GetDlgCtrlID(c.wnd);
+        if (c.tab == kPanel) show = J.tab >= 0 && J.tab == U.tab && (id != IDC_JOBCANCEL || !J.running || J.cancellable);
         if ((id == IDC_UPREBOOT || id == IDC_UPREBOOTBTN) && !U.rebootNeeded) show = false;
         if ((id == IDC_UPGPU || id == IDC_UPGPUBTN) && U.up.gpus.empty()) show = false;
         if (id == IDC_UPGPUBTN && (U.up.gpus.empty() || U.up.gpus[0].open.empty())) show = false;
@@ -559,8 +621,13 @@ std::wstring Duration(ULONGLONG ms) {
     return std::to_wstring(ms / 60000) + L" minutes";
 }
 
+// From U.health, which a check reads on a worker thread (asking Windows Update whether a restart is
+// pending can take long while it is busy installing, and the window must keep answering).
 void FillHealth() {
-    U.health = ReadHealth();
+    if (!U.scanned[kHealth]) {
+        SetText(IDC_HEINFO, L"Reading…");
+        return;
+    }
     const Health& h = U.health;
     const ULONGLONG days = h.uptimeMs / 86400000;
     const DWORD mem = h.mem.dwMemoryLoad;
@@ -853,11 +920,7 @@ WPARAM Tag(int t) { return MAKEWPARAM(t, U.gen); }
 
 void StartScan(int t) {
     if (U.busy[t]) return;
-    if (t == kHealth) {
-        FillHealth();
-        U.scanned[t] = true;
-        return;
-    }
+    if (J.running && J.tab == t && t != kHealth && t != kOverview) return;  // the job's list stays as it is
     if (t == kUpdates && g_bgBusy) {  // the daily check is running: its results come here too
         U.busy[t] = U.waitBg = true;
         UpdateButtons();
@@ -870,6 +933,7 @@ void StartScan(int t) {
                  : t == kCleanup  ? L"Measuring…"
                  : t == kStartup  ? L"Reading startup apps…"
                  : t == kApps     ? L"Reading installed apps…"
+                 : t == kHealth   ? L""
                                   : L"Checking…");
     HWND w = U.hwnd;
     const WPARAM tag = Tag(t);
@@ -880,6 +944,9 @@ void StartScan(int t) {
             r->up = ScanUpdates([w, tag](const std::wstring& k, const std::wstring& s) {
                 PostOrDelete(w, WM_M_PROGRESS, tag, new Progress{k, s});
             });
+            r->reboot = RebootPending();
+        } else if (t == kHealth) {
+            r->health = ReadHealth();
         } else if (t == kCleanup) {
             r->clean = ScanCleanup();
         } else if (t == kStartup) {
@@ -906,8 +973,11 @@ void OnScan(int t, std::unique_ptr<ScanResult> r) {
         U.up = std::move(r->up);
         FillUpdates();
         SaveCounts(U.up);
-        if (RebootPending()) U.rebootNeeded = true;
+        if (r->reboot) U.rebootNeeded = true;
         ShowTab(U.tab);
+    } else if (t == kHealth) {
+        U.health = std::move(r->health);
+        FillHealth();
     } else if (t == kCleanup) {
         U.clean = std::move(r->clean);
         FillCleanup();
@@ -925,29 +995,242 @@ void OnScan(int t, std::unique_ptr<ScanResult> r) {
     UpdateButtons();
 }
 
+void FillColor(HDC dc, const RECT& r, COLORREF c) {
+    SetDCBrushColor(dc, c);
+    FillRect(dc, &r, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+}
+
+// ---- the job panel -----------------------------------------------------------------------
+
+// The name a job's item key stands for in its tab's list ("" if none).
+std::wstring ItemName(int t, const std::wstring& key) {
+    if (key.empty()) return L"";
+    if (t == kUpdates) {
+        for (const UpdateItem& u : U.up.items)
+            if (u.key == key) return u.name;
+    } else if (t == kCleanup) {
+        for (const CleanItem& c : U.clean)
+            if (c.key == key) return c.name;
+    } else if (t == kStartup) {
+        for (const StartupItem& s : U.startup)
+            if (s.key == key) return s.name;
+    }
+    return L"";
+}
+
+// "Name (why), Name, Name and 2 more"
+std::wstring NameList(const std::vector<std::wstring>& keys, bool why) {
+    std::wstring s;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (i == 3) {
+            s += L" and " + std::to_wstring(keys.size() - 3) + L" more";
+            break;
+        }
+        std::wstring n = ItemName(J.tab, keys[i]);
+        if (n.empty()) n = keys[i];
+        if (why) {
+            const auto it = J.itemText.find(keys[i]);
+            if (it != J.itemText.end() && !it->second.empty()) n += L" (" + it->second + L")";
+        }
+        s += (i ? L", " : L"") + n;
+    }
+    return s;
+}
+
+// The panel's line while the job runs: "2 of 6:  Firefox  —  Downloading 45%  ·  38%".
+std::wstring RunningText() {
+    std::wstring s;
+    if (J.step > 0 && J.steps > 1) s = std::to_wstring(J.step) + L" of " + std::to_wstring(J.steps) + L":  ";
+    const std::wstring name = ItemName(J.tab, J.stepKey);
+    if (!name.empty()) s += name + (J.stepWhat.empty() ? L"" : L"  —  " + J.stepWhat);
+    else s += J.stepWhat;
+    if (J.stepWhat.empty() && name.empty()) s = J.text;
+    if (J.haveFreed) s += L"  ·  " + SizeText(J.freed) + L" freed so far";
+    if (J.pct >= 0) s += L"  ·  " + std::to_wstring(J.pct / 10) + L"%";
+    if (J.cancelling) s = L"Stopping after this one…   " + s;
+    return s;
+}
+
+// The result line once the job has ended; sets J.outcome.
+std::wstring ResultText(LPARAM code) {
+    if (code == kDeclined) {
+        J.outcome = 2;
+        return L"Not started: Windows didn't get permission to make changes.";
+    }
+    if (code == kNoStart) {
+        J.outcome = 2;
+        return L"Couldn't start the job with administrator rights.";
+    }
+    std::vector<std::wstring> ok = J.ok, failed = J.failed, skipped = J.skipped;
+    auto drop = [](std::vector<std::wstring>& v, const wchar_t* k) {
+        const auto it = std::find(v.begin(), v.end(), k);
+        if (it == v.end()) return false;
+        v.erase(it);
+        return true;
+    };
+    const bool restoreFailed = J.task == L"install" && drop(failed, L"restore");
+    drop(ok, L"restore");
+    drop(skipped, L"restore");
+    const bool stopped = J.cancelling && !skipped.empty();
+    J.outcome = stopped ? 2 : (!failed.empty() || restoreFailed || code != 0) ? 1 : 0;
+    const long long n = static_cast<long long>(ok.size() + failed.size() + skipped.size());
+    const long long nOk = static_cast<long long>(ok.size()), nFail = static_cast<long long>(failed.size()),
+                    nSkip = static_cast<long long>(skipped.size());
+    const bool good = code == 0;
+    std::wstring s;
+    if (J.task == L"install") {
+        if (n == 0) {
+            s = good ? L"Finished." : L"Finished, with problems: see the Status column.";
+        } else if (!nFail && !nSkip) {
+            s = n == 1 ? NameList(ok, false) + L" updated." : L"All " + std::to_wstring(n) + L" updated.";
+        } else {
+            s = std::to_wstring(nOk) + L" of " + std::to_wstring(n) + L" updated";
+            if (nFail) s += L", " + std::to_wstring(nFail) + L" failed: " + NameList(failed, true);
+            if (nSkip) s += (nFail ? L";  " : L", ") + std::to_wstring(nSkip) + L" not started";
+            s += L".";
+            if (stopped) s = L"Stopped: " + s;
+        }
+        if (restoreFailed) s += L"  No restore point was made.";
+        if (U.rebootNeeded) s += L"  Restart to finish.";
+    } else if (J.task == L"clean") {
+        s = (stopped ? L"Stopped. Freed " : L"Freed ") + SizeText(J.freed) + L".";
+        if (nFail) s += L"  Couldn't clean: " + NameList(failed, true) + L".";
+        if (nSkip) s += L"  " + Plural(nSkip, L"place", L"places") + L" not cleaned.";
+    } else if (J.task == L"startup") {
+        s = !nFail ? Plural(nOk, L"change applied.", L"changes applied.")
+                   : std::to_wstring(nOk) + L" of " + Plural(n, L"change", L"changes") + L" applied; failed: " +
+                         NameList(failed, true) + L".";
+    } else if (J.task == L"repair") {
+        if (J.cancelling && std::find(J.skipped.begin(), J.skipped.end(), L"sfc") != J.skipped.end()) {
+            J.outcome = 2;
+            s = L"Stopped: the Windows image was repaired, the system file check didn't run.";
+        } else {
+            s = good ? L"Repair finished." : L"Repair finished, with problems: see the log below.";
+        }
+        if (U.rebootNeeded) s += L"  Restart to finish.";
+    } else if (J.task == L"optimize") {
+        s = good ? L"Drives optimized." : L"Optimizing finished, with problems: see the log below.";
+    } else if (J.task == L"scan") {
+        s = good ? L"Virus scan finished." : L"Virus scan finished: see the log below.";
+    } else if (J.task == L"restore") {
+        s = good ? L"Restore point made." : L"The restore point couldn't be made: see the log below.";
+    } else if (J.task == L"uninstall") {
+        J.outcome = 0;
+        s = J.name + L": its uninstaller has closed.";
+    } else {
+        s = good ? L"Finished." : L"Finished, with problems.";
+    }
+    return s;
+}
+
+void JobFont(bool bold) {
+    for (Ctl& c : U.ctls)
+        if (GetDlgCtrlID(c.wnd) == IDC_JOBTEXT) c.font = bold ? kFontBold : kFontNormal;
+    SendMessageW(Item(IDC_JOBTEXT), WM_SETFONT, reinterpret_cast<WPARAM>(bold ? U.bold : U.font), TRUE);
+}
+
+// Progress on the taskbar button too, so it shows while the window is behind other apps.
+void TaskbarShow() {
+    if (!U.taskbar || !U.hwnd) return;
+    if (J.running) {
+        if (J.pct < 0) {
+            U.taskbar->SetProgressState(U.hwnd, TBPF_INDETERMINATE);
+        } else {
+            U.taskbar->SetProgressState(U.hwnd, TBPF_NORMAL);
+            U.taskbar->SetProgressValue(U.hwnd, static_cast<ULONGLONG>(J.pct), 1000);
+        }
+    } else if (J.tab >= 0 && J.outcome != 0) {
+        U.taskbar->SetProgressState(U.hwnd, J.outcome == 1 ? TBPF_ERROR : TBPF_PAUSED);
+        U.taskbar->SetProgressValue(U.hwnd, J.pct >= 0 ? static_cast<ULONGLONG>(J.pct) : 1000, 1000);
+    } else {
+        U.taskbar->SetProgressState(U.hwnd, TBPF_NOPROGRESS);
+    }
+}
+
+// While a job runs and the window is in front, other apps (an installer, the elevated copy) can't
+// pull the foreground away; a click by the user still switches as usual.
+void LockFront() {
+    if (J.locked || !J.wasFront || GetForegroundWindow() != U.hwnd) return;
+    J.locked = LockSetForegroundWindow(LSFW_LOCK) != FALSE;
+}
+void UnlockFront() {
+    if (!J.locked) return;
+    LockSetForegroundWindow(LSFW_UNLOCK);
+    J.locked = false;
+}
+
+constexpr UINT_PTR kMarqueeTimer = 1;
+
+// Something about the job changed: the line, the bar, the tab list and the taskbar follow.
+void JobChanged() {
+    if (J.tab < 0) return;
+    SetText(IDC_JOBTEXT, J.running ? RunningText() : J.text);
+    if (HWND bar = Item(IDC_JOBBAR)) {
+        if (J.running && J.pct < 0) SetTimer(bar, kMarqueeTimer, 30, nullptr);
+        else KillTimer(bar, kMarqueeTimer);
+        InvalidateRect(bar, nullptr, FALSE);
+    }
+    TaskbarShow();
+    InvalidateRect(U.nav, nullptr, FALSE);
+}
+
+// Starts the panel for a new job; false (with a note) while another job runs.
+bool BeginJob(int t, const std::wstring& task, bool admin) {
+    if (J.running) {
+        SetStatus(t, std::wstring(L"Wait for the job on the ") + kTabs[J.tab].name + L" tab to finish first.");
+        return false;
+    }
+    J = JobState{};
+    J.tab = t;
+    J.running = true;
+    J.admin = admin && !IsElevated();
+    J.task = task;
+    J.cancellable = task == L"install" || task == L"clean" || task == L"repair";
+    J.wasFront = GetForegroundWindow() == U.hwnd;
+    J.text = J.admin ? L"Waiting for permission (the Windows prompt)…" : L"Starting…";
+    if (!U.cancel) U.cancel = CreateEventW(nullptr, TRUE, FALSE, CancelEventName(GetCurrentProcessId()).c_str());
+    else ResetEvent(U.cancel);
+    SetCancelEvent(U.cancel);
+    JobFont(false);
+    Layout();
+    ShowTab(U.tab);
+    JobChanged();
+    UpdateButtons();
+    return true;
+}
+
+// The panel's Close button (after the job): the tab gets its full height back.
+void ClosePanel() {
+    if (J.running) return;
+    KillTimer(Item(IDC_JOBBAR), kMarqueeTimer);
+    J = JobState{};
+    Layout();
+    ShowTab(U.tab);
+    TaskbarShow();
+    UpdateButtons();
+    InvalidateRect(U.nav, nullptr, FALSE);
+}
+
 // Runs a job: here on a worker thread, or in an elevated copy when it needs administrator rights.
-void StartTask(int t, const std::wstring& task, const std::vector<std::wstring>& args, bool admin) {
-    if (U.busy[t]) return;
+// The window stays as it is meanwhile: nothing here waits for the job.
+bool StartTask(int t, const std::wstring& task, const std::vector<std::wstring>& args, bool admin) {
+    if (!BeginJob(t, task, admin)) return false;
     HWND w = U.hwnd;
     const WPARAM tag = Tag(t);
-    if (admin && !IsElevated()) {
-        if (U.adminBusy) {
-            SetStatus(t, L"Another job with administrator rights is still running. Try again when it's done.");
-            return;
-        }
-        U.adminBusy = true;
-        U.adminTab = t;
+    if (J.admin) {
         std::wstring params = L"--maint-admin " + std::to_wstring(reinterpret_cast<UINT_PTR>(w)) + L" " + task;
         for (const auto& a : args) params += L" " + QuoteArg(a);
         SetStatus(t, L"Waiting for permission (the Windows prompt)…");
-        std::thread([w, tag, params] {
+        // Test copies with simulated jobs start the helper copy without the prompt.
+        const bool fake = FakeMode();
+        std::thread([w, tag, params, fake] {
             CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
             wchar_t exe[MAX_PATH];
             GetModuleFileNameW(nullptr, exe, MAX_PATH);
             SHELLEXECUTEINFOW sei{sizeof(sei)};
             sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
             sei.hwnd = w;
-            sei.lpVerb = L"runas";
+            sei.lpVerb = fake ? L"open" : L"runas";
             sei.lpFile = exe;
             sei.lpParameters = params.c_str();
             sei.nShow = SW_HIDE;
@@ -967,6 +1250,7 @@ void StartTask(int t, const std::wstring& task, const std::vector<std::wstring>&
             PostMessageW(w, WM_M_DONE, tag, code);
         }).detach();
     } else {
+        LockFront();
         std::thread([w, tag, task, args] {
             const int code = RunTask(task, args, [w, tag](const std::wstring& k, const std::wstring& s) {
                 PostOrDelete(w, WM_M_PROGRESS, tag, new Progress{k, s});
@@ -974,8 +1258,7 @@ void StartTask(int t, const std::wstring& task, const std::vector<std::wstring>&
             PostMessageW(w, WM_M_DONE, tag, code);
         }).detach();
     }
-    U.busy[t] = true;
-    UpdateButtons();
+    return true;
 }
 
 void LogLine(const std::wstring& text, bool progress) {
@@ -995,16 +1278,59 @@ void LogLine(const std::wstring& text, bool progress) {
 }
 
 void OnProgress(int t, const std::wstring& key, const std::wstring& text) {
+    const bool job = J.running && t == J.tab;
+    if (job) {
+        if (key == L"pct") {
+            J.pct = std::clamp(_wtoi(text.c_str()), -1, 1000);
+            JobChanged();
+            return;
+        }
+        if (key == L"step") {  // "<i>|<n>|<key>|<what>"
+            const size_t a = text.find(L'|'), b = a == std::wstring::npos ? a : text.find(L'|', a + 1),
+                         c = b == std::wstring::npos ? b : text.find(L'|', b + 1);
+            if (c != std::wstring::npos) {
+                J.step = _wtoi(text.c_str());
+                J.steps = _wtoi(text.c_str() + a + 1);
+                J.stepKey = text.substr(b + 1, c - b - 1);
+                J.stepWhat = text.substr(c + 1);
+                JobChanged();
+            }
+            return;
+        }
+        if (key == L"freed") {
+            J.freed = _wcstoui64(text.c_str(), nullptr, 10);
+            J.haveFreed = true;
+            JobChanged();
+            return;
+        }
+        if (key == L"ok" || key == L"fail" || key == L"skip") {
+            (key == L"ok" ? J.ok : key == L"fail" ? J.failed : J.skipped).push_back(text);
+            return;
+        }
+        if (key == L"hello") {  // the elevated copy runs: the prompt has closed
+            if (J.wasFront) SetForegroundWindow(U.hwnd);
+            LockFront();
+            J.text = L"Starting…";
+            SetStatus(t, L"");
+            JobChanged();
+            return;
+        }
+    }
+    if (key == L"pct" || key == L"step" || key == L"freed" || key == L"ok" || key == L"fail" || key == L"skip" ||
+        key == L"hello")
+        return;
     if (key == L"status") {
         SetStatus(t, text);
     } else if (key == L"reboot") {
         U.rebootNeeded = true;
         ShowTab(U.tab);
+        FillHealth();
     } else if (key == L"log" || key == L"logp") {
         LogLine(text, key == L"logp");
         if (t != kHealth && !text.empty()) SetStatus(t, text);
     } else {
         // An item's row: its last column shows the text.
+        if (job) J.itemText[key] = text;
         HWND lv = t == kHealth ? nullptr : List(t);
         if (!lv) return;
         const int n = ListView_GetItemCount(lv);
@@ -1024,29 +1350,119 @@ void OnProgress(int t, const std::wstring& key, const std::wstring& text) {
 }
 
 void OnDone(int t, LPARAM code) {
-    if (U.adminTab == t) {
-        U.adminBusy = false;
-        U.adminTab = -1;
-    }
-    U.busy[t] = false;
-    if (code == kDeclined) SetStatus(t, L"Cancelled: Windows didn't get permission to make changes.");
-    else if (code == kNoStart) SetStatus(t, L"Couldn't start the job with administrator rights.");
-    if (t == kCleanup && code != kDeclined && code != kNoStart) {
-        const std::wstring keep = L"Cleaned. Measuring again…";
+    if (!(J.running && t == J.tab)) return;
+    J.running = false;
+    UnlockFront();
+    J.text = ResultText(code);
+    if (J.outcome == 0) J.pct = 1000;
+    JobFont(true);
+    Layout();
+    ShowTab(U.tab);
+    JobChanged();
+    if (GetForegroundWindow() != U.hwnd) FlashWindow(U.hwnd, TRUE);
+    const bool ran = code != kDeclined && code != kNoStart;
+    if (!ran) SetStatus(t, L"");
+    // The lists show what is true now.
+    if (ran && t == kCleanup) {
         StartScan(kCleanup);
-        SetStatus(t, keep);
-    } else if (t == kStartup && code != kDeclined && code != kNoStart) {
+        SetStatus(t, L"Measuring again…");
+    } else if (ran && t == kUpdates) {
+        StartScan(kUpdates);
+    } else if (ran && t == kStartup) {
         StartScan(kStartup);
-    } else if (t == kHealth) {
-        FillHealth();
-        StartScan(kOverview);  // a virus scan changes what Overview says
-    } else if (t == kApps && code != kDeclined && code != kNoStart) {
+    } else if (ran && t == kApps) {
         StartScan(kApps);
-    } else if (t == kUpdates && code != kDeclined && code != kNoStart) {
-        SetStatus(t, code == 0 ? L"Finished. Press Check again to see what's left." : L"Finished, with problems: see the Status column.");
+    } else if (t == kHealth) {
+        StartScan(kHealth);
+        StartScan(kOverview);  // a virus scan changes what Overview says
     }
     if (U.rebootNeeded) FillHealth();
     UpdateButtons();
+}
+
+// ---- the progress bar (a small custom control) ---------------------------------------------
+
+Gdiplus::Color GpColor(COLORREF c) { return Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)); }
+
+void AddRound(Gdiplus::GraphicsPath& p, Gdiplus::RectF r, float radius) {
+    radius = std::min({radius, r.Width / 2, r.Height / 2});
+    const float d = std::max(radius * 2, 0.01f);
+    p.AddArc(r.X, r.Y, d, d, 180, 90);
+    p.AddArc(r.X + r.Width - d, r.Y, d, d, 270, 90);
+    p.AddArc(r.X + r.Width - d, r.Y + r.Height - d, d, d, 0, 90);
+    p.AddArc(r.X, r.Y + r.Height - d, d, d, 90, 90);
+    p.CloseFigure();
+}
+
+void PaintBar(HWND h, HDC dc) {
+    static ULONG_PTR token = 0;
+    if (!token) {
+        Gdiplus::GdiplusStartupInput in;
+        Gdiplus::GdiplusStartup(&token, &in, nullptr);
+    }
+    RECT rc;
+    GetClientRect(h, &rc);
+    if (rc.right <= 0 || rc.bottom <= 0) return;
+    const Palette& p = Pal();
+    HDC mem = CreateCompatibleDC(dc);
+    HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
+    HGDIOBJ old = SelectObject(mem, bmp);
+    FillColor(mem, rc, p.window);
+    {
+        Gdiplus::Graphics g(mem);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+        const Gdiplus::RectF track(0.5f, 0.5f, static_cast<float>(rc.right) - 1, static_cast<float>(rc.bottom) - 1);
+        const float rad = track.Height / 2;
+        Gdiplus::GraphicsPath tp;
+        AddRound(tp, track, rad);
+        Gdiplus::SolidBrush tb(GpColor(p.nav));
+        g.FillPath(&tb, &tp);
+        const COLORREF fill = J.running || J.outcome == 0 ? p.accent : J.outcome == 1 ? kDotColors[kWarn] : p.grey;
+        Gdiplus::SolidBrush fb(GpColor(fill));
+        if (J.running && J.pct < 0) {
+            // No number known: a segment slides along the track.
+            g.SetClip(&tp);
+            const float seg = track.Width * 0.28f, span = track.Width + seg;
+            const float x = static_cast<float>(GetTickCount64() % 1600) / 1600.0f * span - seg;
+            Gdiplus::GraphicsPath sp;
+            AddRound(sp, Gdiplus::RectF(track.X + x, track.Y, seg, track.Height), rad);
+            g.FillPath(&fb, &sp);
+            g.ResetClip();
+        } else if (J.pct > 0) {
+            const float w = std::max(track.Width * static_cast<float>(J.pct) / 1000.0f, track.Height);
+            Gdiplus::GraphicsPath fp;
+            AddRound(fp, Gdiplus::RectF(track.X, track.Y, w, track.Height), rad);
+            g.FillPath(&fb, &fp);
+        }
+        Gdiplus::Pen pen(GpColor(p.line), 1);
+        g.DrawPath(&pen, &tp);
+    }
+    BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+}
+
+LRESULT CALLBACK BarProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_TIMER:
+        if (wp == kMarqueeTimer) InvalidateRect(h, nullptr, FALSE);
+        return 0;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        PaintBar(h, dc);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_PRINTCLIENT:
+        PaintBar(h, reinterpret_cast<HDC>(wp));
+        return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
 }
 
 void Install() {
@@ -1059,7 +1475,6 @@ void Install() {
         const bool app = k.rfind(L"app:", 0) == 0;
         if (Checked(lv, r)) {
             args.push_back(k);
-            ListView_SetItemText(lv, r, 4, const_cast<wchar_t*>(L"Waiting…"));
         } else if (app) {
             if (!skip.empty()) skip += L" ";
             skip += k.substr(4);
@@ -1072,7 +1487,9 @@ void Install() {
         return;
     }
     if (Button_GetCheck(Item(IDC_UPRESTORE)) == BST_CHECKED) args.insert(args.begin(), L"restore");
-    StartTask(kUpdates, L"install", args, true);
+    if (!StartTask(kUpdates, L"install", args, true)) return;
+    for (int r = 0; r < n && r < static_cast<int>(U.up.items.size()); ++r)
+        ListView_SetItemText(lv, r, 4, const_cast<wchar_t*>(Checked(lv, r) ? L"Waiting…" : L""));
 }
 
 void CleanSelected() {
@@ -1084,7 +1501,6 @@ void CleanSelected() {
             args.push_back(U.clean[r].key);
             admin = admin || U.clean[r].admin;
             recycle = recycle || U.clean[r].key == L"recycle";
-            ListView_SetItemText(lv, r, 3, const_cast<wchar_t*>(L"Waiting…"));
         }
     if (args.empty()) {
         SetStatus(kCleanup, L"Nothing selected.");
@@ -1093,7 +1509,9 @@ void CleanSelected() {
     if (recycle && MessageBoxW(U.hwnd, L"Empty the Recycle Bin? The files in it can't be brought back afterwards.",
                                L"Canivete Maintenance", MB_OKCANCEL | MB_ICONWARNING) != IDOK)
         return;
-    StartTask(kCleanup, L"clean", args, admin);
+    if (!StartTask(kCleanup, L"clean", args, admin)) return;
+    for (int r = 0; r < ListView_GetItemCount(lv) && r < static_cast<int>(U.clean.size()); ++r)
+        ListView_SetItemText(lv, r, 3, const_cast<wchar_t*>(Checked(lv, r) ? L"Waiting…" : L""));
 }
 
 void ApplyStartup() {
@@ -1143,7 +1561,7 @@ void Open(const wchar_t* what, const wchar_t* params = nullptr) {
 
 void UninstallSelected() {
     const int row = ListView_GetNextItem(List(kApps), -1, LVNI_SELECTED);
-    if (row < 0 || row >= static_cast<int>(U.appRows.size()) || U.busy[kApps]) return;
+    if (row < 0 || row >= static_cast<int>(U.appRows.size()) || U.busy[kApps] || J.running) return;
     const InstalledApp a = U.apps[U.appRows[row]];
     std::wstring exe, args;
     if (!a.msi.empty()) {
@@ -1163,9 +1581,10 @@ void UninstallSelected() {
     if (MessageBoxW(U.hwnd, (L"Uninstall " + a.name + L"?\n\nIts own uninstaller opens; follow its steps.").c_str(),
                     L"Canivete Maintenance", MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
         return;
-    U.busy[kApps] = true;
-    UpdateButtons();
-    SetStatus(kApps, L"Uninstalling " + a.name + L"… Finish the steps in its window.");
+    if (!BeginJob(kApps, L"uninstall", false)) return;
+    J.name = a.name;
+    J.text = L"Uninstalling " + a.name + L"…  Finish the steps in its window.";
+    JobChanged();
     HWND w = U.hwnd;
     const WPARAM tag = Tag(kApps);
     std::thread([w, tag, exe, args] {
@@ -1226,11 +1645,6 @@ void DoRow(int row) {
 
 // ---- drawing the tab list ----------------------------------------------------------------
 
-void FillColor(HDC dc, const RECT& r, COLORREF c) {
-    SetDCBrushColor(dc, c);
-    FillRect(dc, &r, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
-}
-
 void DrawNavItem(const DRAWITEMSTRUCT& d) {
     if (d.itemID == static_cast<UINT>(-1)) return;
     HDC dc = d.hDC;
@@ -1256,7 +1670,11 @@ void DrawNavItem(const DRAWITEMSTRUCT& d) {
     tr.left += Px(14);
     tr.right -= Px(10);
     DrawTextW(dc, kTabs[d.itemID].name, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-    if (U.busy[d.itemID]) {
+    if (J.running && J.tab == static_cast<int>(d.itemID)) {  // the job's progress
+        SetTextColor(dc, p.accent);
+        const std::wstring pc = J.pct >= 0 ? std::to_wstring(J.pct / 10) + L"%" : L"…";
+        DrawTextW(dc, pc.c_str(), -1, &tr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    } else if (U.busy[d.itemID]) {
         SetTextColor(dc, p.grey);
         DrawTextW(dc, L"…", -1, &tr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
@@ -1273,7 +1691,17 @@ void DrawNavItem(const DRAWITEMSTRUCT& d) {
 void OnCommand(int id, int code) {
     switch (id) {
     case IDCANCEL:
-        DestroyWindow(U.hwnd);
+        SendMessageW(U.hwnd, WM_CLOSE, 0, 0);
+        break;
+    case IDC_JOBCANCEL:
+        if (!J.running) {
+            ClosePanel();
+        } else if (J.cancellable && !J.cancelling) {
+            J.cancelling = true;
+            if (U.cancel) SetEvent(U.cancel);
+            JobChanged();
+            UpdateButtons();
+        }
         break;
     case IDOK: {  // Enter: the tab's main button
         const int main[kTabCount] = {IDC_OVDO, IDC_UPINSTALL, 0, IDC_CLRUN, IDC_STAPPLY, 0};
@@ -1368,6 +1796,19 @@ LRESULT CALLBACK MaintProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         U.dpi = GetDpiForWindow(h);
         Build();
         MakeFonts();
+        if (SUCCEEDED(CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&U.taskbar))) &&
+            FAILED(U.taskbar->HrInit())) {
+            U.taskbar->Release();
+            U.taskbar = nullptr;
+        }
+        return 0;
+    case WM_CLOSE:
+        if (J.running && MessageBoxW(h,
+                                     L"A job is still running. It keeps going in the background if you close this "
+                                     L"window, but you won't see how it ends.\n\nClose anyway?",
+                                     L"Canivete Maintenance", MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2) != IDOK)
+            return 0;
+        DestroyWindow(h);
         return 0;
     case WM_SIZE:
         Layout();
@@ -1444,11 +1885,12 @@ LRESULT CALLBACK MaintProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_COPYDATA: {  // progress from the elevated copy: "key\ttext"
         const auto* cd = reinterpret_cast<const COPYDATASTRUCT*>(lp);
-        if (cd->dwData != kCopyProgress || !U.adminBusy || cd->cbData < sizeof(wchar_t)) return FALSE;
+        if (cd->dwData != kCopyProgress || !J.running || !J.admin || cd->cbData < sizeof(wchar_t)) return FALSE;
         const std::wstring s(static_cast<const wchar_t*>(cd->lpData),
                              wcsnlen(static_cast<const wchar_t*>(cd->lpData), cd->cbData / sizeof(wchar_t)));
         const size_t tab = s.find(L'\t');
-        if (tab != std::wstring::npos) OnProgress(U.adminTab, s.substr(0, tab), s.substr(tab + 1));
+        if (tab != std::wstring::npos) OnProgress(J.tab, s.substr(0, tab), s.substr(tab + 1));
+        InvalidateRect(U.nav, nullptr, FALSE);
         return TRUE;
     }
     case DM_GETDEFID:
@@ -1457,7 +1899,9 @@ LRESULT CALLBACK MaintProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (LOWORD(wp) == WA_INACTIVE) {
             HWND f = GetFocus();
             if (f && IsChild(h, f)) U.lastFocus = f;
+            J.locked = false;  // the user switched away: Windows has lifted the lock
         } else {
+            if (!J.running && U.taskbar) U.taskbar->SetProgressState(h, TBPF_NOPROGRESS);  // the result was seen
             const bool ok = U.lastFocus && IsWindow(U.lastFocus) && IsWindowVisible(U.lastFocus) && IsWindowEnabled(U.lastFocus);
             SetFocus(ok ? U.lastFocus : U.nav);
         }
@@ -1475,13 +1919,17 @@ LRESULT CALLBACK MaintProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_DESTROY:
+        UnlockFront();
+        J = JobState{};
+        if (U.taskbar) {
+            U.taskbar->Release();
+            U.taskbar = nullptr;
+        }
         U.hwnd = U.nav = nullptr;
         U.ctls.clear();
         U.lastFocus = nullptr;
         for (bool& b : U.busy) b = false;
         for (bool& b : U.scanned) b = false;
-        U.adminBusy = false;
-        U.adminTab = -1;
         U.logPartial = false;
         U.waitBg = false;
         return 0;
@@ -1519,6 +1967,12 @@ void Maint_Show(int tab) {
         LoadIconMetric(g_hinst, MAKEINTRESOURCEW(IDI_APP), LIM_LARGE, &wc.hIcon);
         LoadIconMetric(g_hinst, MAKEINTRESOURCEW(IDI_APP), LIM_SMALL, &wc.hIconSm);
         registered = RegisterClassExW(&wc) != 0;
+        WNDCLASSEXW bc{sizeof(bc)};
+        bc.lpfnWndProc = BarProc;
+        bc.hInstance = g_hinst;
+        bc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        bc.lpszClassName = kBarClass;
+        registered = registered && RegisterClassExW(&bc) != 0;
     }
     ++U.gen;
     U.up = {};

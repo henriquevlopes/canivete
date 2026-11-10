@@ -11,11 +11,24 @@ namespace maint {
 
 // Progress from a job. key: an item's key (its row shows the text), or "status" (the status line),
 // "log" / "logp" (a line of tool output; "logp" = a progress line the next line replaces),
-// "reboot" (a restart is needed now).
+// "reboot" (a restart is needed now), and for the progress bar:
+//   "pct"   overall progress in thousandths ("0".."1000"), "-1" = no number (moving bar)
+//   "step"  "<i>|<n>|<item key>|<what>": item i of n is being worked on ("Downloading 45%")
+//   "freed" bytes freed so far (cleanup)
+//   "ok" / "fail" / "skip"  text = an item's key: how it ended ("skip": not done, the job was stopped)
+//   "hello" the elevated copy has started (it lets the window take the foreground back)
 using Sink = std::function<void(const std::wstring& key, const std::wstring& text)>;
 
 constexpr ULONG_PTR kCopyProgress = 0x4D4E5450;  // WM_COPYDATA tag from the elevated copy: "key\ttext"
 constexpr wchar_t kWindowClass[] = L"CaniveteMaintenance";
+
+// Cancel: the window sets a named event (per window process); jobs stop after the current item.
+std::wstring CancelEventName(DWORD windowPid);
+void SetCancelEvent(HANDLE event);  // the event this process's jobs watch
+bool CancelRequested();
+// Test copies only (CANIVETE_TEST and CANIVETE_MAINT_FAKE=1): checks and jobs are simulated, nothing
+// is installed or deleted, and jobs "with administrator rights" start the helper copy without a prompt.
+bool FakeMode();
 
 // ---- updates
 struct UpdateItem {

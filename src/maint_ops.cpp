@@ -84,6 +84,154 @@ bool KeyExists(HKEY root, const wchar_t* path) {
     return true;
 }
 
+HANDLE g_cancel = nullptr;
+
+// What a job tells the window's progress bar. Percentages and steps are sent at most about ten times
+// a second (the elevated copy sends each one as a message).
+class Report {
+public:
+    explicit Report(const Sink& s) : sink_(s) {}
+    const Sink& Out() const { return sink_; }
+    // Item i of n (i = 0: a step before the items, like the restore point).
+    void Step(int i, int n, const std::wstring& key, const std::wstring& what, bool force = true) {
+        std::wstring s = std::to_wstring(i) + L"|" + std::to_wstring(n) + L"|" + key + L"|" + what;
+        if (s == step_ || (!force && !Due(stepT_))) return;
+        step_ = s;
+        sink_(L"step", s);
+    }
+    // f = 0..1 of the whole job; below 0: no number known.
+    void Pct(double f) {
+        const int p = f < 0 ? -1 : static_cast<int>(std::clamp(f, 0.0, 1.0) * 1000 + 0.5);
+        if (p == pct_ || (p >= 0 && pct_ >= 0 && p < 1000 && !Due(pctT_))) return;
+        pct_ = p;
+        sink_(L"pct", std::to_wstring(p));
+    }
+    void Freed(ULONGLONG b, bool force = false) {
+        if (b == freed_ || (!force && !Due(freedT_))) return;
+        freed_ = b;
+        sink_(L"freed", std::to_wstring(b));
+    }
+    void End(const std::wstring& key, const wchar_t* how) { sink_(how, key); }  // "ok", "fail", "skip"
+
+private:
+    static bool Due(ULONGLONG& t) {
+        const ULONGLONG now = GetTickCount64();
+        if (now - t < 100) return false;
+        t = now;
+        return true;
+    }
+    const Sink& sink_;
+    std::wstring step_;
+    int pct_ = -2;
+    ULONGLONG freed_ = ~0ULL, stepT_ = 0, pctT_ = 0, freedT_ = 0;
+};
+
+std::wstring PctText(double f) { return std::to_wstring(static_cast<int>(std::clamp(f, 0.0, 1.0) * 100)) + L"%"; }
+
+// The last "45%" / "45.5 %" in a line of tool output, as 0..1; -1 if none.
+double PercentIn(const std::wstring& l) {
+    size_t p = l.rfind(L'%');
+    if (p == std::wstring::npos) return -1;
+    size_t e = p;
+    while (e > 0 && l[e - 1] == L' ') --e;
+    size_t s = e;
+    while (s > 0 && (iswdigit(l[s - 1]) || l[s - 1] == L'.' || l[s - 1] == L',')) --s;
+    if (s == e) return -1;
+    std::wstring n = l.substr(s, e - s);
+    std::replace(n.begin(), n.end(), L',', L'.');
+    const double v = _wtof(n.c_str());
+    return v >= 0 && v <= 100 ? v / 100 : -1;
+}
+
+// "12.5 MB / 25.1 MB" in winget's download bar, as 0..1; -1 if none.
+double SizeFraction(const std::wstring& l) {
+    const size_t m = l.find(L" / ");
+    if (m == std::wstring::npos) return -1;
+    auto mult = [](wchar_t u) {
+        switch (towupper(u)) {
+        case L'K': return 1e3;
+        case L'M': return 1e6;
+        case L'G': return 1e9;
+        default: return 1.0;
+        }
+    };
+    // Left: "<number> <unit>" ending just before " / ".
+    size_t e = m;
+    while (e > 0 && iswalpha(l[e - 1])) --e;
+    const wchar_t lu = e < m ? l[e] : L'B';
+    while (e > 0 && l[e - 1] == L' ') --e;
+    size_t s = e;
+    while (s > 0 && (iswdigit(l[s - 1]) || l[s - 1] == L'.')) --s;
+    if (s == e) return -1;
+    const double a = _wtof(l.substr(s, e - s).c_str()) * mult(lu);
+    // Right: "<number> <unit>".
+    size_t r = m + 3;
+    while (r < l.size() && l[r] == L' ') ++r;
+    size_t re = r;
+    while (re < l.size() && (iswdigit(l[re]) || l[re] == L'.')) ++re;
+    if (re == r) return -1;
+    const double b0 = _wtof(l.substr(r, re - r).c_str());
+    while (re < l.size() && l[re] == L' ') ++re;
+    const double b = b0 * (re < l.size() ? mult(l[re]) : 1.0);
+    return b > 0 ? std::clamp(a / b, 0.0, 1.0) : -1;
+}
+
+// Windows Update's asynchronous download and install call these; only "completed" matters (the
+// progress is read with GetProgress while waiting).
+class WuCallback final : public IDownloadProgressChangedCallback,
+                         public IDownloadCompletedCallback,
+                         public IInstallationProgressChangedCallback,
+                         public IInstallationCompletedCallback {
+public:
+    WuCallback() : done_(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {}
+    HANDLE Done() const { return done_; }
+    IUnknown* Progress() { return static_cast<IDownloadProgressChangedCallback*>(this); }
+    IUnknown* InstProgress() { return static_cast<IInstallationProgressChangedCallback*>(this); }
+    IUnknown* Completed() { return static_cast<IDownloadCompletedCallback*>(this); }
+    IUnknown* InstCompleted() { return static_cast<IInstallationCompletedCallback*>(this); }
+
+    STDMETHODIMP QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        if (iid == __uuidof(IUnknown) || iid == __uuidof(IDownloadCompletedCallback))
+            *out = static_cast<IDownloadCompletedCallback*>(this);
+        else if (iid == __uuidof(IDownloadProgressChangedCallback))
+            *out = static_cast<IDownloadProgressChangedCallback*>(this);
+        else if (iid == __uuidof(IInstallationProgressChangedCallback))
+            *out = static_cast<IInstallationProgressChangedCallback*>(this);
+        else if (iid == __uuidof(IInstallationCompletedCallback))
+            *out = static_cast<IInstallationCompletedCallback*>(this);
+        else {
+            *out = nullptr;
+            return E_NOINTERFACE;
+        }
+        AddRef();
+        return S_OK;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return static_cast<ULONG>(InterlockedIncrement(&ref_)); }
+    STDMETHODIMP_(ULONG) Release() override {
+        const LONG r = InterlockedDecrement(&ref_);
+        if (!r) delete this;
+        return static_cast<ULONG>(r);
+    }
+    STDMETHODIMP Invoke(IDownloadJob*, IDownloadProgressChangedCallbackArgs*) override { return S_OK; }
+    STDMETHODIMP Invoke(IDownloadJob*, IDownloadCompletedCallbackArgs*) override {
+        SetEvent(done_);
+        return S_OK;
+    }
+    STDMETHODIMP Invoke(IInstallationJob*, IInstallationProgressChangedCallbackArgs*) override { return S_OK; }
+    STDMETHODIMP Invoke(IInstallationJob*, IInstallationCompletedCallbackArgs*) override {
+        SetEvent(done_);
+        return S_OK;
+    }
+
+private:
+    ~WuCallback() {
+        if (done_) CloseHandle(done_);
+    }
+    LONG ref_ = 1;
+    HANDLE done_;
+};
+
 // ---- running console tools ---------------------------------------------------------------
 
 // Splits a tool's output into lines. Tools write the console code page (winget, DISM, defrag) or
@@ -354,24 +502,36 @@ void ScanWindowsUpdate(UpdateScan& out) {
     for (auto& d : drivers) out.items.push_back(std::move(d));
 }
 
-int InstallWindowsUpdates(const std::set<std::wstring>& keys, const Sink& sink) {
+// keyList: the Windows Update keys, items 1..n of the job's `items`. `part(f)`: f = 0..1 of this
+// group of updates (downloads are the first half, installing the second).
+int InstallWindowsUpdates(const std::vector<std::wstring>& keyList, int items, Report& rep,
+                          const std::function<void(double)>& part) {
+    const Sink& sink = rep.Out();
+    const std::set<std::wstring> keys(keyList.begin(), keyList.end());
+    auto itemNo = [&](const std::wstring& k) {
+        return static_cast<int>(std::find(keyList.begin(), keyList.end(), k) - keyList.begin()) + 1;
+    };
+    auto failAll = [&](const std::set<std::wstring>& ks, const std::wstring& why) {
+        for (const auto& k : ks) {
+            sink(k, why);
+            rep.End(k, L"fail");
+        }
+        return 1;
+    };
+    rep.Step(1, items, L"", L"Checking with Windows Update");
+    rep.Pct(-1);
     ComPtr<IUpdateSession> session;
     ComPtr<IUpdateCollection> found;
     HRESULT hr = WuSearch(session, found);
-    if (FAILED(hr)) {
-        for (const auto& k : keys) sink(k, WuError(hr));
-        return 1;
-    }
+    if (FAILED(hr)) return failAll(keys, WuError(hr));
     ComPtr<IUpdateCollection> want;
-    if (FAILED(hr = CoCreateInstance(CLSID_UpdateCollection, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&want)))) {
-        for (const auto& k : keys) sink(k, WuError(hr));
-        return 1;
-    }
+    if (FAILED(hr = CoCreateInstance(CLSID_UpdateCollection, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&want))))
+        return failAll(keys, WuError(hr));
     std::vector<std::wstring> order;  // keys in collection order
     std::set<std::wstring> missing = keys;
-    LONG n = 0;
-    found->get_Count(&n);
-    for (LONG i = 0; i < n; ++i) {
+    LONG count = 0;
+    found->get_Count(&count);
+    for (LONG i = 0; i < count; ++i) {
         ComPtr<IUpdate> u;
         if (FAILED(found->get_Item(i, &u))) continue;
         const std::wstring key = L"wu:" + UpdateId(u.Get());
@@ -382,46 +542,128 @@ int InstallWindowsUpdates(const std::set<std::wstring>& keys, const Sink& sink) 
         LONG idx = 0;
         if (SUCCEEDED(want->Add(u.Get(), &idx))) {
             order.push_back(key);
-            sink(key, L"Downloading…");
+            sink(key, L"Waiting to download…");
         }
     }
-    for (const auto& k : missing) sink(k, L"Not offered any more (already installed?)");
-    if (order.empty()) return missing.empty() ? 0 : 1;
+    for (const auto& k : missing) {
+        sink(k, L"Not offered any more (already installed?)");
+        rep.End(k, L"skip");
+    }
+    if (order.empty()) return 0;
+    const double n = static_cast<double>(order.size());
 
+    // Download, with the progress read while it runs; Cancel stops it (nothing is installed then).
     ComPtr<IUpdateDownloader> dl;
     ComPtr<IDownloadResult> dres;
-    if (SUCCEEDED(hr = session->CreateUpdateDownloader(&dl)) && SUCCEEDED(hr = dl->put_Updates(want.Get())))
-        hr = dl->Download(&dres);
+    bool stopped = false;
+    if (SUCCEEDED(hr = session->CreateUpdateDownloader(&dl)) && SUCCEEDED(hr = dl->put_Updates(want.Get()))) {
+        auto* cb = new WuCallback;
+        VARIANT state;
+        VariantInit(&state);
+        ComPtr<IDownloadJob> job;
+        if (SUCCEEDED(dl->BeginDownload(cb->Progress(), cb->Completed(), state, &job)) && job) {
+            for (;;) {
+                WaitForSingleObject(cb->Done(), 200);
+                VARIANT_BOOL completed = VARIANT_FALSE;
+                job->get_IsCompleted(&completed);
+                ComPtr<IDownloadProgress> p;
+                LONG all = 0, idx = 0, cur = 0;
+                if (SUCCEEDED(job->GetProgress(&p)) && p) {
+                    p->get_PercentComplete(&all);
+                    p->get_CurrentUpdateIndex(&idx);
+                    p->get_CurrentUpdatePercentComplete(&cur);
+                    if (idx >= 0 && idx < static_cast<LONG>(order.size())) {
+                        const std::wstring& k = order[static_cast<size_t>(idx)];
+                        sink(k, L"Downloading " + PctText(cur / 100.0));
+                        rep.Step(itemNo(k), items, k, L"Downloading " + PctText(cur / 100.0), false);
+                    }
+                    part(0.5 * all / 100.0);
+                }
+                if (completed == VARIANT_TRUE) break;
+                if (!stopped && CancelRequested()) {
+                    job->RequestAbort();
+                    stopped = true;
+                    sink(L"status", L"Stopping the download…");
+                }
+            }
+            hr = dl->EndDownload(job.Get(), &dres);
+        } else {
+            hr = dl->Download(&dres);  // no asynchronous download: wait for it without progress
+        }
+        cb->Release();
+    }
     ComPtr<IUpdateCollection> ready;
     CoCreateInstance(CLSID_UpdateCollection, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&ready));
     std::vector<std::wstring> readyKeys;
+    int failed = 0;
     for (LONG i = 0; i < static_cast<LONG>(order.size()); ++i) {
+        const std::wstring& k = order[static_cast<size_t>(i)];
         ComPtr<IUpdate> u;
         VARIANT_BOOL got = VARIANT_FALSE;
-        if (SUCCEEDED(want->get_Item(i, &u)) && SUCCEEDED(u->get_IsDownloaded(&got)) && got == VARIANT_TRUE && ready) {
+        const bool have = SUCCEEDED(want->get_Item(i, &u)) && SUCCEEDED(u->get_IsDownloaded(&got)) && got == VARIANT_TRUE;
+        if (stopped) {
+            sink(k, have ? L"Downloaded, not installed (stopped)" : L"Stopped");
+            rep.End(k, L"skip");
+        } else if (have && ready) {
             LONG idx = 0;
             ready->Add(u.Get(), &idx);
-            readyKeys.push_back(order[i]);
-            sink(order[i], L"Installing…");
+            readyKeys.push_back(k);
+            sink(k, L"Waiting to install…");
         } else {
-            sink(order[i], FAILED(hr) ? L"Download failed: " + WuError(hr) : L"Download failed");
+            ++failed;
+            sink(k, FAILED(hr) ? L"Download failed: " + WuError(hr) : L"Download failed");
+            rep.End(k, L"fail");
         }
     }
-    if (readyKeys.empty()) return 1;
+    if (readyKeys.empty()) return failed ? 1 : 0;
 
+    // Install. Not stopped halfway: Cancel then only skips what comes after.
     ComPtr<IUpdateInstaller> inst;
     ComPtr<IInstallationResult> ires;
     if (SUCCEEDED(hr = session->CreateUpdateInstaller(&inst))) {
         ComPtr<IUpdateInstaller2> i2;
         if (SUCCEEDED(inst.As(&i2))) i2->put_ForceQuiet(VARIANT_TRUE);
         inst->put_AllowSourcePrompts(VARIANT_FALSE);
-        if (SUCCEEDED(hr = inst->put_Updates(ready.Get()))) hr = inst->Install(&ires);
+        if (SUCCEEDED(hr = inst->put_Updates(ready.Get()))) {
+            auto* cb = new WuCallback;
+            VARIANT state;
+            VariantInit(&state);
+            ComPtr<IInstallationJob> job;
+            if (SUCCEEDED(inst->BeginInstall(cb->InstProgress(), cb->InstCompleted(), state, &job)) && job) {
+                for (;;) {
+                    WaitForSingleObject(cb->Done(), 200);
+                    VARIANT_BOOL completed = VARIANT_FALSE;
+                    job->get_IsCompleted(&completed);
+                    ComPtr<IInstallationProgress> p;
+                    LONG all = 0, idx = 0, cur = 0;
+                    if (SUCCEEDED(job->GetProgress(&p)) && p) {
+                        p->get_PercentComplete(&all);
+                        p->get_CurrentUpdateIndex(&idx);
+                        p->get_CurrentUpdatePercentComplete(&cur);
+                        if (idx >= 0 && idx < static_cast<LONG>(readyKeys.size())) {
+                            const std::wstring& k = readyKeys[static_cast<size_t>(idx)];
+                            sink(k, L"Installing " + PctText(cur / 100.0));
+                            rep.Step(itemNo(k), items, k, L"Installing " + PctText(cur / 100.0), false);
+                        }
+                        const double got = (n - static_cast<double>(readyKeys.size())) + static_cast<double>(readyKeys.size()) * all / 100.0;
+                        part(0.5 + 0.5 * got / n);
+                    }
+                    if (completed == VARIANT_TRUE) break;
+                }
+                hr = inst->EndInstall(job.Get(), &ires);
+            } else {
+                hr = inst->Install(&ires);
+            }
+            cb->Release();
+        }
     }
     if (FAILED(hr) || !ires) {
-        for (const auto& k : readyKeys) sink(k, L"Install failed: " + WuError(hr));
+        for (const auto& k : readyKeys) {
+            sink(k, L"Install failed: " + WuError(hr));
+            rep.End(k, L"fail");
+        }
         return 1;
     }
-    int failed = 0;
     for (LONG i = 0; i < static_cast<LONG>(readyKeys.size()); ++i) {
         ComPtr<IUpdateInstallationResult> ur;
         OperationResultCode rc = orcFailed;
@@ -434,9 +676,11 @@ int InstallWindowsUpdates(const std::set<std::wstring>& keys, const Sink& sink) 
         }
         if (rc == orcSucceeded || rc == orcSucceededWithErrors) {
             sink(readyKeys[i], reboot == VARIANT_TRUE ? L"Installed: restart to finish" : L"Installed");
+            rep.End(readyKeys[i], L"ok");
         } else {
             ++failed;
             sink(readyKeys[i], FAILED(uhr) ? L"Failed: " + WuError(uhr) : L"Failed");
+            rep.End(readyKeys[i], L"fail");
         }
     }
     VARIANT_BOOL reboot = VARIANT_FALSE;
@@ -530,31 +774,62 @@ std::wstring WingetFailure(DWORD code) {
     return Fmt(L"Failed (code 0x%08X)", code);
 }
 
-int UpgradeApp(const std::wstring& key, const Sink& sink) {
+// Item i of `items`. part(f): f = 0..1 of this app (download 0..0.8, install the rest), read from
+// winget's progress bars ("12.5 MB / 25.1 MB", "45%").
+int UpgradeApp(const std::wstring& key, int i, int items, Report& rep, const std::function<void(double)>& part) {
+    const Sink& sink = rep.Out();
     const std::wstring id = key.substr(4);
-    if (!ValidWingetId(id)) return 1;
+    if (!ValidWingetId(id)) {
+        rep.End(key, L"fail");
+        return 1;
+    }
     sink(key, L"Updating…");
+    rep.Step(i, items, key, L"Updating");
+    part(0);
+    bool installing = false;
     const ProcResult r = Run(WingetExe(),
                              L"upgrade --id " + QuoteArg(id) +
                                  L" --exact --silent --accept-package-agreements --accept-source-agreements "
                                  L"--disable-interactivity",
-                             3600000);
+                             3600000, [&](const std::wstring& line, bool) {
+                                 double f = SizeFraction(line);
+                                 if (f < 0) f = PercentIn(line);
+                                 if (f < 0) return;
+                                 if (!installing) {
+                                     sink(key, L"Downloading " + PctText(f));
+                                     rep.Step(i, items, key, L"Downloading " + PctText(f), false);
+                                     part(0.8 * f);
+                                     if (f >= 0.999) {
+                                         installing = true;
+                                         sink(key, L"Installing…");
+                                         rep.Step(i, items, key, L"Installing");
+                                     }
+                                 } else {
+                                     rep.Step(i, items, key, L"Installing " + PctText(f), false);
+                                     part(0.8 + 0.2 * f);
+                                 }
+                             });
+    part(1);
     if (!r.started) {
         sink(key, Fmt(L"Couldn't start winget (error %lu)", r.error));
+        rep.End(key, L"fail");
         return 1;
     }
     if (r.code == 0) {
         sink(key, L"Updated");
+        rep.End(key, L"ok");
         return 0;
     }
     if (r.code == 0x8A150077 || r.code == 0x8A15002B) {  // nothing to do (already the newest)
         sink(key, L"Already up to date");
+        rep.End(key, L"ok");
         return 0;
     }
     std::wstring why = WingetFailure(r.code);
     const std::wstring msg = LastMessage(r.out);
     if (!msg.empty() && why.rfind(L"Failed (code", 0) == 0) why += L": " + msg;
     sink(key, why);
+    rep.End(key, L"fail");
     return 1;
 }
 
@@ -641,6 +916,7 @@ struct WalkStats {
     ULONGLONG files = 0;
     ULONGLONG kept = 0;  // in use or not allowed
     bool denied = false; // the folder itself could not be read
+    const std::function<void(ULONGLONG bytes)>* tick = nullptr;  // now and then while deleting
 };
 
 ULONGLONG FileTime64(const FILETIME& f) { return (static_cast<ULONGLONG>(f.dwHighDateTime) << 32) | f.dwLowDateTime; }
@@ -682,7 +958,7 @@ void Walk(const std::wstring& dir, const Target& t, ULONGLONG cutoff, bool del, 
             SetFileAttributesW(path.c_str(), fd.dwFileAttributes & ~FILE_ATTRIBUTE_READONLY);
         if (DeleteFileW(path.c_str())) {
             s.bytes += size;
-            ++s.files;
+            if (++s.files % 64 == 0 && s.tick) (*s.tick)(s.bytes);
         } else {
             ++s.kept;
         }
@@ -690,8 +966,9 @@ void Walk(const std::wstring& dir, const Target& t, ULONGLONG cutoff, bool del, 
     FindClose(f);
 }
 
-WalkStats WalkAll(const std::wstring& key, bool del) {
+WalkStats WalkAll(const std::wstring& key, bool del, const std::function<void(ULONGLONG)>* tick = nullptr) {
     WalkStats s;
+    s.tick = tick;
     FILETIME now;
     GetSystemTimeAsFileTime(&now);
     for (const Target& t : Targets(key)) {
@@ -705,7 +982,9 @@ WalkStats WalkAll(const std::wstring& key, bool del) {
     return s;
 }
 
-int Clean(const std::wstring& key, const Sink& sink) {
+// freed: bytes freed by the whole job so far (this place's are added). part(f): f = 0..1 of this place.
+int Clean(const std::wstring& key, Report& rep, ULONGLONG& freed, const std::function<void(double)>& part) {
+    const Sink& sink = rep.Out();
     const bool admin = IsElevated();
     if (key == L"recycle") {
         SHQUERYRBINFO rb{sizeof(rb)};
@@ -713,24 +992,34 @@ int Clean(const std::wstring& key, const Sink& sink) {
         sink(key, L"Emptying…");
         const HRESULT hr = SHEmptyRecycleBinW(nullptr, nullptr, SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND);
         // E_UNEXPECTED: it was already empty.
-        sink(key, SUCCEEDED(hr) || hr == E_UNEXPECTED ? L"Freed " + SizeText(rb.i64Size) : Fmt(L"Failed (0x%08X)", hr));
-        return SUCCEEDED(hr) || hr == E_UNEXPECTED ? 0 : 1;
+        const bool ok = SUCCEEDED(hr) || hr == E_UNEXPECTED;
+        if (ok) freed += static_cast<ULONGLONG>(rb.i64Size);
+        sink(key, ok ? L"Freed " + SizeText(rb.i64Size) : Fmt(L"Failed (0x%08X)", hr));
+        rep.End(key, ok ? L"ok" : L"fail");
+        return ok ? 0 : 1;
     }
     if (key == L"winsxs") {
         if (!admin) {
             sink(key, L"Needs administrator rights");
+            rep.End(key, L"fail");
             return 1;
         }
         sink(key, L"Cleaning (several minutes)…");
         const ProcResult r = Run(SysExe(L"Dism.exe"), L"/Online /Cleanup-Image /StartComponentCleanup /NoRestart", 0,
                                  [&](const std::wstring& l, bool progress) {
                                      const std::wstring t = Trim(l);
-                                     if (progress && !t.empty()) sink(key, L"Cleaning… " + t);
+                                     const double f = PercentIn(t);
+                                     if (f >= 0) part(f);
+                                     if (progress && !t.empty()) sink(key, f >= 0 ? L"Cleaning… " + PctText(f) : L"Cleaning… " + t);
                                  });
-        sink(key, r.started && r.code == 0 ? L"Done" : Fmt(L"Failed (DISM code %lu)", r.code));
-        return r.code == 0 ? 0 : 1;
+        const bool ok = r.started && r.code == 0;
+        sink(key, ok ? L"Done" : Fmt(L"Failed (DISM code %lu)", r.code));
+        rep.End(key, ok ? L"ok" : L"fail");
+        return ok ? 0 : 1;
     }
     sink(key, L"Cleaning…");
+    const ULONGLONG base = freed;
+    const std::function<void(ULONGLONG)> tick = [&](ULONGLONG b) { rep.Freed(base + b); };
     const WalkStats before = key == L"delivery" ? WalkAll(key, false) : WalkStats{};
     WalkStats s;
     if (key == L"delivery") {
@@ -742,12 +1031,14 @@ int Clean(const std::wstring& key, const Sink& sink) {
         s.bytes = before.bytes > after.bytes ? before.bytes - after.bytes : 0;
         s.denied = before.denied && after.denied;
     } else {
-        s = WalkAll(key, true);
+        s = WalkAll(key, true, &tick);
     }
+    freed = base + s.bytes;
     std::wstring t = L"Freed " + SizeText(s.bytes);
     if (s.kept) t += Fmt(L" (%llu files in use were kept)", s.kept);
     if (s.denied && !admin) t += L" (only what it was allowed to)";
     sink(key, t);
+    rep.End(key, L"ok");
     return 0;
 }
 
@@ -889,6 +1180,7 @@ int SetStartup(const std::wstring& arg, const Sink& sink) {
     }
     sink(key, r == ERROR_SUCCESS ? (on ? L"Turned on" : L"Turned off")
                                  : r == ERROR_ACCESS_DENIED ? L"Needs administrator rights" : Fmt(L"Failed (%ld)", r));
+    sink(r == ERROR_SUCCESS ? L"ok" : L"fail", key);
     return r == ERROR_SUCCESS ? 0 : 1;
 }
 
@@ -952,12 +1244,18 @@ int MakeRestorePoint(const Sink& sink, const wchar_t* what) {
     return 1;
 }
 
-int RunTool(const std::wstring& title, const std::wstring& exe, const std::wstring& args, const Sink& sink) {
+// part(f): the tool's own percentage, when its output shows one.
+int RunTool(const std::wstring& title, const std::wstring& exe, const std::wstring& args, const Sink& sink,
+            const std::function<void(double)>& part = {}) {
     sink(L"log", L"");
     sink(L"log", L"▶ " + title);
     const ProcResult r = Run(exe, args, 0, [&](const std::wstring& l, bool progress) {
         const std::wstring t = Trim(l);
         if (!t.empty()) sink(progress ? L"logp" : L"log", t);
+        if (part) {
+            const double f = PercentIn(t);
+            if (f >= 0) part(f);
+        }
     });
     if (!r.started) {
         sink(L"log", Fmt(L"Couldn't start it (error %lu).", r.error));
@@ -967,9 +1265,154 @@ int RunTool(const std::wstring& title, const std::wstring& exe, const std::wstri
     return static_cast<int>(r.code);
 }
 
+// ---- test copies: simulated checks and jobs (CANIVETE_MAINT_FAKE=1) ------------------------
+
+ULONGLONG FakeSize(const std::wstring& key) {
+    if (key == L"usertemp") return 412ULL << 20;
+    if (key == L"wintemp") return 38ULL << 20;
+    if (key == L"wudownload") return 1260ULL << 20;
+    if (key == L"delivery") return 905ULL << 20;
+    if (key == L"crash") return 2280ULL << 20;
+    if (key == L"shader") return 640ULL << 20;
+    if (key == L"recycle") return 150ULL << 20;
+    return 0;
+}
+
+// Same messages as the real jobs, with pauses instead of work. An app whose id has "Fail" in it fails.
+int FakeTask(const std::wstring& task, const std::vector<std::wstring>& args, const Sink& sink) {
+    Report rep(sink);
+    int failed = 0;
+    auto ticks = [&](int n, int ms, const std::function<void(double)>& at) {
+        for (int k = 1; k <= n; ++k) {
+            Sleep(static_cast<DWORD>(ms));
+            at(static_cast<double>(k) / n);
+        }
+    };
+    if (task == L"install") {
+        std::vector<std::wstring> items;
+        for (const auto& a : args)
+            if (a != L"restore") items.push_back(a);
+        const bool restore = items.size() != args.size();
+        const int n = static_cast<int>(items.size());
+        const double units = n + (restore ? 1 : 0);
+        double done = 0;
+        if (restore) {
+            rep.Step(0, n, L"restore", L"Making a restore point");
+            rep.Pct(-1);
+            Sleep(1500);
+            sink(L"status", L"Restore point made (test copy: not really).");
+            rep.End(L"restore", L"ok");
+            done = 1;
+        }
+        for (int i = 0; i < n; ++i) {
+            const std::wstring& k = items[static_cast<size_t>(i)];
+            if (CancelRequested()) {
+                sink(k, L"Not started (stopped)");
+                rep.End(k, L"skip");
+                continue;
+            }
+            ticks(12, 150, [&](double f) {
+                sink(k, L"Downloading " + PctText(f));
+                rep.Step(i + 1, n, k, L"Downloading " + PctText(f), false);
+                rep.Pct((done + 0.7 * f) / units);
+            });
+            ticks(6, 150, [&](double f) {
+                sink(k, L"Installing " + PctText(f));
+                rep.Step(i + 1, n, k, L"Installing " + PctText(f), false);
+                rep.Pct((done + 0.7 + 0.3 * f) / units);
+            });
+            done += 1;
+            if (k.find(L"Fail") != std::wstring::npos) {
+                ++failed;
+                sink(k, L"The app is running: close it and try again");
+                rep.End(k, L"fail");
+            } else {
+                sink(k, k.rfind(L"wu:", 0) == 0 ? L"Installed (test copy: not really)" : L"Updated (test copy: not really)");
+                rep.End(k, L"ok");
+            }
+        }
+    } else if (task == L"clean") {
+        const int n = static_cast<int>(args.size());
+        ULONGLONG freed = 0;
+        for (int i = 0; i < n; ++i) {
+            const std::wstring& k = args[static_cast<size_t>(i)];
+            if (CancelRequested()) {
+                sink(k, L"Not cleaned (stopped)");
+                rep.End(k, L"skip");
+                continue;
+            }
+            rep.Step(i + 1, n, k, L"Cleaning");
+            sink(k, L"Cleaning…");
+            const ULONGLONG size = FakeSize(k), base = freed;
+            ticks(8, 180, [&](double f) {
+                rep.Freed(base + static_cast<ULONGLONG>(static_cast<double>(size) * f));
+                rep.Pct((i + f) / n);
+                if (k == L"winsxs") {
+                    sink(k, L"Cleaning… " + PctText(f));
+                    rep.Step(i + 1, n, k, L"Cleaning " + PctText(f), false);
+                }
+            });
+            freed = base + size;
+            rep.Freed(freed, true);
+            sink(k, k == L"winsxs" ? L"Done (test copy: nothing deleted)" : L"Freed " + SizeText(size) + L" (test copy: nothing deleted)");
+            rep.End(k, L"ok");
+        }
+    } else if (task == L"startup") {
+        const int n = static_cast<int>(args.size());
+        for (int i = 0; i < n; ++i) {
+            const std::wstring& a = args[static_cast<size_t>(i)];
+            const std::wstring k = a.size() > 2 ? a.substr(2) : a;
+            rep.Step(i + 1, n, k, L"Changing");
+            Sleep(300);
+            rep.Pct((i + 1.0) / n);
+            sink(k, a[0] == L'1' ? L"Turned on (test copy: not really)" : L"Turned off (test copy: not really)");
+            rep.End(k, L"ok");
+        }
+    } else if (task == L"repair" || task == L"optimize" || task == L"scan" || task == L"restore") {
+        const int steps = task == L"repair" ? 2 : 1;
+        for (int s = 0; s < steps; ++s) {
+            if (s && CancelRequested()) {
+                sink(L"log", L"Stopped before the next step.");
+                rep.End(L"sfc", L"skip");
+                break;
+            }
+            const std::wstring key = task == L"repair" ? (s ? L"sfc" : L"dism") : task;
+            rep.Step(steps > 1 ? s + 1 : 0, steps, key, task == L"repair" ? (s ? L"Checking system files" : L"Repairing the Windows image")
+                                                       : task == L"optimize" ? L"Optimizing drives"
+                                                       : task == L"scan" ? L"Quick virus scan" : L"Making a restore point");
+            sink(L"log", L"▶ " + task + L" (test copy: simulated)");
+            const bool known = task != L"scan" && task != L"restore";
+            if (!known) rep.Pct(-1);
+            ticks(10, 250, [&](double f) {
+                sink(L"logp", L"Progress " + PctText(f));
+                if (known) rep.Pct((s + f) / steps);
+            });
+            sink(L"log", L"Finished (code 0).");
+            rep.End(key, L"ok");
+        }
+    } else {
+        return 2;
+    }
+    sink(L"status", failed ? L"Finished, with problems (see the list)." : L"Finished.");
+    return failed ? 1 : 0;
+}
+
 }  // namespace
 
 // ---- public ------------------------------------------------------------------------------
+
+std::wstring CancelEventName(DWORD windowPid) { return L"Local\\Canivete.MaintCancel." + std::to_wstring(windowPid); }
+void SetCancelEvent(HANDLE event) { g_cancel = event; }
+bool CancelRequested() { return g_cancel && WaitForSingleObject(g_cancel, 0) == WAIT_OBJECT_0; }
+
+bool FakeMode() {
+    static const bool fake = [] {
+        wchar_t v[8] = L"";
+        GetEnvironmentVariableW(L"CANIVETE_MAINT_FAKE", v, 8);
+        return TestMode() && v[0] == L'1';
+    }();
+    return fake;
+}
 
 bool IsElevated() {
     HANDLE t;
@@ -1071,6 +1514,27 @@ std::vector<GpuInfo> ScanGpus() {
 UpdateScan ScanUpdates(const Sink& progress) {
     UpdateScan wu, apps;
     progress(L"status", L"Checking Windows Update and apps… (Windows Update can take a few minutes)");
+    if (FakeMode()) {
+        Sleep(800);
+        UpdateScan f;
+        auto add = [&](const wchar_t* key, const wchar_t* name, const wchar_t* kind, const wchar_t* ver, ULONGLONG size) {
+            UpdateItem it;
+            it.key = key;
+            it.name = name;
+            it.kind = kind;
+            it.version = ver;
+            it.size = size;
+            f.items.push_back(std::move(it));
+        };
+        add(L"wu:fake-cu", L"2026-11 Cumulative Update for Windows 11 (test)", L"Windows", L"KB5099001", 812ULL << 20);
+        add(L"wu:fake-defender", L"Security Intelligence Update for Microsoft Defender (test)", L"Windows", L"KB2267602", 0);
+        add(L"wu:fake-driver", L"Realtek - Audio - 6.0.9800.1 (test)", L"Driver", L"2026-09-30", 64ULL << 20);
+        add(L"app:Fake.Browser", L"Fake Browser (test)", L"App", L"140.0  →  141.0", 0);
+        add(L"app:Fake.Zip", L"Fake Zip (test)", L"App", L"24.08  →  25.01", 0);
+        add(L"app:Fake.FailingEditor", L"Fake Editor that fails (test)", L"App", L"8.7  →  8.8", 0);
+        f.gpus = ScanGpus();
+        return f;
+    }
     auto a = std::async(std::launch::async, [&] { ScanApps(apps); });
     ScanWindowsUpdate(wu);
     a.wait();
@@ -1087,7 +1551,10 @@ std::vector<CleanItem> ScanCleanup() {
     std::vector<CleanItem> v;
     for (const CleanDef& d : kClean) {
         CleanItem it{d.key, d.name, d.note, 0, true, d.admin, d.byDefault};
-        if (it.key == L"recycle") {
+        if (FakeMode()) {
+            it.size = FakeSize(it.key);
+            it.measured = it.key != L"winsxs";
+        } else if (it.key == L"recycle") {
             SHQUERYRBINFO rb{sizeof(rb)};
             if (SUCCEEDED(SHQueryRecycleBinW(nullptr, &rb))) it.size = rb.i64Size;
         } else if (it.key == L"winsxs") {
@@ -1144,46 +1611,108 @@ Health ReadHealth() {
 }
 
 int RunTask(const std::wstring& task, const std::vector<std::wstring>& args, const Sink& sink) {
+    if (FakeMode()) return FakeTask(task, args, sink);
     ComInit com;
+    Report rep(sink);
     int failed = 0;
     if (task == L"install") {
-        if (std::find(args.begin(), args.end(), L"restore") != args.end())
-            MakeRestorePoint(sink, L"Canivete: before installing updates");
-        std::set<std::wstring> wu;
+        // Items in order: Windows updates (one batch), then apps one by one. The restore point is a
+        // step before them.
+        std::vector<std::wstring> wu, apps;
         for (const auto& a : args)
-            if (a.rfind(L"wu:", 0) == 0) wu.insert(a);
-        if (!wu.empty()) {
-            sink(L"status", L"Installing Windows updates…");
-            failed += InstallWindowsUpdates(wu, sink) != 0;
+            if (a.rfind(L"wu:", 0) == 0) wu.push_back(a);
+            else if (a.rfind(L"app:", 0) == 0) apps.push_back(a);
+        const bool restore = std::find(args.begin(), args.end(), L"restore") != args.end();
+        const int items = static_cast<int>(wu.size() + apps.size());
+        const double units = items + (restore ? 1 : 0);
+        double done = 0;
+        if (restore) {
+            rep.Step(0, items, L"restore", L"Making a restore point");
+            rep.Pct(-1);
+            rep.End(L"restore", MakeRestorePoint(sink, L"Canivete: before installing updates") == 0 ? L"ok" : L"fail");
+            done = 1;
         }
-        for (const auto& a : args)
-            if (a.rfind(L"app:", 0) == 0) {
-                sink(L"status", L"Updating apps…");
-                failed += UpgradeApp(a, sink) != 0;
+        auto skip = [&](const std::wstring& k) {
+            sink(k, L"Not started (stopped)");
+            rep.End(k, L"skip");
+        };
+        if (!wu.empty()) {
+            if (CancelRequested()) {
+                for (const auto& k : wu) skip(k);
+            } else {
+                const double base = done, n = static_cast<double>(wu.size());
+                failed += InstallWindowsUpdates(wu, items, rep, [&](double f) { rep.Pct((base + n * f) / units); }) != 0;
             }
+            done += static_cast<double>(wu.size());
+        }
+        for (size_t i = 0; i < apps.size(); ++i) {
+            if (CancelRequested()) {
+                skip(apps[i]);
+                continue;
+            }
+            const double base = done;
+            failed += UpgradeApp(apps[i], static_cast<int>(wu.size() + i + 1), items, rep,
+                                 [&](double f) { rep.Pct((base + f) / units); }) != 0;
+            done += 1;
+        }
         if (RebootPending()) sink(L"reboot", L"");
     } else if (task == L"clean") {
-        for (const auto& a : args) {
-            bool known = false;
-            for (const CleanDef& d : kClean) known = known || a == d.key;
-            if (known) failed += Clean(a, sink) != 0;
+        std::vector<std::wstring> keys;
+        for (const auto& a : args)
+            for (const CleanDef& d : kClean)
+                if (a == d.key) keys.push_back(a);
+        const int n = static_cast<int>(keys.size());
+        ULONGLONG freed = 0;
+        for (int i = 0; i < n; ++i) {
+            const std::wstring& k = keys[static_cast<size_t>(i)];
+            if (CancelRequested()) {
+                sink(k, L"Not cleaned (stopped)");
+                rep.End(k, L"skip");
+                continue;
+            }
+            rep.Step(i + 1, n, k, L"Cleaning");
+            rep.Pct(static_cast<double>(i) / n);
+            failed += Clean(k, rep, freed, [&](double f) { rep.Pct((i + f) / n); }) != 0;
+            rep.Freed(freed, true);
         }
+        rep.Pct(1);
     } else if (task == L"startup") {
-        for (const auto& a : args) failed += SetStartup(a, sink) != 0;
+        const int n = static_cast<int>(args.size());
+        for (int i = 0; i < n; ++i) {
+            rep.Step(i + 1, n, args[static_cast<size_t>(i)].size() > 2 ? args[static_cast<size_t>(i)].substr(2) : L"", L"Changing");
+            failed += SetStartup(args[static_cast<size_t>(i)], sink) != 0;
+            rep.Pct((i + 1.0) / n);
+        }
     } else if (task == L"restore") {
+        rep.Step(0, 1, L"restore", L"Making a restore point");
+        rep.Pct(-1);
         failed += MakeRestorePoint(sink, L"Canivete: restore point") != 0;
     } else if (task == L"repair") {
         sink(L"status", L"Checking Windows' system files (this takes a while)…");
+        rep.Step(1, 2, L"dism", L"Repairing the Windows image");
+        rep.Pct(0);
         failed += RunTool(L"Repairing the Windows image (DISM /RestoreHealth)", SysExe(L"Dism.exe"),
-                          L"/Online /Cleanup-Image /RestoreHealth /NoRestart", sink) != 0;
-        failed += RunTool(L"Checking system files (sfc /scannow)", SysExe(L"sfc.exe"), L"/scannow", sink) != 0;
+                          L"/Online /Cleanup-Image /RestoreHealth /NoRestart", sink, [&](double f) { rep.Pct(f / 2); }) != 0;
+        if (CancelRequested()) {
+            sink(L"log", L"Stopped before sfc.");
+            rep.End(L"sfc", L"skip");
+        } else {
+            rep.Step(2, 2, L"sfc", L"Checking system files");
+            rep.Pct(0.5);
+            failed += RunTool(L"Checking system files (sfc /scannow)", SysExe(L"sfc.exe"), L"/scannow", sink,
+                              [&](double f) { rep.Pct(0.5 + f / 2); }) != 0;
+        }
         if (RebootPending()) sink(L"reboot", L"");
     } else if (task == L"optimize") {
         sink(L"status", L"Optimizing drives…");
+        rep.Step(0, 1, L"optimize", L"Optimizing drives");
+        rep.Pct(-1);
         failed += RunTool(L"Optimizing drives (trim for SSDs, defragment for hard disks)", SysExe(L"defrag.exe"),
                           L"/C /O /U /V", sink) != 0;
     } else if (task == L"scan") {
         sink(L"status", L"Quick virus scan (a few minutes)…");
+        rep.Step(0, 1, L"scan", L"Quick virus scan");
+        rep.Pct(-1);
         failed += RunTool(L"Microsoft Defender quick scan", Expand(L"%ProgramFiles%\\Windows Defender\\MpCmdRun.exe"),
                           L"-Scan -ScanType 1", sink) != 0;
     } else {
@@ -1213,7 +1742,17 @@ int Maint_AdminMain(int argc, wchar_t** argv) {
         DWORD_PTR res = 0;
         SendMessageTimeoutW(w, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&cd), SMTO_ABORTIFHUNG, 3000, &res);
     };
+    // Windows gave this copy the foreground when the prompt closed, and it has no window: hand it back
+    // to the Maintenance window so it doesn't drop behind other apps.
+    DWORD pid = 0;
+    GetWindowThreadProcessId(w, &pid);
+    AllowSetForegroundWindow(pid);
+    sink(L"hello", L"");
+    HANDLE cancel = OpenEventW(SYNCHRONIZE, FALSE, maint::CancelEventName(pid).c_str());
+    maint::SetCancelEvent(cancel);
     const int code = maint::RunTask(argv[3], args, sink);
+    maint::SetCancelEvent(nullptr);
+    if (cancel) CloseHandle(cancel);
     CoUninitialize();
     return code;
 }

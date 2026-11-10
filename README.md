@@ -219,6 +219,14 @@ Computer maintenance: tray > Computer maintenance… (or Start menu > Computer M
   the app's own uninstaller (msiexec /x for MSI apps).
 - Health: uptime and restart advice, memory, disk space, repair (DISM + sfc), optimize drives, restore
   point, Defender quick scan.
+- Jobs (install, clean, apply startup changes, repair, optimize, restore point, virus scan, uninstall)
+  run in the background: the window stays open and in front, and you can switch tabs, move it or use
+  other apps meanwhile. A progress bar above the buttons shows what is being done right now ("2 of 6:
+  Firefox — Downloading 45%", "417 MB freed so far") and the percent (also on the tab and on the
+  taskbar button). Install, Clean and Repair have a Cancel button: the job stops after the item it is
+  on. When it ends the bar says how it went ("Freed 3.2 GB", "5 of 6 updated, 1 failed: …") until you
+  press Close, and the lists are checked again. One job at a time: the buttons that would start another
+  are off until it ends.
 
 Uploads (Settings → Uploads): screenshots, GIFs and videos go to Google Drive or Amazon S3 and
 the link is copied, ready to paste. Upload button on the screenshot preview, in the editor (key U:
@@ -262,7 +270,13 @@ files to the running one, so Explorer's one-copy-per-file launch ends in one win
 `Canivete.exe --rename a.txt folder` opens the renamer the same way.
 `Canivete.exe --maintenance` opens Computer maintenance (the Start menu's Computer Maintenance shortcut does this).
 `Canivete.exe --maint-admin <window> <task> [items]` is the elevated copy that window starts for one job; it refuses
-to run unless that window exists.
+to run unless that window exists. It reports progress back with WM_COPYDATA and stops after the current item
+when the window sets the event `Local\Canivete.MaintCancel.<window pid>` (Cancel).
+`tools\test_maint_progress.ps1` (run through `tools\hidden_test.ps1`) runs a cleanup and an update job with
+simulated work and checks the window stays visible and answering, tabs switch mid-job, a second job is refused,
+Cancel stops it, and the result line; it saves window grabs in `test_out\`. Test copies only:
+`CANIVETE_MAINT_FAKE=1` makes every maintenance check and job a simulation (nothing installed or deleted, no
+Windows prompt).
 `Canivete.exe --maint-check` runs the daily maintenance check now; `--check-update` checks for a new Canivete.
 `Canivete.exe --update-test` checks the releases repo, downloads the setup and verifies its SHA256 (self-test).
 `Canivete.exe --uninstall` removes Canivete's Explorer entries, shortcuts and autostart (the uninstaller runs it).
