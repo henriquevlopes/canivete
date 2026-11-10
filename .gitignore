@@ -4,3 +4,5 @@ out/
 res/icon_preview.png
 *.user
 dist/
+test_out/
+/.claude/worktrees/
