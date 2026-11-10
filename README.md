@@ -50,6 +50,11 @@ squares, circles and 45° lines. Ctrl+wheel zooms at the mouse (Ctrl+0 fits, Ctr
 hold Space and drag (or drag with the middle button) to move around. Ctrl+Z / Ctrl+Y undo/redo, Ctrl+C copies, Ctrl+S saves (over the
 capture's file). Enter or Done copies, saves and closes; Esc cancels a shape or closes (asks if there
 are unsaved edits). Text: click, type, Enter finishes, Shift+Enter new line, Ctrl+V pastes.
+Shapes stay editable: a new shape is selected right after it's drawn, and the Select tool (V) picks
+any shape. A selected shape can be dragged (Shift = straight), resized by its handles (text and
+markers stretch from a corner), nudged with the arrow keys (Shift = 10 px), recolored or resized
+with the color and size buttons / keys / wheel, and removed with Delete; Esc unselects. Clicking a
+text with the Text tool, or double-clicking it with any tool, retypes it. Every change is one undo step.
 
 Image resizer: select images in Explorer, right-click > Show more options > Resize with Canivete
 (or Send to > Canivete - Resize images, which also takes folders), or tray > Resize images…, or

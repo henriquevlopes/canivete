@@ -29,13 +29,15 @@ constexpr wchar_t kEditorClass[] = L"CaniveteEditor";
 constexpr COLORREF kAccent = RGB(232, 44, 56);
 constexpr UINT_PTR kTimerStatus = 1;
 
-enum class Tool { Rect, Ellipse, Arrow, Line, Text, Number, Highlight, Pixelate };
+// Same order as kTools (the toolbar shows them in this order).
+enum class Tool { Select, Rect, Ellipse, Arrow, Line, Text, Number, Highlight, Pixelate };
 struct ToolDef {
     Tool tool;
     UINT key;
     const wchar_t* tip;
 };
 const ToolDef kTools[] = {
+    {Tool::Select, 'V', L"Select: click a shape to move, resize, recolor or delete it  (V)"},
     {Tool::Rect, 'R', L"Rectangle  (R)"},      {Tool::Ellipse, 'E', L"Ellipse  (E)"},
     {Tool::Arrow, 'A', L"Arrow  (A)"},         {Tool::Line, 'L', L"Line  (L)"},
     {Tool::Text, 'T', L"Text  (T)"},           {Tool::Number, 'N', L"Numbered marker  (N)"},
@@ -44,6 +46,7 @@ const ToolDef kTools[] = {
 const COLORREF kColors[] = {RGB(232, 44, 56),  RGB(255, 140, 0),  RGB(255, 214, 0),   RGB(46, 204, 64),
                             RGB(0, 120, 215),  RGB(156, 39, 176), RGB(255, 255, 255), RGB(0, 0, 0)};
 constexpr int kColorCount = static_cast<int>(std::size(kColors));
+constexpr int kToolCount = static_cast<int>(std::size(kTools));
 const float kLineW[] = {2, 4, 7};    // at 100 % display scale, in image pixels
 const float kFontPx[] = {16, 24, 36};
 
@@ -54,6 +57,7 @@ struct Shape {
     G::PointF a, b;
     std::wstring text;
     int number = 0;
+    float scale = 1;  // text and markers: stretched by their corner handles
 };
 
 enum class Item { Tool, Color, Size, Undo, Redo, Copy, Save, Done };
@@ -69,11 +73,19 @@ struct Editor {
     std::wstring path;  // file it was saved to ("" = not saved yet)
     float sc = 1;       // display scale of the captured monitor: sizes follow it
     Dib base, committed, view, back;
-    std::vector<Shape> shapes, redo;
+    std::vector<Shape> shapes;
+    std::vector<std::vector<Shape>> undo, redo;  // whole shape lists before / after each change
     Tool tool = Tool::Rect;
     int color = 0, size = 1;
     bool drawing = false, typing = false;
     Shape live;
+    int sel = -1;        // selected shape (handles shown), -1 = none
+    int editText = -1;   // text shape being retyped (left out of `committed` meanwhile)
+    bool dragging = false;  // moving or resizing the selected shape (left out of `committed` meanwhile)
+    int handle = -1;     // which handle is dragged, -1 = the whole shape
+    G::PointF dragFrom;
+    Shape dragStart;
+    std::vector<Shape> before;  // shape list when the drag started (for undo)
     float zoom = 1;
     bool fit = true;  // zoom follows the window size until the user zooms by hand
     POINT origin{};   // image top-left, client coords
@@ -144,7 +156,7 @@ float LineSpacing(float em) {
 
 void DrawText(G::Graphics& g, const Shape& s, float sc) {
     if (s.text.empty()) return;
-    const float em = kFontPx[s.size] * sc;
+    const float em = kFontPx[s.size] * sc * s.scale;
     G::GraphicsPath path;
     path.AddString(s.text.c_str(), -1, &TextFamily(), G::FontStyleBold, em, s.a, TypoFormat());
     G::Pen outline(IsLight(s.color) ? G::Color(220, 0, 0, 0) : G::Color(235, 255, 255, 255), em * 0.16f);
@@ -155,7 +167,7 @@ void DrawText(G::Graphics& g, const Shape& s, float sc) {
 }
 
 void DrawNumber(G::Graphics& g, const Shape& s, float sc) {
-    const float d = kFontPx[s.size] * sc * 1.45f;
+    const float d = kFontPx[s.size] * sc * s.scale * 1.45f;
     const G::RectF r(s.a.X - d / 2, s.a.Y - d / 2, d, d);
     G::SolidBrush fill(GC(s.color));
     g.FillEllipse(&fill, r);
@@ -179,6 +191,8 @@ void DrawShape(G::Graphics& g, const Shape& s, float sc, bool preview) {
     pen.SetEndCap(G::LineCapRound);
     const G::RectF r = Norm(s.a, s.b);
     switch (s.tool) {
+    case Tool::Select:
+        break;
     case Tool::Rect:
         g.DrawRectangle(&pen, r);
         break;
@@ -291,21 +305,211 @@ void UpdateView(Editor& e) {
     StretchBlt(e.view.dc, 0, 0, vw, vh, e.committed.dc, 0, 0, e.ImgW(), e.ImgH(), SRCCOPY);
 }
 
-void Rebuild(Editor& e) {
+// Bakes every shape into `committed`, except `skip` (the one being moved or retyped, drawn live).
+void Rebuild(Editor& e, int skip = -1) {
     GdiFlush();
     memcpy(e.committed.bits, e.base.bits, static_cast<size_t>(e.base.w) * e.base.h * 4);
-    for (const Shape& s : e.shapes) Bake(e, e.committed, s);
+    for (int i = 0; i < static_cast<int>(e.shapes.size()); ++i)
+        if (i != skip) Bake(e, e.committed, e.shapes[i]);
     GdiFlush();
     UpdateView(e);
 }
 
-void Commit(Editor& e, const Shape& s) {
-    e.shapes.push_back(s);
+void PushUndo(Editor& e, std::vector<Shape> state) {
+    e.undo.push_back(std::move(state));
     e.redo.clear();
+    e.dirty = true;
+}
+
+// Adds a new shape on top and selects it.
+void Commit(Editor& e, const Shape& s) {
+    PushUndo(e, e.shapes);
+    e.shapes.push_back(s);
+    e.sel = static_cast<int>(e.shapes.size()) - 1;
     Bake(e, e.committed, s);
     GdiFlush();
     UpdateView(e);
-    e.dirty = true;
+}
+
+// ---- selecting, moving and resizing shapes ----------------------------------------------------
+
+bool IsBox(Tool t) { return t == Tool::Rect || t == Tool::Ellipse || t == Tool::Highlight || t == Tool::Pixelate; }
+bool IsLine(Tool t) { return t == Tool::Line || t == Tool::Arrow; }
+
+// Text and marker outline at scale 1, relative to the shape's anchor point `a`.
+G::RectF RelBox(const Shape& s, float sc) {
+    if (s.tool == Tool::Number) {
+        const float d = kFontPx[s.size] * sc * 1.45f;
+        return G::RectF(-d / 2, -d / 2, d, d);
+    }
+    if (s.text.empty()) return G::RectF(0, 0, 0, 0);
+    G::GraphicsPath path;
+    path.AddString(s.text.c_str(), -1, &TextFamily(), G::FontStyleBold, kFontPx[s.size] * sc, G::PointF(0, 0),
+                   TypoFormat());
+    G::RectF r;
+    path.GetBounds(&r);
+    const float pad = kFontPx[s.size] * sc * 0.08f;  // the outline drawn around the letters
+    r.Inflate(pad, pad);
+    return r;
+}
+
+G::RectF Bounds(const Shape& s, float sc) {
+    if (IsBox(s.tool) || IsLine(s.tool)) return Norm(s.a, s.b);
+    const G::RectF r = RelBox(s, sc);
+    return G::RectF(s.a.X + r.X * s.scale, s.a.Y + r.Y * s.scale, r.Width * s.scale, r.Height * s.scale);
+}
+
+// Handle ids: 0 top-left, 1 top, 2 top-right, 3 right, 4 bottom-right, 5 bottom, 6 bottom-left, 7 left;
+// lines use 0 = start, 1 = end.
+G::PointF BoxPoint(const G::RectF& r, int id) {
+    const float x[] = {r.X, r.X + r.Width / 2, r.GetRight(), r.GetRight(), r.GetRight(), r.X + r.Width / 2, r.X, r.X};
+    const float y[] = {r.Y, r.Y, r.Y, r.Y + r.Height / 2, r.GetBottom(), r.GetBottom(), r.GetBottom(), r.Y + r.Height / 2};
+    return G::PointF(x[id], y[id]);
+}
+
+std::vector<std::pair<int, G::PointF>> Handles(const Shape& s, float sc) {
+    std::vector<std::pair<int, G::PointF>> h;
+    if (IsLine(s.tool)) return {{0, s.a}, {1, s.b}};
+    const G::RectF r = Bounds(s, sc);
+    for (int id = 0; id < 8; ++id)
+        if (IsBox(s.tool) || id % 2 == 0) h.push_back({id, BoxPoint(r, id)});  // text, markers: corners only
+    return h;
+}
+
+float SegmentDistance(G::PointF p, G::PointF a, G::PointF b) {
+    const float dx = b.X - a.X, dy = b.Y - a.Y, len2 = dx * dx + dy * dy;
+    const float t = len2 > 0 ? std::clamp(((p.X - a.X) * dx + (p.Y - a.Y) * dy) / len2, 0.f, 1.f) : 0.f;
+    return std::hypot(p.X - (a.X + t * dx), p.Y - (a.Y + t * dy));
+}
+
+// tol = how far off the line still counts, in image pixels.
+bool HitShape(const Shape& s, float sc, G::PointF p, float tol) {
+    const G::RectF r = Bounds(s, sc);
+    const float w = kLineW[s.size] * sc / 2 + tol;
+    switch (s.tool) {
+    case Tool::Rect: {
+        G::RectF outer = r, inner = r;
+        outer.Inflate(w, w);
+        inner.Inflate(-w, -w);
+        return outer.Contains(p) && !(inner.Width > 0 && inner.Height > 0 && inner.Contains(p));
+    }
+    case Tool::Ellipse: {
+        const float rx = r.Width / 2, ry = r.Height / 2;
+        if (rx < 1 || ry < 1) return SegmentDistance(p, s.a, s.b) <= w;
+        const float nx = (p.X - r.X - rx) / rx, ny = (p.Y - r.Y - ry) / ry;
+        return std::fabs(std::sqrt(nx * nx + ny * ny) - 1) * std::min(rx, ry) <= w;
+    }
+    case Tool::Line:
+    case Tool::Arrow:
+        return SegmentDistance(p, s.a, s.b) <= w + (s.tool == Tool::Arrow ? kLineW[s.size] * sc : 0);
+    default: {
+        G::RectF rr = r;
+        rr.Inflate(tol / 2, tol / 2);
+        return rr.Contains(p);
+    }
+    }
+}
+
+float HitTol(const Editor& e) { return e.Px(6) / e.zoom; }
+
+int ShapeAt(const Editor& e, G::PointF p) {
+    for (int i = static_cast<int>(e.shapes.size()) - 1; i >= 0; --i)
+        if (HitShape(e.shapes[i], e.sc, p, HitTol(e))) return i;
+    return -1;
+}
+
+int HandleAt(const Editor& e, G::PointF p) {
+    if (e.sel < 0 || e.typing) return -1;
+    const float r = e.Px(7) / e.zoom;
+    for (const auto& [id, h] : Handles(e.shapes[e.sel], e.sc))
+        if (std::fabs(p.X - h.X) <= r && std::fabs(p.Y - h.Y) <= r) return id;
+    return -1;
+}
+
+// The shape under the mouse that a press would grab: any shape with the Select tool, otherwise only
+// the selected one (so drawing next to a shape still starts a new one).
+int GrabAt(const Editor& e, G::PointF p) {
+    if (e.typing) return -1;
+    if (e.tool == Tool::Select) return ShapeAt(e, p);
+    return e.sel >= 0 && HitShape(e.shapes[e.sel], e.sc, p, HitTol(e)) ? e.sel : -1;
+}
+
+G::PointF Constrain(Tool t, G::PointF a, G::PointF b);
+
+void StartDrag(Editor& e, int index, int handle, G::PointF p) {
+    e.sel = index;
+    e.dragging = true;
+    e.handle = handle;
+    e.dragFrom = p;
+    e.dragStart = e.shapes[index];
+    e.before = e.shapes;
+    Rebuild(e, index);
+    SetCapture(e.hwnd);
+}
+
+void DragTo(Editor& e, G::PointF p, bool shift) {
+    Shape s = e.dragStart;
+    const Shape& o = e.dragStart;
+    if (e.handle < 0) {  // move
+        float dx = p.X - e.dragFrom.X, dy = p.Y - e.dragFrom.Y;
+        if (shift) (std::fabs(dx) > std::fabs(dy) ? dy : dx) = 0;  // straight across or up/down
+        s.a = G::PointF(o.a.X + dx, o.a.Y + dy);
+        s.b = G::PointF(o.b.X + dx, o.b.Y + dy);
+    } else if (IsLine(s.tool)) {
+        G::PointF& end = e.handle == 0 ? s.a : s.b;
+        end = shift ? Constrain(s.tool, e.handle == 0 ? s.b : s.a, p) : p;
+    } else if (IsBox(s.tool)) {
+        const G::RectF r = Norm(o.a, o.b);
+        float l = r.X, t = r.Y, rt = r.GetRight(), b = r.GetBottom();
+        const int h = e.handle;
+        if (h == 0 || h == 6 || h == 7) l = p.X;
+        if (h == 2 || h == 3 || h == 4) rt = p.X;
+        if (h == 0 || h == 1 || h == 2) t = p.Y;
+        if (h == 4 || h == 5 || h == 6) b = p.Y;
+        s.a = G::PointF(l, t);
+        s.b = G::PointF(rt, b);
+    } else {  // text, marker: stretch from the opposite corner, keeping the shape
+        const G::RectF rel = RelBox(o, e.sc);
+        const G::PointF relCorner = BoxPoint(rel, (e.handle + 4) % 8);  // at scale 1, from the anchor
+        const G::PointF fixed(o.a.X + relCorner.X * o.scale, o.a.Y + relCorner.Y * o.scale);
+        const G::PointF grab = BoxPoint(Bounds(o, e.sc), e.handle);
+        const float d0 = std::hypot(grab.X - fixed.X, grab.Y - fixed.Y);
+        const float d1 = std::hypot(p.X - fixed.X, p.Y - fixed.Y);
+        if (d0 > 0.5f) s.scale = std::clamp(o.scale * d1 / d0, 0.25f, 12.f);
+        s.a = G::PointF(fixed.X - relCorner.X * s.scale, fixed.Y - relCorner.Y * s.scale);
+    }
+    e.shapes[e.sel] = s;
+}
+
+void EndDrag(Editor& e, bool cancel) {
+    if (!e.dragging) return;
+    e.dragging = false;
+    if (GetCapture() == e.hwnd) ReleaseCapture();
+    const Shape& now = e.shapes[e.sel];
+    const bool moved = now.a.X != e.dragStart.a.X || now.a.Y != e.dragStart.a.Y || now.b.X != e.dragStart.b.X ||
+                       now.b.Y != e.dragStart.b.Y || now.scale != e.dragStart.scale;
+    if (cancel) e.shapes = e.before;
+    else if (moved) PushUndo(e, std::move(e.before));
+    e.before.clear();
+    Rebuild(e);
+}
+
+// Changes the selected shape (color, size, position) as one undo step.
+template <class F>
+void ChangeSelected(Editor& e, F change) {
+    if (e.sel < 0 || e.typing || e.dragging) return;
+    std::vector<Shape> old = e.shapes;
+    change(e.shapes[e.sel]);
+    PushUndo(e, std::move(old));
+    Rebuild(e);
+}
+
+void DeleteSelected(Editor& e) {
+    if (e.sel < 0 || e.typing || e.dragging) return;
+    PushUndo(e, e.shapes);
+    e.shapes.erase(e.shapes.begin() + e.sel);
+    e.sel = -1;
+    Rebuild(e);
 }
 
 int NextNumber(const Editor& e) {
@@ -330,7 +534,7 @@ constexpr int kToolbarH = 44, kStatusH = 24;
 
 int ToolbarWidth(const Editor& e) {
     const int btn = e.Px(34), sw = e.Px(26), sep = e.Px(14);
-    return e.Px(8) + 8 * btn + sep + kColorCount * sw + sep + 3 * e.Px(28) + sep + 2 * btn + sep + 2 * btn +
+    return e.Px(8) + kToolCount * btn + sep + kColorCount * sw + sep + 3 * e.Px(28) + sep + 2 * btn + sep + 2 * btn +
            e.Px(6) + e.Px(78) + e.Px(8);
 }
 
@@ -389,7 +593,7 @@ void Layout(Editor& e) {
         e.items.push_back({k, i, {x, top, x + w, top + h}});
         x += w;
     };
-    for (int i = 0; i < 8; ++i) add(Item::Tool, i, btn);
+    for (int i = 0; i < kToolCount; ++i) add(Item::Tool, i, btn);
     x += sep;
     for (int i = 0; i < kColorCount; ++i) add(Item::Color, i, sw);
     x += sep;
@@ -458,6 +662,15 @@ void ToolIcon(Editor& e, G::Graphics& g, HDC dc, Tool t, const RECT& r) {
     pen.SetStartCap(G::LineCapRound);
     pen.SetEndCap(G::LineCapRound);
     switch (t) {
+    case Tool::Select: {  // mouse pointer
+        const float px[] = {-0.55f, -0.55f, -0.12f, 0.18f, 0.42f, 0.12f, 0.62f};
+        const float py[] = {-1.0f, 0.62f, 0.24f, 0.98f, 0.86f, 0.12f, 0.12f};
+        G::PointF pts[7];
+        for (int i = 0; i < 7; ++i) pts[i] = G::PointF(cx + px[i] * s, cy + py[i] * s);
+        G::SolidBrush b(fg);
+        g.FillPolygon(&b, pts, 7);
+        break;
+    }
     case Tool::Rect:
         g.DrawRectangle(&pen, cx - s, cy - s * 0.75f, 2 * s, 1.5f * s);
         break;
@@ -521,8 +734,8 @@ const wchar_t* Tip(const Editor& e, int i) {
     const ItemRect& it = e.items[i];
     switch (it.kind) {
     case Item::Tool: return kTools[it.index].tip;
-    case Item::Color: return L"Color  (1 to 8)";
-    case Item::Size: return L"Size: line width, text and markers  ([ and ], or the mouse wheel)";
+    case Item::Color: return L"Color  (1 to 8); also changes the selected shape";
+    case Item::Size: return L"Size: line width, text and markers  ([ and ], or the mouse wheel); also changes the selected shape";
     case Item::Undo: return L"Undo  (Ctrl+Z)";
     case Item::Redo: return L"Redo  (Ctrl+Y)";
     case Item::Copy: return L"Copy to the clipboard  (Ctrl+C)";
@@ -566,8 +779,29 @@ void Paint(Editor& e, HDC hdc) {
         g.TranslateTransform(static_cast<float>(e.origin.x), static_cast<float>(e.origin.y));
         g.ScaleTransform(e.zoom, e.zoom);
         if (e.drawing || e.typing) DrawShape(g, e.live, e.sc, true);
+        if (e.dragging) DrawShape(g, e.shapes[e.sel], e.sc, true);
+        if (e.sel >= 0 && !e.typing) {  // selection: dashed frame and handles, same size at any zoom
+            const Shape& s = e.shapes[e.sel];
+            const float px = 1 / e.zoom;
+            if (!IsLine(s.tool)) {
+                G::RectF r = Bounds(s, e.sc);
+                const float pad = IsBox(s.tool) ? kLineW[s.size] * e.sc / 2 + 3 * px : 0;
+                r.Inflate(pad, pad);
+                G::Pen dark(G::Color(160, 0, 0, 0), 3 * px), light(G::Color(255, 255, 255, 255), px);
+                light.SetDashStyle(G::DashStyleDash);
+                g.DrawRectangle(&dark, r);
+                g.DrawRectangle(&light, r);
+            }
+            const float hs = e.Px(4) * px;
+            G::SolidBrush fill(G::Color(255, 255, 255, 255));
+            G::Pen ring(GC(kAccent), 1.5f * px);
+            for (const auto& [id, h] : Handles(s, e.sc)) {
+                g.FillRectangle(&fill, h.X - hs, h.Y - hs, 2 * hs, 2 * hs);
+                g.DrawRectangle(&ring, h.X - hs, h.Y - hs, 2 * hs, 2 * hs);
+            }
+        }
         if (e.typing) {  // caret and a light frame around the text
-            const float em = kFontPx[e.live.size] * e.sc, ls = LineSpacing(em);
+            const float em = kFontPx[e.live.size] * e.sc * e.live.scale, ls = LineSpacing(em);
             const size_t nl = e.live.text.find_last_of(L'\n');
             const std::wstring last = nl == std::wstring::npos ? e.live.text : e.live.text.substr(nl + 1);
             const int lines = 1 + static_cast<int>(std::count(e.live.text.begin(), e.live.text.end(), L'\n'));
@@ -625,7 +859,7 @@ void Paint(Editor& e, HDC hdc) {
                 break;
             }
             case Item::Undo:
-                Glyph(e, b, L"\xE7A7", r, !e.shapes.empty());
+                Glyph(e, b, L"\xE7A7", r, !e.undo.empty());
                 break;
             case Item::Redo:
                 Glyph(e, b, L"\xE7A6", r, !e.redo.empty());
@@ -662,7 +896,12 @@ void Paint(Editor& e, HDC hdc) {
     if (const wchar_t* t = Tip(e, e.hover)) left = t;
     else if (!e.status.empty()) left = e.status;
     else if (e.typing) left = L"Type your text. Enter finishes, Shift+Enter starts a new line, Esc cancels.";
-    else left = L"Drag to draw.  Space+drag = move.  Ctrl+wheel = zoom (Ctrl+0 fit).  Enter = copy, save, close.  Esc = close.";
+    else if (e.sel >= 0)
+        left = L"Selected: drag to move, drag a handle to resize, pick a color or size to change it, Delete removes it."
+               L"  Double-click text to edit it.  Esc = unselect.";
+    else if (e.tool == Tool::Select)
+        left = L"Click a shape to select it.  Drag empty space to move around.  Ctrl+wheel = zoom.";
+    else left = L"Drag to draw.  V = select shapes.  Space+drag = move around.  Ctrl+wheel = zoom (Ctrl+0 fit).  Enter = copy, save, close.";
     RECT lr = sb;
     lr.left += e.Px(10);
     lr.right -= e.Px(150);
@@ -687,34 +926,88 @@ void FinishText(Editor& e) {
     if (!e.typing) return;
     e.typing = false;
     while (!e.live.text.empty() && (e.live.text.back() == L'\n' || e.live.text.back() == L' ')) e.live.text.pop_back();
-    if (!e.live.text.empty()) Commit(e, e.live);
+    if (e.editText >= 0) {  // retyped an existing text: replace it (or remove it when emptied)
+        const int i = std::exchange(e.editText, -1);
+        const Shape& old = e.shapes[i];
+        if (e.live.text != old.text || e.live.color != old.color || e.live.size != old.size) {
+            PushUndo(e, e.shapes);
+            if (e.live.text.empty()) {
+                e.shapes.erase(e.shapes.begin() + i);
+                e.sel = -1;
+            } else {
+                e.shapes[i] = e.live;
+                e.sel = i;
+            }
+        } else {
+            e.sel = i;
+        }
+        Rebuild(e);
+    } else if (!e.live.text.empty()) {
+        Commit(e, e.live);
+    }
+    Redraw(e);
+}
+
+void CancelText(Editor& e) {
+    if (!e.typing) return;
+    e.typing = false;
+    if (e.editText >= 0) {
+        e.sel = std::exchange(e.editText, -1);
+        Rebuild(e);
+    }
+    Redraw(e);
+}
+
+void EditText(Editor& e, int i) {
+    FinishText(e);
+    EndDrag(e, false);
+    if (i < 0 || i >= static_cast<int>(e.shapes.size()) || e.shapes[i].tool != Tool::Text) return;
+    e.editText = i;
+    e.live = e.shapes[i];
+    e.typing = true;
+    e.sel = -1;
+    Rebuild(e, i);
     Redraw(e);
 }
 
 void Undo(Editor& e) {
     if (e.typing) {
-        e.typing = false;
-        Redraw(e);
+        CancelText(e);
         return;
     }
-    if (e.shapes.empty()) return;
-    e.redo.push_back(e.shapes.back());
-    e.shapes.pop_back();
+    EndDrag(e, true);
+    if (e.undo.empty()) return;
+    e.redo.push_back(std::move(e.shapes));
+    e.shapes = std::move(e.undo.back());
+    e.undo.pop_back();
+    e.sel = -1;
     e.dirty = true;
     Rebuild(e);
     Redraw(e);
 }
 
 void Redo(Editor& e) {
-    if (e.redo.empty()) return;
-    const Shape s = e.redo.back();
+    if (e.typing || e.redo.empty()) return;
+    EndDrag(e, true);
+    e.undo.push_back(std::move(e.shapes));
+    e.shapes = std::move(e.redo.back());
     e.redo.pop_back();
-    e.shapes.push_back(s);
-    Bake(e, e.committed, s);
-    GdiFlush();
-    UpdateView(e);
+    e.sel = -1;
     e.dirty = true;
+    Rebuild(e);
     Redraw(e);
+}
+
+void SetColor(Editor& e, int index) {
+    e.color = index;
+    if (e.typing) e.live.color = kColors[index];
+    else ChangeSelected(e, [&](Shape& s) { s.color = kColors[index]; });
+}
+
+void SetSize(Editor& e, int index) {
+    e.size = std::clamp(index, 0, 2);
+    if (e.typing) e.live.size = e.size;
+    else ChangeSelected(e, [&](Shape& s) { s.size = e.size; });
 }
 
 void CopyNow(Editor& e) {
@@ -761,12 +1054,10 @@ void Click(Editor& e, const ItemRect& it) {
         e.tool = kTools[it.index].tool;
         break;
     case Item::Color:
-        e.color = it.index;
-        if (e.typing) e.live.color = kColors[e.color];
+        SetColor(e, it.index);
         break;
     case Item::Size:
-        e.size = it.index;
-        if (e.typing) e.live.size = e.size;
+        SetSize(e, it.index);
         break;
     case Item::Undo: Undo(e); break;
     case Item::Redo: Redo(e); break;
@@ -827,8 +1118,36 @@ void OnLButtonDown(Editor& e, int x, int y) {
         return;
     }
     const G::PointF p = ToImage(e, x, y);
+    if (!e.typing) {
+        // Grab the selected shape's handle, or a shape to move.
+        if (const int h = HandleAt(e, p); h >= 0) {
+            StartDrag(e, e.sel, h, p);
+            Redraw(e);
+            return;
+        }
+        if (const int i = GrabAt(e, p); i >= 0) {
+            StartDrag(e, i, -1, p);
+            Redraw(e);
+            return;
+        }
+        if (e.tool == Tool::Text) {  // clicking an existing text with the Text tool edits it
+            const int i = ShapeAt(e, p);
+            if (i >= 0 && e.shapes[i].tool == Tool::Text) {
+                EditText(e, i);
+                return;
+            }
+        }
+    }
+    if (e.tool == Tool::Select) {  // empty space: unselect, and drag to move around
+        FinishText(e);
+        e.sel = -1;
+        StartPan(e, x, y);
+        Redraw(e);
+        return;
+    }
     const bool wasTyping = e.typing;
     FinishText(e);
+    e.sel = -1;
     Shape s;
     s.tool = e.tool;
     s.color = kColors[e.color];
@@ -868,6 +1187,11 @@ void OnMouseMove(Editor& e, int x, int y, WPARAM keys) {
         Redraw(e);
         return;
     }
+    if (e.dragging) {
+        DragTo(e, ToImage(e, x, y), (keys & MK_SHIFT) != 0);
+        Redraw(e);
+        return;
+    }
     if (!e.drawing) return;
     G::PointF p = ToImage(e, x, y);
     if (keys & MK_SHIFT) p = Constrain(e.live.tool, e.live.a, p);
@@ -876,6 +1200,11 @@ void OnMouseMove(Editor& e, int x, int y, WPARAM keys) {
 }
 
 void OnLButtonUp(Editor& e) {
+    if (e.dragging) {
+        EndDrag(e, false);
+        Redraw(e);
+        return;
+    }
     if (!e.drawing) return;
     e.drawing = false;
     ReleaseCapture();
@@ -893,7 +1222,7 @@ void OnChar(Editor& e, wchar_t c) {
     } else if (c == L'\b') {
         if (!e.live.text.empty()) e.live.text.pop_back();
     } else if (c == 0x1B) {
-        e.typing = false;
+        CancelText(e);
     } else if (c == 0x16) {  // Ctrl+V: paste text
         if (OpenClipboard(e.hwnd)) {
             if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
@@ -936,22 +1265,37 @@ void OnKey(Editor& e, UINT vk) {
         if (e.drawing) {
             e.drawing = false;
             ReleaseCapture();
-            Redraw(e);
+        } else if (e.dragging) {
+            EndDrag(e, true);
+        } else if (e.sel >= 0) {
+            e.sel = -1;
         } else {
             Close(e);
+            return;
         }
+        Redraw(e);
         return;
     }
     if (vk == VK_RETURN) {
         Done(e);
         return;
     }
-    if (vk >= '1' && vk < '1' + kColorCount) {
-        e.color = static_cast<int>(vk - '1');
+    if ((vk == VK_DELETE || vk == VK_BACK) && e.sel >= 0) {
+        DeleteSelected(e);
+    } else if (e.sel >= 0 && (vk == VK_LEFT || vk == VK_RIGHT || vk == VK_UP || vk == VK_DOWN)) {
+        const float step = (shift ? 10.f : 1.f) * e.sc;  // nudge
+        const float dx = vk == VK_LEFT ? -step : vk == VK_RIGHT ? step : 0;
+        const float dy = vk == VK_UP ? -step : vk == VK_DOWN ? step : 0;
+        ChangeSelected(e, [&](Shape& s) {
+            s.a = G::PointF(s.a.X + dx, s.a.Y + dy);
+            s.b = G::PointF(s.b.X + dx, s.b.Y + dy);
+        });
+    } else if (vk >= '1' && vk < '1' + kColorCount) {
+        SetColor(e, static_cast<int>(vk - '1'));
     } else if (vk == VK_OEM_4) {
-        e.size = std::max(0, e.size - 1);
+        SetSize(e, e.size - 1);
     } else if (vk == VK_OEM_6) {
-        e.size = std::min(2, e.size + 1);
+        SetSize(e, e.size + 1);
     } else {
         for (const ToolDef& t : kTools)
             if (t.key == vk) e.tool = t.tool;
@@ -1004,10 +1348,19 @@ LRESULT CALLBACK EditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             GetCursorPos(&p);
             ScreenToClient(h, &p);
             const bool img = PtInRect(&e.imageArea, p) && HitItem(e, p.x, p.y) < 0;
-            const wchar_t* cur = e.panning || (img && e.space) ? IDC_SIZEALL
-                                 : !img                        ? IDC_ARROW
-                                 : e.tool == Tool::Text        ? IDC_IBEAM
-                                                               : IDC_CROSS;
+            const G::PointF ip = ToImage(e, p.x, p.y);
+            const int hd = img && !e.space ? (e.dragging ? e.handle : HandleAt(e, ip)) : -1;
+            const bool grab = img && !e.space && (e.dragging || GrabAt(e, ip) >= 0);
+            const wchar_t* cur = IDC_CROSS;
+            if (e.panning || (img && e.space)) cur = IDC_SIZEALL;
+            else if (!img) cur = IDC_ARROW;
+            else if (hd >= 0 && IsLine(e.shapes[e.sel].tool)) cur = IDC_CROSS;
+            else if (hd >= 0) {
+                const wchar_t* bySide[] = {IDC_SIZENWSE, IDC_SIZENS, IDC_SIZENESW, IDC_SIZEWE};
+                cur = bySide[hd % 4];
+            } else if (grab) cur = IDC_SIZEALL;
+            else if (e.tool == Tool::Select) cur = IDC_ARROW;
+            else if (e.tool == Tool::Text) cur = IDC_IBEAM;
             SetCursor(LoadCursorW(nullptr, cur));
             return TRUE;
         }
@@ -1015,6 +1368,20 @@ LRESULT CALLBACK EditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN:
         OnLButtonDown(e, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
         return 0;
+    case WM_LBUTTONDBLCLK: {  // double-click a text to edit it; otherwise a normal click (quick markers)
+        const int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+        const POINT cp{x, y};
+        if (PtInRect(&e.imageArea, cp) && HitItem(e, x, y) < 0 && !e.space) {
+            if (e.typing && e.editText < 0 && e.live.text.empty()) CancelText(e);
+            const int i = e.typing ? -1 : ShapeAt(e, ToImage(e, x, y));
+            if (i >= 0 && e.shapes[i].tool == Tool::Text) {
+                EditText(e, i);
+                return 0;
+            }
+        }
+        OnLButtonDown(e, x, y);
+        return 0;
+    }
     case WM_MOUSEMOVE:
         OnMouseMove(e, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), wp);
         return 0;
@@ -1036,15 +1403,22 @@ LRESULT CALLBACK EditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_CAPTURECHANGED:
         e.panning = false;
+        if (e.dragging) {
+            EndDrag(e, false);
+            Redraw(e);
+        }
         return 0;
     case WM_KILLFOCUS:
         e.space = false;
         EndPan(e);
         return 0;
-    case WM_RBUTTONUP:  // right-click cancels the shape being drawn
+    case WM_RBUTTONUP:  // right-click cancels the shape being drawn or the move
         if (e.drawing) {
             e.drawing = false;
             ReleaseCapture();
+            Redraw(e);
+        } else if (e.dragging) {
+            EndDrag(e, true);
             Redraw(e);
         }
         return 0;
@@ -1057,8 +1431,7 @@ LRESULT CALLBACK EditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             Redraw(e);
             return 0;
         }
-        e.size = std::clamp(e.size + (GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 1 : -1), 0, 2);
-        if (e.typing) e.live.size = e.size;
+        SetSize(e, e.size + (GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 1 : -1));
         Redraw(e);
         return 0;
     case WM_KEYDOWN:
@@ -1116,6 +1489,7 @@ void Editor_Open(std::shared_ptr<CaptureResult> r, const std::wstring& path) {
     if (!registered) {
         WNDCLASSEXW wc{sizeof(wc)};
         wc.lpfnWndProc = EditorProc;
+        wc.style = CS_DBLCLKS;
         wc.hInstance = g_hinst;
         wc.lpszClassName = kEditorClass;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
