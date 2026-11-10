@@ -20,6 +20,7 @@ struct State {
     HWND hwnd = nullptr;
     HWND prevForeground = nullptr;
     bool active = false;
+    bool picking = false;      // color picker: no dimming, no selection, click picks the pixel
     RECT vr{};                 // virtual desktop, screen coords
     Dib frozen, dim, back, mag;
     std::vector<RECT> windows;   // top-level windows, z-order (topmost first), screen coords
@@ -186,6 +187,7 @@ RECT ComputeLayout() {
     SIZE ts{};
     GetTextExtentPoint32W(S.back.dc, buf, static_cast<int>(wcslen(buf)), &ts);
     const int lw = ts.cx + 2 * pad, lh = ts.cy + pad;
+    const int infoH = S.picking ? 2 * lh : lh;
     int lx = L.sel.left, ly = L.sel.top - lh - 3;
     const RECT selMon = ToClient(MonitorAt({S.sel.left, S.sel.top}));
     if (ly < selMon.top) {
@@ -193,16 +195,22 @@ RECT ComputeLayout() {
         ly = L.sel.top + 3;
     }
     L.label = {lx, ly, lx + lw, ly + lh};
+    if (S.picking) L.sel = L.label = {};
 
-    L.cell = std::max(4, static_cast<int>(std::lround(8 * s)));
+    L.cell = std::max(4, static_cast<int>(std::lround((S.picking ? 12 : 8) * s)));
     const int M = kMag * L.cell;
     const int off = static_cast<int>(std::lround(24 * s));
     const RECT mon = ToClient(MonitorAt(S.cur));
     const POINT c{S.cur.x - S.vr.left, S.cur.y - S.vr.top};
     int mx = c.x + off, my = c.y + off;
     if (mx + M > mon.right) mx = c.x - off - M;
-    if (my + M + lh > mon.bottom) my = c.y - off - M - lh;
-    L.mag = {mx, my, mx + M, my + M + lh};
+    if (my + M + infoH > mon.bottom) my = c.y - off - M - infoH;
+    L.mag = {mx, my, mx + M, my + M + infoH};
+    if (S.picking) {
+        RECT m = L.mag;
+        InflateRect(&m, 3, 3);
+        return m;
+    }
 
     RECT d = L.sel;
     InflateRect(&d, 4, 4);
@@ -250,17 +258,33 @@ void DrawMagnifier(HDC dc) {
     const uint32_t px = S.mag.bits[half * kMag + half];
     RECT info{r.left - 2, r.bottom, r.right + 2, L.mag.bottom + 2};
     FillRectColor(dc, info, RGB(24, 24, 24));
-    wchar_t buf[64];
-    swprintf_s(buf, L"%d, %d   #%02X%02X%02X", S.cur.x, S.cur.y, (px >> 16) & 255, (px >> 8) & 255, px & 255);
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, RGB(240, 240, 240));
+    if (S.picking) {  // swatch + value in the copy format, then hex and position
+        const COLORREF c = RGB((px >> 16) & 255, (px >> 8) & 255, px & 255);
+        const int lh = (info.bottom - info.top) / 2, gap = lh / 4;
+        RECT sw{info.left + 2 + gap, info.top + gap, info.left + 2 + lh - gap, info.top + lh - gap};
+        FillRectColor(dc, sw, c);
+        FrameOutside(dc, sw, RGB(140, 140, 140), 1);
+        RECT t1{sw.right + gap, info.top, info.right - gap, info.top + lh};
+        DrawTextW(dc, FormatColor(c, g_settings.colorFormat).c_str(), -1, &t1,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        wchar_t b2[64];
+        swprintf_s(b2, L"#%02X%02X%02X    %d, %d", (px >> 16) & 255, (px >> 8) & 255, px & 255, S.cur.x, S.cur.y);
+        RECT t2{info.left, info.top + lh, info.right, info.bottom};
+        SetTextColor(dc, RGB(170, 170, 170));
+        DrawTextW(dc, b2, -1, &t2, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        return;
+    }
+    wchar_t buf[64];
+    swprintf_s(buf, L"%d, %d   #%02X%02X%02X", S.cur.x, S.cur.y, (px >> 16) & 255, (px >> 8) & 255, px & 255);
     DrawTextW(dc, buf, -1, &info, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 }
 
 void Paint(HDC hdc, const RECT& rc) {
     const int x = rc.left, y = rc.top, w = rc.right - rc.left, h = rc.bottom - rc.top;
     HDC b = S.back.dc;
-    BitBlt(b, x, y, w, h, S.dim.dc, x, y, SRCCOPY);
+    BitBlt(b, x, y, w, h, S.picking ? S.frozen.dc : S.dim.dc, x, y, SRCCOPY);
     if (!IsRectEmpty(&L.sel)) {
         RECT is;
         if (IntersectRect(&is, &L.sel, &rc))
@@ -272,7 +296,7 @@ void Paint(HDC hdc, const RECT& rc) {
         RECT lr = L.label;
         DrawTextW(b, L.labelText.c_str(), -1, &lr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
-    if (g_settings.showMagnifier) DrawMagnifier(b);
+    if (g_settings.showMagnifier || S.picking) DrawMagnifier(b);
     BitBlt(hdc, x, y, w, h, b, x, y, SRCCOPY);
 }
 
@@ -296,6 +320,7 @@ void Redraw() {
 void Close() {
     if (!S.active) return;
     S.active = false;
+    S.picking = false;
     if (GetCapture() == S.hwnd) ReleaseCapture();
     ShowWindow(S.hwnd, SW_HIDE);
     S.frozen.Free();
@@ -333,8 +358,24 @@ void Finish() {
     Output_Process(std::move(res));
 }
 
+void FinishPick() {
+    const int x = S.cur.x - S.vr.left, y = S.cur.y - S.vr.top;
+    if (x < 0 || y < 0 || x >= S.frozen.w || y >= S.frozen.h) {
+        Close();
+        return;
+    }
+    const uint32_t px = S.frozen.bits[static_cast<size_t>(y) * S.frozen.w + x];
+    const POINT at = S.cur;
+    Close();
+    Color_Picked(RGB((px >> 16) & 255, (px >> 8) & 255, px & 255), at);
+}
+
 void OnMove(POINT p) {
     S.cur = p;
+    if (S.picking) {
+        Redraw();
+        return;
+    }
     if (S.down && !S.dragging && (std::abs(p.x - S.anchor.x) > 3 || std::abs(p.y - S.anchor.y) > 3))
         S.dragging = true;
     if (S.dragging)
@@ -375,10 +416,11 @@ LRESULT CALLBACK OverlayProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (!S.active || !S.down) return 0;
         S.down = false;
         ReleaseCapture();
-        Finish();
+        if (S.picking) FinishPick();
+        else Finish();
         return 0;
     case WM_RBUTTONUP:
-        if (S.dragging) {  // right-click while dragging = drop that selection, keep picking
+        if (S.dragging && !S.picking) {  // right-click while dragging = drop that selection, keep picking
             S.dragging = S.down = false;
             ReleaseCapture();
             UpdateHover();
@@ -394,7 +436,8 @@ LRESULT CALLBACK OverlayProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (wp == VK_RETURN || wp == VK_SPACE) {
-            Finish();
+            if (S.picking) FinishPick();
+            else Finish();
             return 0;
         }
         const int step = (GetKeyState(VK_SHIFT) < 0) ? 10 : 1;
@@ -433,36 +476,40 @@ void ForceForeground(HWND h) {
     if (GetForegroundWindow() != h) Log(L"Overlay could not take focus");
 }
 
-void StartRegion(HWND fg) {
+void StartRegion(HWND fg, bool picking) {
     S.vr = VirtualScreenRect();
     S.prevForeground = fg;
+    S.picking = picking;
     WindowInfo(fg, S.proc, S.title);
     S.windows.clear();
     S.monitors.clear();
-    EnumWindows(EnumWindowsProc, 0);
+    if (!picking) EnumWindows(EnumWindowsProc, 0);
     EnumDisplayMonitors(nullptr, nullptr, EnumMonitorsProc, 0);
 
-    if (!GrabInto(S.frozen, S.vr, g_settings.includeCursor)) {
+    if (!GrabInto(S.frozen, S.vr, g_settings.includeCursor && !picking)) {
         Log(L"Screen grab failed (%d x %d)", S.vr.right - S.vr.left, S.vr.bottom - S.vr.top);
         S.frozen.Free();
         return;
     }
     const int w = S.frozen.w, h = S.frozen.h;
-    if (!S.dim.Create(w, h) || !S.back.Create(w, h) || !S.mag.Create(kMag, kMag)) {
+    if ((!picking && !S.dim.Create(w, h)) || !S.back.Create(w, h) || !S.mag.Create(kMag, kMag)) {
         Log(L"Out of memory for overlay %d x %d", w, h);
         S.frozen.Free();
         S.dim.Free();
         S.back.Free();
         return;
     }
-    const size_t n = static_cast<size_t>(w) * h;
-    const uint32_t* src = S.frozen.bits;
-    uint32_t* dst = S.dim.bits;
-    for (size_t i = 0; i < n; ++i) dst[i] = (src[i] >> 1) & 0x7F7F7F;  // 50 % darker
+    if (!picking) {
+        const size_t n = static_cast<size_t>(w) * h;
+        const uint32_t* src = S.frozen.bits;
+        uint32_t* dst = S.dim.bits;
+        for (size_t i = 0; i < n; ++i) dst[i] = (src[i] >> 1) & 0x7F7F7F;  // 50 % darker
+    }
 
     GetCursorPos(&S.cur);
     S.down = S.dragging = false;
-    UpdateHover();
+    S.sel = {};
+    if (!picking) UpdateHover();
     S.active = true;
     ComputeLayout();
     S.prevDecor = {0, 0, w, h};
@@ -541,7 +588,10 @@ void Capture_Start(CaptureMode mode) {
     HWND fg = GetForegroundWindow();
     switch (mode) {
     case CaptureMode::Region:
-        StartRegion(fg);
+        StartRegion(fg, false);
+        break;
+    case CaptureMode::Color:
+        StartRegion(fg, true);
         break;
     case CaptureMode::Window:
         if (HWND w = WindowUnderCursor()) GrabDirect(WindowBounds(w), w);

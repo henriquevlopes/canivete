@@ -58,7 +58,7 @@ Default hotkeys (changeable):
 | Full-screen screenshot | PrtSc |
 | Record MP4 (press again = stop) | Shift+PrtSc |
 | Record GIF (press again = stop) | Ctrl+Shift+PrtSc |
-| Color picker | Win+Shift+C |
+| Color picker | Win+C (same as Henri's PowerToys) |
 
 ## 1. Screenshots
 

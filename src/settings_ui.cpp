@@ -32,8 +32,8 @@ constexpr int kCX = kM + 140;       // left edge of the controls column
 constexpr int kCW = kW - kM - kCX;  // width of the controls column
 
 enum : int {
-    IDC_HK0 = 200,    // hotkey boxes 200..202
-    IDC_HKST0 = 210,  // their status texts 210..212
+    IDC_HK0 = 200,    // hotkey boxes 200..203
+    IDC_HKST0 = 210,  // their status texts 210..213
     IDC_STATIC = 220,
     IDC_HINT,
     IDC_SAVE = 230,
@@ -52,10 +52,12 @@ enum : int {
     IDC_CURSOR,
     IDC_MAGNIFIER,
     IDC_AUTOSTART,
+    IDC_COLORFMT,
     IDC_APPLY,
 };
 
-const wchar_t* const kHkNames[3] = {L"Region screenshot", L"Window screenshot", L"Full screenshot"};
+const wchar_t* const kHkNames[kHotkeyCount] = {L"Region screenshot", L"Window screenshot", L"Full screenshot",
+                                                L"Color picker"};
 
 struct Ctl {
     HWND wnd;
@@ -72,8 +74,8 @@ struct UI {
     int footerY = 0, height = 0;
     HWND lastFocus = nullptr;
     // Hotkeys being edited (saved only on OK / Apply).
-    Hotkey hk[3];
-    bool bad[3]{};
+    Hotkey hk[kHotkeyCount];
+    bool bad[kHotkeyCount]{};
     int capturing = -1;    // which hotkey box has focus, -1 = none
     UINT liveMods = 0;     // Alt / Win held right now (seen by the hook)
     bool accepted = false;  // a key was taken while the current modifiers are held
@@ -133,7 +135,7 @@ void Build() {
     int y = 14;
     Heading(L"Hotkeys", y);
     y += 28;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < kHotkeyCount; ++i) {
         Label(kHkNames[i], y);
         HWND box = Edit(IDC_HK0 + i, kCX, y, 170, ES_READONLY);
         SetWindowSubclass(box, HotkeyBoxProc, 1, 0);
@@ -187,6 +189,13 @@ void Build() {
     y += 26;
     Check(IDC_MAGNIFIER, L"Show the magnifier when selecting a region", y);
     y += 36;
+
+    Heading(L"Color picker", y);
+    y += 28;
+    Label(L"Copy as", y);
+    HWND cf = Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, IDC_COLORFMT, kCX, y, 260, 240);
+    for (const ColorFormatDef& f : kColorFormats) SendMessageW(cf, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(f.label));
+    y += 38;
 
     Heading(L"Windows", y);
     y += 28;
@@ -252,27 +261,29 @@ void ShowHotkey(int i) {
 
 // Status next to each box: off, duplicate, taken by another app.
 void CheckHotkeys() {
-    Hotkey owned[3];  // what Canivete itself has registered (saved settings)
+    Hotkey owned[kHotkeyCount];  // what Canivete itself has registered (saved settings)
     ParseHotkey(g_settings.hkRegion, owned[0]);
     ParseHotkey(g_settings.hkWindow, owned[1]);
     ParseHotkey(g_settings.hkFull, owned[2]);
-    for (int i = 0; i < 3; ++i) {
+    ParseHotkey(g_settings.hkColor, owned[3]);
+    for (int i = 0; i < kHotkeyCount; ++i) {
         std::wstring st;
         bool bad = false;
         const Hotkey& hk = U.hk[i];
         if (!hk.vk) {
             st = L"Off";
         } else {
-            for (int j = 0; j < 3 && !bad; ++j)
+            for (int j = 0; j < kHotkeyCount && !bad; ++j)
                 if (j != i && U.hk[j].vk && SameKey(hk, U.hk[j])) {
                     st = std::wstring(L"Same as ") + kHkNames[j];
                     bad = true;
                 }
-            const bool mine = std::any_of(owned, owned + 3, [&](const Hotkey& o) { return SameKey(hk, o); });
+            const bool mine =
+                std::any_of(owned, owned + kHotkeyCount, [&](const Hotkey& o) { return SameKey(hk, o); });
             if (!bad && !mine) {
                 if (RegisterHotKey(U.hwnd, 900 + i, hk.mods, hk.vk)) {
                     UnregisterHotKey(U.hwnd, 900 + i);
-                } else {
+                } else if (!(hk.mods & MOD_WIN)) {  // Win combos Windows reserves still work (keyboard hook)
                     st = L"Used by another app";
                     bad = true;
                 }
@@ -428,7 +439,12 @@ void Populate() {
     ParseHotkey(s.hkRegion, U.hk[0]);
     ParseHotkey(s.hkWindow, U.hk[1]);
     ParseHotkey(s.hkFull, U.hk[2]);
-    for (int i = 0; i < 3; ++i) ShowHotkey(i);
+    ParseHotkey(s.hkColor, U.hk[3]);
+    for (int i = 0; i < kHotkeyCount; ++i) ShowHotkey(i);
+    int cf = 0;
+    for (int i = 0; i < static_cast<int>(std::size(kColorFormats)); ++i)
+        if (s.colorFormat == kColorFormats[i].key) cf = i;
+    SendMessageW(Item(IDC_COLORFMT), CB_SETCURSEL, cf, 0);
     SetCheck(IDC_SAVE, s.saveToFile);
     SetWindowTextW(Item(IDC_FOLDER), s.folder.c_str());
     SetWindowTextW(Item(IDC_NAME), s.fileName.c_str());
@@ -447,8 +463,8 @@ void Populate() {
 
 void Apply() {
     Settings s = g_settings;
-    std::wstring* hks[3] = {&s.hkRegion, &s.hkWindow, &s.hkFull};
-    for (int i = 0; i < 3; ++i) *hks[i] = U.hk[i].vk ? HotkeyText(U.hk[i]) : L"None";
+    std::wstring* hks[kHotkeyCount] = {&s.hkRegion, &s.hkWindow, &s.hkFull, &s.hkColor};
+    for (int i = 0; i < kHotkeyCount; ++i) *hks[i] = U.hk[i].vk ? HotkeyText(U.hk[i]) : L"None";
     s.saveToFile = Checked(IDC_SAVE);
     s.folder = Trim(GetText(IDC_FOLDER));
     s.fileName = Trim(GetText(IDC_NAME));
@@ -462,6 +478,8 @@ void Apply() {
     s.showNotification = Checked(IDC_NOTIFY);
     s.includeCursor = Checked(IDC_CURSOR);
     s.showMagnifier = Checked(IDC_MAGNIFIER);
+    const LRESULT cf = SendMessageW(Item(IDC_COLORFMT), CB_GETCURSEL, 0, 0);
+    if (cf >= 0 && cf < static_cast<LRESULT>(std::size(kColorFormats))) s.colorFormat = kColorFormats[cf].key;
     SaveSettings(s);
     const bool autostart = Checked(IDC_AUTOSTART);
     if (autostart != AutostartEnabled()) SetAutostart(autostart);
@@ -563,10 +581,10 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         const int id = GetDlgCtrlID(reinterpret_cast<HWND>(lp));
         COLORREF bg = GetSysColor(COLOR_WINDOW), fg = GetSysColor(COLOR_WINDOWTEXT);
         HBRUSH br = GetSysColorBrush(COLOR_WINDOW);
-        if (id >= IDC_HK0 && id < IDC_HK0 + 3 && U.capturing == id - IDC_HK0) {
+        if (id >= IDC_HK0 && id < IDC_HK0 + kHotkeyCount && U.capturing == id - IDC_HK0) {
             bg = kFocusBg;
             br = U.focusBrush;
-        } else if (id >= IDC_HKST0 && id < IDC_HKST0 + 3) {
+        } else if (id >= IDC_HKST0 && id < IDC_HKST0 + kHotkeyCount) {
             fg = U.bad[id - IDC_HKST0] ? kRed : kGrey;
         } else if (id == IDC_HINT || id == IDC_EXAMPLE) {
             fg = kGrey;
@@ -593,7 +611,7 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_COMMAND: {
         const int id = LOWORD(wp), code = HIWORD(wp);
-        if (id >= IDC_HK0 && id < IDC_HK0 + 3) {
+        if (id >= IDC_HK0 && id < IDC_HK0 + kHotkeyCount) {
             if (code == EN_SETFOCUS) StartCapture(id - IDC_HK0);
             else if (code == EN_KILLFOCUS) StopCapture();
             return 0;

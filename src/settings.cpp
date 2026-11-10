@@ -121,6 +121,13 @@ void LoadSettings() {
     s.hkRegion = ReadStr(L"Hotkeys", L"RegionScreenshot", L"Ctrl+PrintScreen");
     s.hkWindow = ReadStr(L"Hotkeys", L"WindowScreenshot", L"Alt+PrintScreen");
     s.hkFull = ReadStr(L"Hotkeys", L"FullScreenshot", L"PrintScreen");
+    s.hkColor = ReadStr(L"Hotkeys", L"ColorPicker", L"Win+C");
+    s.colorFormat = Lower(Trim(ReadStr(L"ColorPicker", L"CopyFormat", L"gray")));
+    {
+        bool known = false;
+        for (const ColorFormatDef& f : kColorFormats) known |= s.colorFormat == f.key;
+        if (!known) s.colorFormat = L"gray";
+    }
     s.folder = Trim(ReadStr(L"Screenshot", L"Folder", L""));
     s.fileName = Trim(ReadStr(L"Screenshot", L"FileName", L"%y-%mo-%d %h.%mi.%s"));
     if (s.fileName.empty()) s.fileName = L"%y-%mo-%d %h.%mi.%s";
@@ -143,6 +150,8 @@ void SaveSettings(const Settings& s) {
     WriteStr(L"Hotkeys", L"RegionScreenshot", s.hkRegion);
     WriteStr(L"Hotkeys", L"WindowScreenshot", s.hkWindow);
     WriteStr(L"Hotkeys", L"FullScreenshot", s.hkFull);
+    WriteStr(L"Hotkeys", L"ColorPicker", s.hkColor);
+    WriteStr(L"ColorPicker", L"CopyFormat", s.colorFormat);
     WriteStr(L"Screenshot", L"Folder", s.folder);
     WriteStr(L"Screenshot", L"FileName", s.fileName);
     WriteStr(L"Screenshot", L"Format", s.format);

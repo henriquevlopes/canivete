@@ -14,7 +14,8 @@ constexpr UINT WM_APP_TRAY = WM_APP + 1;          // tray icon callback
 constexpr UINT WM_APP_CAPTURE_DONE = WM_APP + 2;  // lParam = Output job, finished on a worker
 constexpr UINT WM_APP_COMMAND = WM_APP + 3;       // wParam = command id (from a second instance)
 
-enum class CaptureMode { Region = 1, Window = 2, Full = 3 };
+enum class CaptureMode { Region = 1, Window = 2, Full = 3, Color = 4 };  // also the hotkey ids
+constexpr int kHotkeyCount = 4;
 
 // ---- settings.cpp --------------------------------------------------------------------------
 struct Hotkey {
@@ -23,12 +24,13 @@ struct Hotkey {
 };
 
 struct Settings {
-    std::wstring hkRegion, hkWindow, hkFull;
+    std::wstring hkRegion, hkWindow, hkFull, hkColor;
     std::wstring folder;    // empty = Windows "Screenshots" folder
     std::wstring fileName;  // pattern with %tokens
     std::wstring fullScreen;  // "all" or "monitor"
     std::wstring format;      // "png" or "jpg"
     int jpegQuality = 90;     // 1..100
+    std::wstring colorFormat;  // key from kColorFormats
     bool saveToFile = true;
     bool copyToClipboard = true;
     bool includeCursor = false;
@@ -47,6 +49,25 @@ void SaveSettings(const Settings& s);
 bool ParseHotkey(const std::wstring& text, Hotkey& out);
 std::wstring HotkeyText(const Hotkey& hk);  // "Ctrl+Shift+PrintScreen", "" when none
 void Log(const wchar_t* fmt, ...);
+
+// Color picker copy formats: settings key and the label shown in Settings.
+struct ColorFormatDef {
+    const wchar_t* key;
+    const wchar_t* label;
+};
+inline constexpr ColorFormatDef kColorFormats[] = {
+    {L"gray", L"Gray 0-1   0.502"},
+    {L"hex", L"HEX   1e90ff"},
+    {L"rgb", L"RGB   rgb(30, 144, 255)"},
+    {L"hsl", L"HSL   hsl(210, 100%, 56%)"},
+    {L"float", L"Float 0-1   0.118, 0.565, 1.000"},
+    {L"linear", L"Linear 0-1   0.013, 0.279, 1.000"},
+};
+
+// ---- color.cpp -----------------------------------------------------------------------------
+std::wstring FormatColor(COLORREF c, const std::wstring& formatKey);
+void Color_Picked(COLORREF c, POINT at);  // copy in the chosen format, remember it, show a toast
+std::vector<COLORREF> RecentColors();     // newest first, up to 10
 
 // ---- main.cpp ------------------------------------------------------------------------------
 std::wstring Settings_Applied();     // reload after a save; returns hotkey problems ("" = all fine)
@@ -127,6 +148,7 @@ bool GrabScreen(const RECT& r, Image& out, bool withCursor);
 void Output_Init();
 void Output_Process(std::unique_ptr<CaptureResult> r);  // async: encode, save, clipboard, toast
 void Output_OnDone(LPARAM job);                          // main thread part
+void Output_ShowColor(COLORREF c, POINT at, const std::wstring& line1, const std::wstring& line2);
 std::vector<BYTE> EncodePng(const Image& img);
 std::vector<BYTE> EncodeJpeg(const Image& img, int quality);
 std::wstring PreviewFileName(const std::wstring& pattern);  // example name for the Settings window

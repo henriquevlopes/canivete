@@ -342,6 +342,19 @@ void ToastShow(const CaptureResult& r, const std::wstring& path, bool copied) {
 
 // ---- public --------------------------------------------------------------------------------
 
+void Output_ShowColor(COLORREF c, POINT at, const std::wstring& line1, const std::wstring& line2) {
+    CaptureResult r;
+    r.img.w = 600;
+    r.img.h = 120;
+    r.img.px.assign(static_cast<size_t>(r.img.w) * r.img.h,
+                    (static_cast<uint32_t>(GetRValue(c)) << 16) | (GetGValue(c) << 8) | GetBValue(c));
+    r.screenRect = {at.x, at.y, at.x + 1, at.y + 1};
+    ToastShow(r, L"", false);
+    T.line1 = line1;
+    T.line2 = line2;
+    InvalidateRect(T.hwnd, nullptr, FALSE);
+}
+
 std::vector<BYTE> EncodePng(const Image& img) { return Encode(img, -1); }
 
 std::vector<BYTE> EncodeJpeg(const Image& img, int quality) { return Encode(img, quality); }

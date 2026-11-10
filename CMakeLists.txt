@@ -10,6 +10,7 @@ add_executable(Canivete WIN32
     src/main.cpp
     src/settings.cpp
     src/settings_ui.cpp
+    src/color.cpp
     src/capture.cpp
     src/output.cpp
     res/canivete.rc

@@ -12,7 +12,8 @@ HWND g_mainWnd = nullptr;
 
 namespace {
 
-enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_OPEN_FOLDER, ID_SETTINGS, ID_EXIT };
+enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_COLOR, ID_OPEN_FOLDER, ID_SETTINGS, ID_EXIT };
+constexpr UINT ID_RECENT0 = 200;  // .. 209: recent colors in the tray menu
 constexpr UINT kCmdAlreadyRunning = 99;
 constexpr UINT kCmdSettings = 98;
 constexpr UINT_PTR kTimerDeferred = 10;
@@ -24,6 +25,64 @@ HICON g_icon = nullptr;
 CaptureMode g_deferredMode = CaptureMode::Region;
 FILETIME g_iniTime{};
 bool g_hotkeysSuspended = false;
+
+// Windows reserves some Win+key combos (Win+C, Win+Shift+C ...) so RegisterHotKey refuses them.
+// Those are caught with a low-level keyboard hook instead, like PowerToys does.
+struct HookKey {
+    int id;
+    Hotkey hk;
+    bool down;
+};
+std::vector<HookKey> g_hookKeys;
+HHOOK g_kbHook = nullptr;
+
+UINT CurrentMods() {
+    UINT m = 0;
+    if (GetAsyncKeyState(VK_CONTROL) < 0) m |= MOD_CONTROL;
+    if (GetAsyncKeyState(VK_MENU) < 0) m |= MOD_ALT;
+    if (GetAsyncKeyState(VK_SHIFT) < 0) m |= MOD_SHIFT;
+    if (GetAsyncKeyState(VK_LWIN) < 0 || GetAsyncKeyState(VK_RWIN) < 0) m |= MOD_WIN;
+    return m;
+}
+
+LRESULT CALLBACK WinKeyHook(int code, WPARAM wp, LPARAM lp) {
+    if (code == HC_ACTION) {
+        const auto* k = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lp);
+        if (!(k->flags & LLKHF_INJECTED)) {
+            const bool down = wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN;
+            for (HookKey& e : g_hookKeys) {
+                if (e.hk.vk != k->vkCode) continue;
+                if (down && (e.down || CurrentMods() == (e.hk.mods & ~MOD_NOREPEAT))) {
+                    if (!e.down) {
+                        e.down = true;
+                        // A dummy key between Win down and up stops the Start menu from opening.
+                        INPUT in[2]{};
+                        in[0].type = in[1].type = INPUT_KEYBOARD;
+                        in[0].ki.wVk = in[1].ki.wVk = 0xFF;
+                        in[1].ki.dwFlags = KEYEVENTF_KEYUP;
+                        SendInput(2, in, sizeof(INPUT));
+                        PostMessageW(g_mainWnd, WM_HOTKEY, e.id, 0);
+                    }
+                    return 1;
+                }
+                if (!down && e.down) {
+                    e.down = false;
+                    return 1;
+                }
+            }
+        }
+    }
+    return CallNextHookEx(nullptr, code, wp, lp);
+}
+
+void UpdateKeyHook() {
+    if (!g_hookKeys.empty() && !g_kbHook) {
+        g_kbHook = SetWindowsHookExW(WH_KEYBOARD_LL, WinKeyHook, g_hinst, 0);
+    } else if (g_hookKeys.empty() && g_kbHook) {
+        UnhookWindowsHookEx(g_kbHook);
+        g_kbHook = nullptr;
+    }
+}
 
 void TrayAdd() {
     g_nid = {};
@@ -58,10 +117,15 @@ std::wstring RegisterHotkeys() {
         {CaptureMode::Region, &g_settings.hkRegion, L"Region screenshot"},
         {CaptureMode::Window, &g_settings.hkWindow, L"Window screenshot"},
         {CaptureMode::Full, &g_settings.hkFull, L"Full screenshot"},
+        {CaptureMode::Color, &g_settings.hkColor, L"Color picker"},
     };
     std::wstring failed;
     for (const Entry& e : list) UnregisterHotKey(g_mainWnd, static_cast<int>(e.mode));
-    if (g_hotkeysSuspended) return failed;
+    g_hookKeys.clear();
+    if (g_hotkeysSuspended) {
+        UpdateKeyHook();
+        return failed;
+    }
     for (const Entry& e : list) {
         const int id = static_cast<int>(e.mode);
         Hotkey hk;
@@ -70,9 +134,11 @@ std::wstring RegisterHotkeys() {
                 failed += std::wstring(e.name) + L": can't read \"" + *e.text + L"\"\n";
             continue;
         }
-        if (!RegisterHotKey(g_mainWnd, id, hk.mods, hk.vk))
-            failed += std::wstring(e.name) + L": " + *e.text + L" is used by another app\n";
+        if (RegisterHotKey(g_mainWnd, id, hk.mods, hk.vk)) continue;
+        if (hk.mods & MOD_WIN) g_hookKeys.push_back({id, hk, false});  // reserved by Windows: use the hook
+        else failed += std::wstring(e.name) + L": " + *e.text + L" is used by another app\n";
     }
+    UpdateKeyHook();
     if (!failed.empty()) Log(L"Hotkey problems: %s", failed.c_str());
     return failed;
 }
@@ -145,6 +211,42 @@ void ShowMenu() {
     item(ID_WINDOW, L"Window screenshot", g_settings.hkWindow);
     item(ID_FULL, L"Full screenshot", g_settings.hkFull);
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    item(ID_COLOR, L"Pick a color", g_settings.hkColor);
+    // Recent colors: a swatch and the value in the copy format; clicking copies it again.
+    std::vector<HBITMAP> swatches;
+    const std::vector<COLORREF> recent = RecentColors();
+    if (!recent.empty()) {
+        HMENU sub = CreatePopupMenu();
+        const int sz = GetSystemMetricsForDpi(SM_CYMENUCHECK, GetDpiForWindow(g_mainWnd));
+        HDC screen = GetDC(nullptr);
+        HDC mem = CreateCompatibleDC(screen);
+        for (size_t i = 0; i < recent.size(); ++i) {
+            const COLORREF c = recent[i];
+            HBITMAP b = CreateCompatibleBitmap(screen, sz, sz);
+            HGDIOBJ old = SelectObject(mem, b);
+            RECT r{0, 0, sz, sz};
+            SetDCBrushColor(mem, RGB(128, 128, 128));
+            FillRect(mem, &r, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+            InflateRect(&r, -1, -1);
+            SetDCBrushColor(mem, c);
+            FillRect(mem, &r, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+            SelectObject(mem, old);
+            swatches.push_back(b);
+            wchar_t hex[16];
+            swprintf_s(hex, L"#%02X%02X%02X", GetRValue(c), GetGValue(c), GetBValue(c));
+            std::wstring text = std::wstring(hex) + L"\t" + FormatColor(c, g_settings.colorFormat);
+            MENUITEMINFOW mii{sizeof(mii)};
+            mii.fMask = MIIM_ID | MIIM_STRING | MIIM_BITMAP;
+            mii.wID = ID_RECENT0 + static_cast<UINT>(i);
+            mii.dwTypeData = text.data();
+            mii.hbmpItem = b;
+            InsertMenuItemW(sub, static_cast<UINT>(i), TRUE, &mii);
+        }
+        DeleteDC(mem);
+        ReleaseDC(nullptr, screen);
+        AppendMenuW(m, MF_POPUP, reinterpret_cast<UINT_PTR>(sub), L"Recent colors");
+    }
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_OPEN_FOLDER, L"Open screenshots folder");
     AppendMenuW(m, MF_STRING, ID_SETTINGS, L"Settings…");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
@@ -155,6 +257,7 @@ void ShowMenu() {
     TrackPopupMenuEx(m, TPM_RIGHTBUTTON, p.x, p.y, g_mainWnd, nullptr);
     PostMessageW(g_mainWnd, WM_NULL, 0, 0);
     DestroyMenu(m);
+    for (HBITMAP b : swatches) DeleteObject(b);
 }
 
 LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -164,7 +267,7 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     switch (msg) {
     case WM_HOTKEY:
-        if (wp >= 1 && wp <= 3) Capture_Start(static_cast<CaptureMode>(wp));
+        if (wp >= 1 && wp <= kHotkeyCount) Capture_Start(static_cast<CaptureMode>(wp));
         return 0;
     case WM_APP_TRAY:
         switch (LOWORD(lp)) {
@@ -178,7 +281,7 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         Output_OnDone(lp);
         return 0;
     case WM_APP_COMMAND:
-        if (wp >= 1 && wp <= 3) Capture_Start(static_cast<CaptureMode>(wp));
+        if (wp >= 1 && wp <= kHotkeyCount) Capture_Start(static_cast<CaptureMode>(wp));
         else if (wp == kCmdSettings)
             SettingsUI_Show();
         else if (wp == kCmdAlreadyRunning)
@@ -189,6 +292,7 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_REGION:
         case ID_WINDOW:
         case ID_FULL:
+        case ID_COLOR:
             // Wait for the menu to fade out so it isn't in the screenshot.
             g_deferredMode = static_cast<CaptureMode>(LOWORD(wp) - ID_REGION + 1);
             SetTimer(h, kTimerDeferred, 250, nullptr);
@@ -205,6 +309,14 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_EXIT:
             DestroyWindow(h);
             break;
+        default:
+            if (LOWORD(wp) >= ID_RECENT0 && LOWORD(wp) < ID_RECENT0 + 10) {
+                const std::vector<COLORREF> recent = RecentColors();
+                const size_t i = LOWORD(wp) - ID_RECENT0;
+                POINT p;
+                GetCursorPos(&p);
+                if (i < recent.size()) Color_Picked(recent[i], p);
+            }
         }
         return 0;
     case WM_TIMER:
@@ -216,7 +328,9 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
         if (HWND w = SettingsUI_Window()) DestroyWindow(w);
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
-        for (int id = 1; id <= 3; ++id) UnregisterHotKey(h, id);
+        for (int id = 1; id <= kHotkeyCount; ++id) UnregisterHotKey(h, id);
+        g_hookKeys.clear();
+        UpdateKeyHook();
         PostQuitMessage(0);
         return 0;
     }
@@ -253,6 +367,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
         if (!_wcsicmp(argv[1], L"--region")) cmd = static_cast<UINT>(CaptureMode::Region);
         else if (!_wcsicmp(argv[1], L"--window")) cmd = static_cast<UINT>(CaptureMode::Window);
         else if (!_wcsicmp(argv[1], L"--full")) cmd = static_cast<UINT>(CaptureMode::Full);
+        else if (!_wcsicmp(argv[1], L"--color")) cmd = static_cast<UINT>(CaptureMode::Color);
         else if (!_wcsicmp(argv[1], L"--settings")) cmd = kCmdSettings;
     }
     LocalFree(argv);
