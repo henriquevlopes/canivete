@@ -73,6 +73,12 @@ std::wstring Settings_Applied();     // reload after a save; returns hotkey prob
 void Hotkeys_Suspend(bool suspend);  // while a hotkey box in Settings has focus
 bool AutostartEnabled();
 void SetAutostart(bool on);
+void Tray_Notify(const wchar_t* title, const std::wstring& text);  // balloon from the tray icon
+
+// ---- resizer.cpp ---------------------------------------------------------------------------
+void Resizer_Open(const std::vector<std::wstring>& files);  // opens the window, or adds to it
+HWND Resizer_Window();                                       // for IsDialogMessage, nullptr when closed
+void Resizer_RegisterShell();                                // Explorer right-click + Send to entries
 
 // ---- settings_ui.cpp -----------------------------------------------------------------------
 void SettingsUI_Show();

@@ -12,11 +12,13 @@ HWND g_mainWnd = nullptr;
 
 namespace {
 
-enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_COLOR, ID_OPEN_FOLDER, ID_SETTINGS, ID_EXIT };
+enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_COLOR, ID_OPEN_FOLDER, ID_SETTINGS, ID_EXIT, ID_RESIZE };
 constexpr UINT ID_RECENT0 = 200;  // .. 209: recent colors in the tray menu
 constexpr UINT kCmdAlreadyRunning = 99;
 constexpr UINT kCmdSettings = 98;
 constexpr UINT_PTR kTimerDeferred = 10;
+constexpr UINT_PTR kTimerResize = 11;
+constexpr ULONG_PTR kCopyResize = 0x52535A31;  // WM_COPYDATA tag: file list for the resizer
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
 UINT g_taskbarCreated = 0;
@@ -25,6 +27,7 @@ HICON g_icon = nullptr;
 CaptureMode g_deferredMode = CaptureMode::Region;
 FILETIME g_iniTime{};
 bool g_hotkeysSuspended = false;
+std::vector<std::wstring> g_resizeQueue;  // files from Explorer, gathered for ~300 ms (one process per file)
 
 // Windows reserves some Win+key combos (Win+C, Win+Shift+C ...) so RegisterHotKey refuses them.
 // Those are caught with a low-level keyboard hook instead, like PowerToys does.
@@ -165,6 +168,8 @@ void ReloadIfChanged() {
 
 }  // namespace
 
+void Tray_Notify(const wchar_t* title, const std::wstring& text) { TrayBalloon(title, text); }
+
 std::wstring Settings_Applied() {
     LoadSettings();
     g_iniTime = IniTime();  // so the file watcher doesn't reload it a second time
@@ -247,6 +252,8 @@ void ShowMenu() {
         AppendMenuW(m, MF_POPUP, reinterpret_cast<UINT_PTR>(sub), L"Recent colors");
     }
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING, ID_RESIZE, L"Resize images…");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_OPEN_FOLDER, L"Open screenshots folder");
     AppendMenuW(m, MF_STRING, ID_SETTINGS, L"Settings…");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
@@ -287,8 +294,24 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == kCmdAlreadyRunning)
             TrayBalloon(L"Canivete is already running", L"Right-click the red knife icon in the tray.");
         return 0;
+    case WM_COPYDATA: {  // --resize from another copy: '\0'-separated paths
+        const auto* cd = reinterpret_cast<const COPYDATASTRUCT*>(lp);
+        if (cd->dwData != kCopyResize) return FALSE;
+        const wchar_t* p = static_cast<const wchar_t*>(cd->lpData);
+        const size_t n = cd->cbData / sizeof(wchar_t);
+        for (size_t i = 0; i < n;) {
+            const size_t len = wcsnlen(p + i, n - i);
+            if (len) g_resizeQueue.emplace_back(p + i, len);
+            i += len + 1;
+        }
+        SetTimer(h, kTimerResize, 300, nullptr);
+        return TRUE;
+    }
     case WM_COMMAND:
         switch (LOWORD(wp)) {
+        case ID_RESIZE:
+            Resizer_Open({});
+            break;
         case ID_REGION:
         case ID_WINDOW:
         case ID_FULL:
@@ -323,10 +346,16 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == kTimerDeferred) {
             KillTimer(h, kTimerDeferred);
             Capture_Start(g_deferredMode);
+        } else if (wp == kTimerResize) {
+            KillTimer(h, kTimerResize);
+            std::vector<std::wstring> files = std::move(g_resizeQueue);
+            g_resizeQueue.clear();
+            Resizer_Open(files);
         }
         return 0;
     case WM_DESTROY:
         if (HWND w = SettingsUI_Window()) DestroyWindow(w);
+        if (HWND w = Resizer_Window()) DestroyWindow(w);
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         for (int id = 1; id <= kHotkeyCount; ++id) UnregisterHotKey(h, id);
         g_hookKeys.clear();
@@ -375,6 +404,27 @@ int RunEditor(const wchar_t* file) {
     return 0;
 }
 
+// Hands a --resize file list to the running copy. Explorer starts one copy per selected file, all
+// at once, so the first one may still be starting: wait for its window for a few seconds.
+void SendResizeList(const std::vector<std::wstring>& files) {
+    std::wstring blob;
+    for (const std::wstring& f : files) blob += f;
+        blob.push_back(L'\0');
+    for (int i = 0; i < 60; ++i) {
+        if (HWND w = FindWindowW(kMainClass, nullptr)) {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(w, &pid);
+            AllowSetForegroundWindow(pid);
+            COPYDATASTRUCT cd{kCopyResize, static_cast<DWORD>(blob.size() * sizeof(wchar_t)), blob.data()};
+            DWORD_PTR res = 0;
+            if (SendMessageTimeoutW(w, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&cd), SMTO_ABORTIFHUNG, 5000, &res) &&
+                res)
+                return;
+        }
+        Sleep(50);
+    }
+}
+
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
@@ -382,7 +432,17 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     UINT cmd = 0;
+    std::vector<std::wstring> resize;
+    bool resizeCmd = false;
     if (argc >= 2) {
+        if (!_wcsicmp(argv[1], L"--resize")) {
+            resizeCmd = true;
+            for (int i = 2; i < argc; ++i) {
+                wchar_t full[MAX_PATH * 4];
+                const DWORD n = GetFullPathNameW(argv[i], MAX_PATH * 4, full, nullptr);
+                resize.push_back(n && n < MAX_PATH * 4 ? full : argv[i]);
+            }
+        }
         if (!_wcsicmp(argv[1], L"--grab") && argc >= 3) return RunGrabTest(argv[2]);
         if (!_wcsicmp(argv[1], L"--edit") && argc >= 3) return RunEditor(argv[2]);
         if (!_wcsicmp(argv[1], L"--region")) cmd = static_cast<UINT>(CaptureMode::Region);
@@ -396,6 +456,11 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     // One copy only. A second launch passes its command to the running one.
     HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\Canivete.Running");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (resizeCmd) {
+            if (resize.empty()) resize.push_back(L"");  // still opens the window
+            SendResizeList(resize);
+            return 0;
+        }
         if (HWND w = FindWindowW(kMainClass, nullptr)) {
             DWORD pid = 0;
             GetWindowThreadProcessId(w, &pid);
@@ -426,8 +491,13 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     Capture_Init();
     Output_Init();
     RegisterHotkeysOrWarn();
+    Resizer_RegisterShell();
     Log(L"Canivete %s started", CANIVETE_VERSION);
     if (cmd) PostMessageW(g_mainWnd, WM_APP_COMMAND, cmd, 0);
+    if (resizeCmd) {
+        g_resizeQueue = std::move(resize);
+        SetTimer(g_mainWnd, kTimerResize, 300, nullptr);
+    }
 
     // Message loop that also wakes when the settings folder changes (no polling).
     HANDLE watch = FindFirstChangeNotificationW(AppDataDir().c_str(), FALSE,
@@ -449,6 +519,8 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
             }
             HWND dlg = SettingsUI_Window();
             if (dlg && IsDialogMessageW(dlg, &msg)) continue;  // Tab, Enter, Esc in the Settings window
+            HWND rs = Resizer_Window();
+            if (rs && IsDialogMessageW(rs, &msg)) continue;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
