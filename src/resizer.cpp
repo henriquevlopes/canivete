@@ -528,6 +528,7 @@ Result ResizeOne(IWICImagingFactory* f, const std::wstring& src, const Options& 
             err = HrText(e);
             return Result::Failed;
         }
+        SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, src.c_str(), nullptr);  // new thumbnail
         return Result::Done;
     }
     if (o.output != 2) return Result::Done;
@@ -549,6 +550,7 @@ Result ResizeOne(IWICImagingFactory* f, const std::wstring& src, const Options& 
         err = L"resized copy left as " + out.substr(out.find_last_of(L'\\') + 1);
         return Result::Failed;
     }
+    SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, final.c_str(), nullptr);
     return Result::Done;
 }
 

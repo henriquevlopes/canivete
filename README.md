@@ -56,15 +56,20 @@ markers stretch from a corner), nudged with the arrow keys (Shift = 10 px), reco
 with the color and size buttons / keys / wheel, and removed with Delete; Esc unselects. Clicking a
 text with the Text tool, or double-clicking it with any tool, retypes it. Every change is one undo step.
 
-Image right-click menu: select images in Explorer, right-click > Show more options > Canivete:
-- Resize > Small / Medium / Large / Half size: new files next to the originals (`photo (Medium).jpg`),
+Right-click menu: select files or folders in Explorer, right-click > Show more options > Canivete.
+On images:
+- Resize > Small / Medium / Large: new files next to the originals (`photo (Medium).jpg`),
   no window; Choose a size… opens the resizer below.
-- Convert to > JPG / PNG / TIFF / BMP: new files next to the originals (`photo.png` > `photo.jpg`);
+- Convert to > JPG / PNG / TIFF: new files next to the originals (`photo.png` > `photo.jpg`);
   see-through parts become white in JPG; images already in that format are skipped.
-- Rotate > Turn right / left / upside down, Flip left to right / top to bottom: saves over the
+- Rotate > Turn right / left, Flip left to right / top to bottom: saves over the
   original (same name and dates; JPG at quality 95 or more, photo info kept). JPG, PNG, BMP, TIFF only.
 - Copy to clipboard: the (first) image, upright, ready to paste.
-A tray notice says what was done; problems show in a message.
+
+On everything (files and folders): Rename… opens the renamer below. A tray notice says what was
+done; problems show in a message. Explorer refreshes the thumbnails of changed images. Windows
+shows at most 16 entries in this menu, so a few extras (half size, upside down, BMP) are only on
+the command line.
 
 Image resizer: select images in Explorer, right-click > Show more options > Canivete > Resize > Choose a size…
 (or Send to > Canivete - Resize images, which also takes folders), or tray > Resize images…, or
@@ -78,8 +83,8 @@ profile) is kept when the format stays the same; phone photos are always turned 
 every CPU core: 40 photos of 24 MP take about 2 s. Choices are remembered in `[Resizer]` in
 settings.ini. With no errors the window closes and a tray notice says how many were done.
 
-Renamer: select files or folders in Explorer, right-click > Show more options > Rename with
-Canivete (or Send to > Canivete - Rename), or tray > Rename files…, or drop them on its window.
+Renamer: select files or folders in Explorer, right-click > Show more options > Canivete > Rename…
+(or Send to > Canivete - Rename), or tray > Rename files…, or drop them on its window.
 Type what to search for and what to put instead; the list shows every new name as you type, and
 problems (a name used twice, a name that already exists, characters Windows forbids) in red.
 Options: regular expression (`$1` puts back a captured group), every match or only the first,
@@ -123,4 +128,4 @@ Builds Release, installs to `%LOCALAPPDATA%\Programs\Canivete\Canivete.exe` and 
 - `src/editor.cpp` — screenshot editor window (GDI+ shapes and text, undo, zoom and pan)
 - `src/resizer.cpp` — image resizer window, WIC resize engine on worker threads, right-click quick actions (convert, rotate, copy)
 - `src/renamer.cpp` — renamer window, live preview, regex/counter/date tokens, IFileOperation rename with undo
-- `src/shell.cpp` — Explorer right-click entries (the Canivete image submenu, Rename) and Send to shortcuts
+- `src/shell.cpp` — Explorer right-click Canivete submenu (image actions, Rename) and Send to shortcuts
