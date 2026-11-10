@@ -79,6 +79,9 @@ void Tray_Notify(const wchar_t* title, const std::wstring& text);  // balloon fr
 // ---- resizer.cpp ---------------------------------------------------------------------------
 void Resizer_Open(const std::vector<std::wstring>& files);  // opens the window, or adds to it
 HWND Resizer_Window();                                       // for IsDialogMessage, nullptr when closed
+// Explorer's Canivete submenu: small/medium/large/half/custom, jpg/png/tif/bmp, right/left/180/fliph/flipv, copy.
+// Runs without a window and shows a tray notice when done.
+void Resizer_Quick(const std::wstring& action, const std::vector<std::wstring>& files);
 
 // ---- renamer.cpp ---------------------------------------------------------------------------
 void Renamer_Open(const std::vector<std::wstring>& paths);

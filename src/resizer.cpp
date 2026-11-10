@@ -83,8 +83,11 @@ struct Options {
     bool percent = false;
     int fit = 0;     // 0 fit inside, 1 fill and crop, 2 stretch
     int output = 0;  // 0 next to the originals, 1 into a folder, 2 replace the originals
-    int format = 0;  // 0 same as the original, 1 JPG, 2 PNG
+    int format = 0;  // 0 same as the original, 1 JPG, 2 PNG, 3 TIFF, 4 BMP
     int quality = 90;
+    bool convert = false;  // Convert menu: skip images already in the target format
+    bool inPlace = false;  // Rotate menu: overwrite the original (no Recycle Bin)
+    WICBitmapTransformOptions turn = WICBitmapTransformRotate0;  // Rotate menu: turn after making it upright
     bool shrinkOnly = true, matchOrient = true, keepMeta = true;
     std::wstring folder;
     std::wstring suffix;  // " (Medium)", " (1280 x 720)", " (50%)"
@@ -98,6 +101,7 @@ struct Job {
     std::mutex m;
     std::vector<std::wstring> errors;
     ULONGLONG start = 0;
+    std::wstring what;  // quick action: "turned right", "converted to PNG", ...
 };
 
 struct Ctl {
@@ -277,6 +281,25 @@ bool AnyTransparent(IWICBitmap* bmp) {
     return false;
 }
 
+// Puts see-through pixels on white (for JPG, which has no transparency). Pixels are premultiplied BGRA.
+void FlattenOnWhite(IWICBitmap* bmp) {
+    ComPtr<IWICBitmapLock> lock;
+    UINT w = 0, h = 0, stride = 0, size = 0;
+    BYTE* p = nullptr;
+    if (FAILED(bmp->Lock(nullptr, WICBitmapLockRead | WICBitmapLockWrite, &lock)) || FAILED(lock->GetSize(&w, &h)) ||
+        FAILED(lock->GetStride(&stride)) || FAILED(lock->GetDataPointer(&size, &p)))
+        return;
+    for (UINT y = 0; y < h; ++y) {
+        BYTE* row = p + static_cast<size_t>(y) * stride;
+        for (UINT x = 0; x < w; ++x) {
+            BYTE* px = row + x * 4;
+            const int add = 255 - px[3];
+            for (int c = 0; c < 3; ++c) px[c] = static_cast<BYTE>(std::min(255, px[c] + add));
+            px[3] = 255;
+        }
+    }
+}
+
 // Decodes, scales, turns upright and crops one image into memory. `alpha` says whether any pixel is
 // see-through (a WebP or 32-bit PNG is often fully opaque). The source file is closed on return.
 HRESULT Prepare(IWICImagingFactory* f, const std::wstring& src, const Options& o, ComPtr<IWICBitmap>& out,
@@ -349,11 +372,22 @@ HRESULT Prepare(IWICImagingFactory* f, const std::wstring& src, const Options& o
     ComPtr<IWICBitmap> scaled;
     if (FAILED(hr = f->CreateBitmapFromSource(cur.Get(), WICBitmapCacheOnLoad, &scaled))) return hr;
     cur = scaled;
+    ComPtr<IWICBitmap> mem = scaled;  // the newest in-memory copy
     if (orient != 1) {
         ComPtr<IWICBitmapFlipRotator> rot;
         if (FAILED(hr = f->CreateBitmapFlipRotator(&rot)) ||
             FAILED(hr = rot->Initialize(cur.Get(), OrientTransform(orient))))
             return hr;
+        cur = rot;
+    }
+    if (o.turn != WICBitmapTransformRotate0) {
+        if (cur.Get() != mem.Get()) {  // upright copy in memory first: two chained rotators re-read rows
+            if (FAILED(hr = f->CreateBitmapFromSource(cur.Get(), WICBitmapCacheOnLoad, mem.ReleaseAndGetAddressOf())))
+                return hr;
+            cur = mem;
+        }
+        ComPtr<IWICBitmapFlipRotator> rot;
+        if (FAILED(hr = f->CreateBitmapFlipRotator(&rot)) || FAILED(hr = rot->Initialize(cur.Get(), o.turn))) return hr;
         cur = rot;
     }
     if (cropW > 0 && cropH > 0 && (static_cast<UINT>(cropW) < ow || static_cast<UINT>(cropH) < oh)) {
@@ -364,7 +398,7 @@ HRESULT Prepare(IWICImagingFactory* f, const std::wstring& src, const Options& o
         if (FAILED(hr = f->CreateBitmapClipper(&clip)) || FAILED(hr = clip->Initialize(cur.Get(), &r))) return hr;
         cur = clip;
     }
-    if (cur.Get() == scaled.Get()) out = scaled;
+    if (cur.Get() == mem.Get()) out = mem;
     else if (FAILED(hr = f->CreateBitmapFromSource(cur.Get(), WICBitmapCacheOnLoad, &out))) return hr;
     alpha = srcAlpha && AnyTransparent(out.Get());
     return S_OK;
@@ -437,7 +471,12 @@ Result ResizeOne(IWICImagingFactory* f, const std::wstring& src, const Options& 
     const std::wstring srcExt = Ext(src);
     GUID outFmt = alpha && o.format != 1 ? GUID_ContainerFormatPng : GUID_ContainerFormatJpeg;
     if (o.format == 2) outFmt = GUID_ContainerFormatPng;
-    std::wstring ext = outFmt == GUID_ContainerFormatPng ? L".png" : L".jpg";
+    if (o.format == 3) outFmt = GUID_ContainerFormatTiff;
+    if (o.format == 4) outFmt = GUID_ContainerFormatBmp;
+    std::wstring ext = outFmt == GUID_ContainerFormatPng    ? L".png"
+                       : outFmt == GUID_ContainerFormatTiff ? L".tif"
+                       : outFmt == GUID_ContainerFormatBmp  ? L".bmp"
+                                                            : L".jpg";
     if (o.format == 0) {
         for (const GUID& g : {GUID_ContainerFormatJpeg, GUID_ContainerFormatPng, GUID_ContainerFormatBmp,
                               GUID_ContainerFormatTiff})
@@ -447,11 +486,21 @@ Result ResizeOne(IWICImagingFactory* f, const std::wstring& src, const Options& 
             }
     }
 
+    if (o.convert && outFmt == srcFmt) return Result::Skipped;
+    if (o.inPlace && outFmt != srcFmt) {
+        err = L"only JPG, PNG, BMP and TIFF files can be turned";
+        return Result::Failed;
+    }
+    if (alpha && outFmt == GUID_ContainerFormatJpeg) {
+        FlattenOnWhite(bmp.Get());
+        alpha = false;
+    }
+
     const size_t slash = src.find_last_of(L"\\/");
     const std::wstring dir = src.substr(0, slash);
     const std::wstring stem = src.substr(slash + 1, src.size() - slash - 1 - srcExt.size());
     std::wstring out;
-    if (o.output == 2) {
+    if (o.output == 2 || o.inPlace) {
         out = ReservePath(dir + L"\\" + stem + L".canivete-tmp", ext);
     } else if (o.output == 1) {
         SHCreateDirectoryExW(nullptr, o.folder.c_str(), nullptr);
@@ -468,6 +517,18 @@ Result ResizeOne(IWICImagingFactory* f, const std::wstring& src, const Options& 
         DeleteFileW(out.c_str());
         err = HrText(hr);
         return Result::Failed;
+    }
+    if (o.inPlace) {  // the turned copy takes the original's place (same name, dates and attributes)
+        meta.Reset();
+        bmp.Reset();
+        if (!ReplaceFileW(src.c_str(), out.c_str(), nullptr, REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS,
+                          nullptr, nullptr)) {
+            const HRESULT e = HRESULT_FROM_WIN32(GetLastError());
+            DeleteFileW(out.c_str());
+            err = HrText(e);
+            return Result::Failed;
+        }
+        return Result::Done;
     }
     if (o.output != 2) return Result::Done;
 
@@ -514,7 +575,7 @@ void Worker(std::shared_ptr<Job> j, HWND notify) {
         }
     }
     CoUninitialize();
-    if (--j->running == 0) PostMessageW(notify, WM_RS_FINISHED, 0, 0);
+    if (--j->running == 0) PostMessageW(notify, WM_RS_FINISHED, 0, reinterpret_cast<LPARAM>(j.get()));
 }
 
 // ---- window --------------------------------------------------------------------------------
@@ -1052,7 +1113,180 @@ LRESULT CALLBACK ResizerProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, msg, wp, lp);
 }
 
+// ---- quick actions (Explorer's Canivete submenu): no window, a tray notice when done ----------
+
+std::vector<std::shared_ptr<Job>> g_quick;
+HWND g_quickWnd = nullptr;
+
+std::wstring Count(int n, const wchar_t* one, const wchar_t* many) {
+    return std::to_wstring(n) + L" " + (n == 1 ? one : many);
+}
+
+void QuickFinished(const Job& j) {
+    const int done = j.done - j.failed - j.skipped;
+    Log(L"Quick action finished: %s, %d done, %d skipped, %d failed", j.what.c_str(), done, j.skipped.load(),
+        j.failed.load());
+    const std::wstring title = Count(done, L"image", L"images") + L" " + j.what;
+    std::wstring text = j.o.inPlace ? L"Saved over the originals." : L"Saved next to the originals.";
+    if (j.skipped)
+        text = Count(j.skipped, L"image was", L"images were") + (j.o.convert ? L" already in that format. " : L" skipped. ") +
+               text;
+    if (!j.failed) {
+        Tray_Notify(title.c_str(), text);
+        return;
+    }
+    std::wstring msg = title + L".\n\n" + std::to_wstring(j.failed.load()) + L" didn't work:\n";
+    for (size_t i = 0; i < j.errors.size() && i < 15; ++i) msg += L"\n" + j.errors[i];
+    if (j.errors.size() > 15) msg += L"\n…";
+    if (TestMode()) Log(L"Notice: %s", msg.c_str());
+    else MessageBoxW(nullptr, msg.c_str(), L"Canivete", MB_ICONWARNING | MB_SETFOREGROUND);
+}
+
+LRESULT CALLBACK QuickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_RS_FINISHED) {
+        auto it = std::find_if(g_quick.begin(), g_quick.end(),
+                               [&](const std::shared_ptr<Job>& j) { return reinterpret_cast<LPARAM>(j.get()) == lp; });
+        if (it != g_quick.end()) {
+            const std::shared_ptr<Job> j = *it;
+            g_quick.erase(it);
+            QuickFinished(*j);
+        }
+        return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+HWND QuickWindow() {
+    if (g_quickWnd) return g_quickWnd;
+    WNDCLASSEXW wc{sizeof(wc)};
+    wc.lpfnWndProc = QuickProc;
+    wc.hInstance = g_hinst;
+    wc.lpszClassName = L"CaniveteQuick";
+    RegisterClassExW(&wc);
+    g_quickWnd = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, g_hinst, nullptr);
+    return g_quickWnd;
+}
+
+// Copy to Clipboard: the first image, upright, see-through parts on white.
+void CopyFirst(const std::wstring& file) {
+    ComPtr<IWICImagingFactory> f;
+    ComPtr<IWICBitmap> bmp;
+    ComPtr<IWICMetadataBlockReader> meta;
+    ComPtr<IWICBitmapSource> bgr;
+    GUID fmt{};
+    bool alpha = false, skipped = false;
+    UINT orient = 1, w = 0, h = 0;
+    Options o;
+    o.percent = true;
+    o.w = 100;
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&f));
+    if (SUCCEEDED(hr)) hr = Prepare(f.Get(), file, o, bmp, fmt, alpha, skipped, meta, orient);
+    if (SUCCEEDED(hr) && alpha) FlattenOnWhite(bmp.Get());
+    if (SUCCEEDED(hr)) hr = WICConvertBitmapSource(GUID_WICPixelFormat32bppBGR, bmp.Get(), &bgr);
+    Image img;
+    if (SUCCEEDED(hr)) hr = bgr->GetSize(&w, &h);
+    if (SUCCEEDED(hr)) {
+        img.w = static_cast<int>(w);
+        img.h = static_cast<int>(h);
+        img.px.resize(static_cast<size_t>(w) * h);
+        hr = bgr->CopyPixels(nullptr, w * 4, static_cast<UINT>(img.px.size() * 4), reinterpret_cast<BYTE*>(img.px.data()));
+    }
+    const std::wstring name = file.substr(file.find_last_of(L"\\/") + 1);
+    if (FAILED(hr)) {
+        Log(L"Copy image failed: %s (%s)", file.c_str(), HrText(hr).c_str());
+        Tray_Notify(L"Couldn't copy the image", name + L": " + HrText(hr));
+        return;
+    }
+    Output_CopyImage(img);
+    Log(L"Copied image to the clipboard: %s (%dx%d)", file.c_str(), img.w, img.h);
+    Tray_Notify(L"Image copied", name + L"  (" + std::to_wstring(w) + L" × " + std::to_wstring(h) + L")");
+}
+
 }  // namespace
+
+void Resizer_Quick(const std::wstring& action, const std::vector<std::wstring>& paths) {
+    const std::wstring a = Lower(action);
+    if (a == L"custom") {
+        Resizer_Open(paths);
+        return;
+    }
+    std::vector<std::wstring> files;
+    for (const std::wstring& p : paths) {
+        const DWORD attr = GetFileAttributesW(p.c_str());
+        if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) || !IsImageName(p)) continue;
+        const std::wstring lp = Lower(p);
+        if (std::none_of(files.begin(), files.end(), [&](const std::wstring& x) { return Lower(x) == lp; }))
+            files.push_back(p);
+    }
+    if (files.empty()) return;
+    if (a == L"copy") {
+        CopyFirst(files[0]);
+        return;
+    }
+
+    auto j = std::make_shared<Job>();
+    Options& o = j->o;
+    o.quality = std::clamp(IniInt(L"JpegQuality", 90), 1, 100);
+    o.keepMeta = IniInt(L"KeepMetadata", 1) != 0;
+    o.percent = true;  // convert and turn keep the size
+    o.w = 100;
+    struct Turn {
+        const wchar_t* key;
+        WICBitmapTransformOptions t;
+        const wchar_t* what;
+    };
+    const Turn turns[] = {{L"right", WICBitmapTransformRotate90, L"turned right"},
+                          {L"left", WICBitmapTransformRotate270, L"turned left"},
+                          {L"180", WICBitmapTransformRotate180, L"turned upside down"},
+                          {L"fliph", WICBitmapTransformFlipHorizontal, L"flipped left to right"},
+                          {L"flipv", WICBitmapTransformFlipVertical, L"flipped top to bottom"}};
+    const wchar_t* const formats[] = {L"", L"jpg", L"png", L"tif", L"bmp"};
+    const wchar_t* const formatNames[] = {L"", L"JPG", L"PNG", L"TIFF", L"BMP"};
+    bool known = false;
+    for (const Preset& p : kPresets)
+        if (a == p.key) {
+            o.percent = false;
+            o.w = p.w;
+            o.h = p.h;
+            o.suffix = std::wstring(L" (") + p.name + L")";
+            j->what = std::wstring(L"resized to ") + p.name;
+            known = true;
+        }
+    if (a == L"half") {
+        o.w = 50;
+        o.suffix = L" (50%)";
+        j->what = L"resized to half";
+        known = true;
+    }
+    for (int i = 1; i < 5; ++i)
+        if (a == formats[i]) {
+            o.format = i;
+            o.convert = true;
+            j->what = std::wstring(L"converted to ") + formatNames[i];
+            known = true;
+        }
+    for (const Turn& t : turns)
+        if (a == t.key) {
+            o.turn = t.t;
+            o.inPlace = true;
+            o.quality = std::max(o.quality, 95);  // saved again over the original: keep it close
+            j->what = t.what;
+            known = true;
+        }
+    if (!known) {
+        Log(L"Unknown quick action: %s", action.c_str());
+        return;
+    }
+    j->files = std::move(files);
+    j->start = GetTickCount64();
+    const int threads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1,
+                                   std::min(8, static_cast<int>(j->files.size())));
+    j->running = threads;
+    g_quick.push_back(j);
+    HWND notify = QuickWindow();
+    Log(L"Quick action %s: %zu images, %d threads", a.c_str(), j->files.size(), threads);
+    for (int i = 0; i < threads; ++i) std::thread(Worker, j, notify).detach();
+}
 
 HWND Resizer_Window() { return U.hwnd; }
 

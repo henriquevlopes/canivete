@@ -56,7 +56,17 @@ markers stretch from a corner), nudged with the arrow keys (Shift = 10 px), reco
 with the color and size buttons / keys / wheel, and removed with Delete; Esc unselects. Clicking a
 text with the Text tool, or double-clicking it with any tool, retypes it. Every change is one undo step.
 
-Image resizer: select images in Explorer, right-click > Show more options > Resize with Canivete
+Image right-click menu: select images in Explorer, right-click > Show more options > Canivete:
+- Resize > Small / Medium / Large / Half size: new files next to the originals (`photo (Medium).jpg`),
+  no window; Choose a size… opens the resizer below.
+- Convert to > JPG / PNG / TIFF / BMP: new files next to the originals (`photo.png` > `photo.jpg`);
+  see-through parts become white in JPG; images already in that format are skipped.
+- Rotate > Turn right / left / upside down, Flip left to right / top to bottom: saves over the
+  original (same name and dates; JPG at quality 95 or more, photo info kept). JPG, PNG, BMP, TIFF only.
+- Copy to clipboard: the (first) image, upright, ready to paste.
+A tray notice says what was done; problems show in a message.
+
+Image resizer: select images in Explorer, right-click > Show more options > Canivete > Resize > Choose a size…
 (or Send to > Canivete - Resize images, which also takes folders), or tray > Resize images…, or
 drop files on its window. Pick Small 854×480, Medium 1366×768, Large 1920×1080 or a custom size
 (pixels, or percent); Fit inside / Fill and crop / Stretch; "only make smaller" and "turn the size
@@ -88,6 +98,8 @@ Command line: `Canivete.exe --region | --window | --full | --color | --settings`
 `Canivete.exe --resize a.jpg b.png folder` opens the resizer with those files (each copy hands its
 files to the running one, so Explorer's one-copy-per-file launch ends in one window).
 `Canivete.exe --rename a.txt folder` opens the renamer the same way.
+`Canivete.exe --do <action> a.jpg b.png` runs a right-click menu action (`small medium large half custom
+jpg png tif bmp right left 180 fliph flipv copy`).
 `Canivete.exe --grab out.png` (or `.jpg`) grabs all monitors to a file and exits (self-test).
 
 ## Build and install
@@ -109,6 +121,6 @@ Builds Release, installs to `%LOCALAPPDATA%\Programs\Canivete\Canivete.exe` and 
 - `src/color.cpp` — color text formats, clipboard text, recent colors
 - `src/output.cpp` — PNG/JPG via WIC, file naming, clipboard, notification toast
 - `src/editor.cpp` — screenshot editor window (GDI+ shapes and text, undo, zoom and pan)
-- `src/resizer.cpp` — image resizer window, WIC resize engine on worker threads
+- `src/resizer.cpp` — image resizer window, WIC resize engine on worker threads, right-click quick actions (convert, rotate, copy)
 - `src/renamer.cpp` — renamer window, live preview, regex/counter/date tokens, IFileOperation rename with undo
-- `src/shell.cpp` — Explorer right-click entries and Send to shortcuts for the resizer and renamer
+- `src/shell.cpp` — Explorer right-click entries (the Canivete image submenu, Rename) and Send to shortcuts
