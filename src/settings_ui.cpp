@@ -1,6 +1,8 @@
-// Settings window. Built in code (no dialog resource) so it can be laid out again at any monitor DPI.
-// Hotkey boxes record keys through a low-level keyboard hook that is only installed while one of
-// them has focus, so Win and PrintScreen combinations can be picked too.
+// Settings window: a list of tabs on the left (General plus one per feature), the tab's controls on
+// the right. Each feature tab has an On switch; a feature that is off loses its hotkeys, tray menu
+// entries and Explorer entries. Built in code (no dialog resource) so it can be laid out again at
+// any monitor DPI. Hotkey boxes record keys through a low-level keyboard hook that is only installed
+// while one of them has focus, so Win and PrintScreen combinations can be picked too.
 #include "app.h"
 
 #include "../res/resource.h"
@@ -25,17 +27,28 @@ constexpr DWORD kExStyle = WS_EX_CONTROLPARENT;
 constexpr COLORREF kFocusBg = RGB(255, 236, 236);  // hotkey box waiting for keys
 constexpr COLORREF kGrey = RGB(105, 105, 105);
 constexpr COLORREF kRed = RGB(200, 30, 40);
+constexpr COLORREF kNavBg = RGB(243, 243, 243);
+constexpr COLORREF kNavSel = RGB(226, 226, 226);
+constexpr COLORREF kAccent = RGB(0, 95, 184);
 // Layout in 96-DPI pixels.
-constexpr int kW = 500;             // client width
-constexpr int kM = 16;              // outer margin
-constexpr int kCX = kM + 140;       // left edge of the controls column
-constexpr int kCW = kW - kM - kCX;  // width of the controls column
+constexpr int kW = 660;              // client width
+constexpr int kM = 16;               // outer margin
+constexpr int kNavW = 172;           // width of the tab list panel
+constexpr int kL = kNavW + 24;       // left edge of a tab's content
+constexpr int kR = kW - 20;          // right edge of a tab's content
+constexpr int kCW = kR - kL;         // content width
+constexpr int kCX = kL + 128;        // left edge of the controls column (labels to its left)
+constexpr int kFW = kR - kCX;        // width of the controls column
+constexpr int kTop = 98;             // first row under a tab's title and description
+constexpr int kNavItem = 34;         // height of one tab in the list
 
 enum : int {
     IDC_HK0 = 200,    // hotkey boxes 200..205
     IDC_HKST0 = 210,  // their status texts 210..215
     IDC_STATIC = 220,
     IDC_HINT,
+    IDC_DESC,
+    IDC_TITLE,
     IDC_SAVE = 230,
     IDC_FOLDER,
     IDC_BROWSE,
@@ -57,25 +70,58 @@ enum : int {
     IDC_VMIC,
     IDC_COLORFMT,
     IDC_APPLY,
+    IDC_NAV,
+    IDC_OPENRESIZE,
+    IDC_OPENRENAME,
+    IDC_TOGGLE0 = 300,  // On switches 300..305, one per Feature
 };
 
 const wchar_t* const kHkNames[kHotkeyCount] = {L"Region screenshot", L"Window screenshot", L"Full screenshot",
                                                 L"Color picker", L"Record GIF", L"Record video"};
+constexpr Feature kHkFeature[kHotkeyCount] = {kFeatShots, kFeatShots, kFeatShots, kFeatColor, kFeatGif, kFeatVideo};
+
+struct TabDef {
+    const wchar_t* name;
+    int feature;  // -1 = General (no switch)
+    const wchar_t* desc;
+};
+const TabDef kTabs[] = {
+    {L"General", -1, L"Where captures are saved, how files are named, and starting with Windows."},
+    {L"Screenshots", kFeatShots,
+     L"Capture a region, a window or the whole screen. Includes the editor and Make alpha."},
+    {L"Color picker", kFeatColor, L"Pick any color on the screen and copy its value."},
+    {L"GIF recording", kFeatGif, L"Record an area of the screen as an animated GIF. You pick the size afterwards."},
+    {L"Video recording", kFeatVideo, L"Record an area of the screen as an MP4 video. You pick the size afterwards."},
+    {L"Image tools", kFeatImages,
+     L"Resize, convert, rotate and copy pictures: from the tray menu, Send to, and Explorer's right-click menu "
+     L"(Show more options → Canivete)."},
+    {L"Renamer", kFeatRename,
+     L"Rename many files and folders at once: from the tray menu, Send to, and Explorer's right-click menu."},
+};
+constexpr int kTabCount = static_cast<int>(std::size(kTabs));
+
+enum FontKind : int { kFontNormal, kFontBold, kFontTitle };
 
 struct Ctl {
     HWND wnd;
     int x, y, w, h;  // 96-DPI pixels
-    bool bold;
+    int font;
+    int tab;      // -1 = always shown (tab list, footer)
+    bool header;  // title, description and switch: stay enabled when the feature is off
 };
 
 struct UI {
-    HWND hwnd = nullptr;
+    HWND hwnd = nullptr, nav = nullptr;
     UINT dpi = 96;
-    HFONT font = nullptr, bold = nullptr;
-    HBRUSH focusBrush = nullptr;
+    HFONT font = nullptr, bold = nullptr, title = nullptr;
+    HBRUSH focusBrush = nullptr, navBrush = nullptr;
     std::vector<Ctl> ctls;
-    int footerY = 0, height = 0;
+    int buildTab = -1;
+    bool buildHeader = false;
+    int maxY = 0, footerY = 0, height = 0;
+    int tab = 0;
     HWND lastFocus = nullptr;
+    bool on[kFeatCount]{};  // feature switches being edited (saved only on OK / Apply)
     // Hotkeys being edited (saved only on OK / Apply).
     Hotkey hk[kHotkeyCount];
     bool bad[kHotkeyCount]{};
@@ -85,6 +131,8 @@ struct UI {
     std::bitset<256> swallowed;
     HHOOK hook = nullptr;
 } U;
+
+int g_lastTab = 0;  // the window opens on the tab it was closed on
 
 int Px(int v) { return MulDiv(v, static_cast<int>(U.dpi), 96); }
 HWND Item(int id) { return GetDlgItem(U.hwnd, id); }
@@ -106,24 +154,29 @@ std::wstring GetText(int id) {
 bool Checked(int id) { return IsDlgButtonChecked(U.hwnd, id) == BST_CHECKED; }
 void SetCheck(int id, bool on) { CheckDlgButton(U.hwnd, id, on ? BST_CHECKED : BST_UNCHECKED); }
 
+// Hotkey row 1 (Window screenshot) is gone: the region tool highlights windows, a click takes one.
+constexpr bool Shown(int i) { return i != 1; }
+bool HotkeyOn(int i) { return Shown(i) && U.on[kHkFeature[i]]; }
+
 // ---- building and laying out ---------------------------------------------------------------
 
 HWND Add(const wchar_t* cls, const wchar_t* text, DWORD style, int id, int x, int y, int w, int h, DWORD ex = 0,
-         bool bold = false) {
+         int font = kFontNormal) {
     HWND c = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0, U.hwnd,
                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hinst, nullptr);
-    U.ctls.push_back({c, x, y, w, h, bold});
+    U.ctls.push_back({c, x, y, w, h, font, U.buildTab, U.buildHeader});
+    U.maxY = std::max(U.maxY, y + std::min(h, 34));  // (a combo box's height includes its drop-down list)
     return c;
 }
 
 void Heading(const wchar_t* text, int y) {
-    Add(WC_STATICW, text, SS_LEFT | SS_NOPREFIX, IDC_STATIC, kM, y, kW - 2 * kM, 22, 0, true);
+    Add(WC_STATICW, text, SS_LEFT | SS_NOPREFIX, IDC_STATIC, kL, y, kCW, 22, 0, kFontBold);
 }
 void Label(const wchar_t* text, int y) {
-    Add(WC_STATICW, text, SS_LEFT | SS_NOPREFIX, IDC_STATIC, kM, y + 4, kCX - kM - 8, 18);
+    Add(WC_STATICW, text, SS_LEFT | SS_NOPREFIX, IDC_STATIC, kL, y + 4, kCX - kL - 8, 18);
 }
 void Check(int id, const wchar_t* text, int y) {
-    Add(WC_BUTTONW, text, BS_AUTOCHECKBOX | WS_TABSTOP, id, kM, y, kW - 2 * kM, 20);
+    Add(WC_BUTTONW, text, BS_AUTOCHECKBOX | WS_TABSTOP, id, kL, y, kCW, 20);
 }
 HWND Edit(int id, int x, int y, int w, DWORD style = 0) {
     return Add(WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP | style, id, x, y, w, 24, WS_EX_CLIENTEDGE);
@@ -131,95 +184,131 @@ HWND Edit(int id, int x, int y, int w, DWORD style = 0) {
 HWND Button(int id, const wchar_t* text, int x, int y, int w, int h, DWORD style = BS_PUSHBUTTON) {
     return Add(WC_BUTTONW, text, style | WS_TABSTOP, id, x, y, w, h);
 }
+void Hint(const wchar_t* text, int x, int y, int w, int h) {
+    Add(WC_STATICW, text, SS_LEFT | SS_NOPREFIX, IDC_HINT, x, y, w, h);
+}
 
 LRESULT CALLBACK HotkeyBoxProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR);
 
-// Hotkey row 1 (Window screenshot) is gone: the region tool highlights windows, a click takes one.
-constexpr bool Shown(int i) { return i != 1; }
+void HotkeyRow(int i, int y) {
+    Label(kHkNames[i], y);
+    HWND box = Edit(IDC_HK0 + i, kCX, y, 160, ES_READONLY);
+    SetWindowSubclass(box, HotkeyBoxProc, 1, 0);
+    Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDC_HKST0 + i, kCX + 168, y + 4, kFW - 168, 18);
+}
+void HotkeyHint(int y) {
+    Hint(L"Click the box, then press the new keys. Backspace turns the hotkey off.", kCX, y, kFW, 34);
+}
+
+// Title, description and (for a feature) its On switch. Returns the y of the first row.
+int BeginTab(int t) {
+    U.buildTab = t;
+    U.buildHeader = true;
+    const TabDef& d = kTabs[t];
+    Add(WC_STATICW, d.name, SS_LEFT | SS_NOPREFIX, IDC_TITLE, kL, 16, kCW - 110, 30, 0, kFontTitle);
+    if (d.feature >= 0)
+        Add(WC_BUTTONW, L"", BS_OWNERDRAW | WS_TABSTOP, IDC_TOGGLE0 + d.feature, kR - 84, 20, 84, 24);
+    Add(WC_STATICW, d.desc, SS_LEFT | SS_NOPREFIX, IDC_DESC, kL, 52, kCW, 36);
+    U.buildHeader = false;
+    return kTop;
+}
 
 void Build() {
-    int y = 14;
-    Heading(L"Hotkeys", y);
-    y += 28;
-    for (int i = 0; i < kHotkeyCount; ++i) {
-        if (!Shown(i)) continue;
-        Label(kHkNames[i], y);
-        HWND box = Edit(IDC_HK0 + i, kCX, y, 170, ES_READONLY);
-        SetWindowSubclass(box, HotkeyBoxProc, 1, 0);
-        Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDC_HKST0 + i, kCX + 180, y + 4, kCW - 180, 18);
-        y += 30;
-    }
-    Add(WC_STATICW, L"Click a box, then press the new keys. Backspace turns a hotkey off.", SS_LEFT | SS_NOPREFIX,
-        IDC_HINT, kCX, y - 2, kCW, 34);
-    y += 42;
+    U.buildTab = -1;
+    U.nav = Add(WC_LISTBOXW, L"",
+                LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_TABSTOP, IDC_NAV, 8, 12,
+                kNavW - 16, kTabCount * kNavItem + 4);
+    for (const TabDef& d : kTabs) SendMessageW(U.nav, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(d.name));
 
-    Heading(L"Saving", y);
-    y += 28;
-    Check(IDC_SAVE, L"Save each screenshot to a file", y);
-    y += 28;
+    // General
+    int y = BeginTab(0);
+    Check(IDC_SAVE, L"Save each capture to a file", y);
+    y += 30;
     Label(L"Folder", y);
-    HWND folder = Edit(IDC_FOLDER, kCX, y, kCW - 90);
+    HWND folder = Edit(IDC_FOLDER, kCX, y, kFW - 90);
     SendMessageW(folder, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Windows Screenshots folder"));
     SHAutoComplete(folder, SHACF_FILESYS_DIRS);
-    Button(IDC_BROWSE, L"Browse…", kCX + kCW - 84, y - 1, 84, 26);
+    Button(IDC_BROWSE, L"Browse…", kR - 84, y - 1, 84, 26);
     y += 32;
     Label(L"File name", y);
-    Edit(IDC_NAME, kCX, y, kCW - 90);
-    Button(IDC_TOKENS, L"Insert ▾", kCX + kCW - 84, y - 1, 84, 26);
+    Edit(IDC_NAME, kCX, y, kFW - 90);
+    Button(IDC_TOKENS, L"Insert ▾", kR - 84, y - 1, 84, 26);
     y += 28;
-    Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_PATHELLIPSIS, IDC_EXAMPLE, kCX, y + 2, kCW, 18);
+    Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_PATHELLIPSIS, IDC_EXAMPLE, kCX, y + 2, kFW, 18);
     y += 28;
     Label(L"Format", y);
     HWND fmt = Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, IDC_FORMAT, kCX, y, 150, 200);
     SendMessageW(fmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"PNG (sharpest)"));
     SendMessageW(fmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"JPG (smaller files)"));
-    Add(WC_STATICW, L"Quality", SS_RIGHT | SS_NOPREFIX, IDC_QLABEL, kCX + 160, y + 4, 52, 18);
-    HWND q = Edit(IDC_QUALITY, kCX + 218, y, 46, ES_NUMBER);
+    Add(WC_STATICW, L"Quality", SS_RIGHT | SS_NOPREFIX, IDC_QLABEL, kCX + 156, y + 4, 52, 18);
+    HWND q = Edit(IDC_QUALITY, kCX + 214, y, 46, ES_NUMBER);
     HWND spin = Add(UPDOWN_CLASSW, L"", UDS_SETBUDDYINT | UDS_ARROWKEYS | UDS_NOTHOUSANDS | UDS_HOTTRACK, IDC_QSPIN,
-                    kCX + 264, y, 18, 24);
+                    kCX + 260, y, 18, 24);
     SendMessageW(spin, UDM_SETBUDDY, reinterpret_cast<WPARAM>(q), 0);
     SendMessageW(spin, UDM_SETRANGE32, 1, 100);
-    y += 38;
-
-    Heading(L"Capture", y);
+    y += 44;
+    Heading(L"Windows", y);
     y += 28;
+    Check(IDC_AUTOSTART, L"Start Canivete with Windows", y);
+
+    // Screenshots
+    y = BeginTab(1);
+    HotkeyRow(0, y);
+    y += 30;
+    HotkeyRow(2, y);
+    y += 28;
+    HotkeyHint(y);
+    y += 42;
     Label(L"Full screenshot of", y);
     HWND full = Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, IDC_FULLMODE, kCX, y, 230, 200);
     SendMessageW(full, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"All monitors"));
     SendMessageW(full, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"The monitor under the mouse"));
-    y += 34;
+    y += 36;
     Check(IDC_CLIP, L"Copy to the clipboard", y);
     y += 26;
-    Check(IDC_NOTIFY, L"Show a preview after each capture (click it to draw on the screenshot)", y);
+    Check(IDC_NOTIFY, L"Show a preview after each capture (click it to edit)", y);
     y += 26;
     Check(IDC_EDITOR, L"Open the editor right after each capture", y);
     y += 26;
     Check(IDC_CURSOR, L"Include the mouse pointer", y);
     y += 26;
     Check(IDC_MAGNIFIER, L"Show the magnifier when selecting a region", y);
-    y += 36;
 
-    Heading(L"Color picker", y);
+    // Color picker
+    y = BeginTab(2);
+    HotkeyRow(3, y);
     y += 28;
+    HotkeyHint(y);
+    y += 42;
     Label(L"Default format", y);
     HWND cf = Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, IDC_COLORFMT, kCX, y, 260, 240);
     for (const ColorFormatDef& f : kColorFormats) SendMessageW(cf, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(f.label));
-    y += 38;
 
-    Heading(L"Video recording", y);
+    // GIF recording
+    y = BeginTab(3);
+    HotkeyRow(4, y);
     y += 28;
+    HotkeyHint(y);
+
+    // Video recording
+    y = BeginTab(4);
+    HotkeyRow(5, y);
+    y += 28;
+    HotkeyHint(y);
+    y += 42;
     Check(IDC_VSOUND, L"Record the computer's sound", y);
     y += 26;
     Check(IDC_VMIC, L"Record the microphone", y);
-    y += 36;
 
-    Heading(L"Windows", y);
-    y += 28;
-    Check(IDC_AUTOSTART, L"Start Canivete with Windows", y);
-    y += 34;
+    // Image tools, Renamer
+    y = BeginTab(5);
+    Button(IDC_OPENRESIZE, L"Open Resize images…", kL, y, 170, 28);
+    y = BeginTab(6);
+    Button(IDC_OPENRENAME, L"Open Rename files…", kL, y, 170, 28);
 
-    U.footerY = y;
-    y += 12;
+    U.buildTab = -1;
+    U.footerY = std::max(U.maxY + 18, 12 + kTabCount * kNavItem + 16);
+    y = U.footerY + 12;
     const int bw = 84;
     Button(IDOK, L"OK", kW - kM - 3 * bw - 16, y, bw, 28, BS_DEFPUSHBUTTON);
     Button(IDCANCEL, L"Cancel", kW - kM - 2 * bw - 8, y, bw, 28);
@@ -228,24 +317,29 @@ void Build() {
 }
 
 void MakeFonts() {
-    if (U.font) DeleteObject(U.font);
-    if (U.bold) DeleteObject(U.bold);
+    for (HFONT f : {U.font, U.bold, U.title})
+        if (f) DeleteObject(f);
     NONCLIENTMETRICSW ncm{sizeof(ncm)};
     SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, U.dpi);
     LOGFONTW lf = ncm.lfMessageFont;
     U.font = CreateFontIndirectW(&lf);
+    const LONG h = lf.lfHeight;
     lf.lfWeight = FW_SEMIBOLD;
-    lf.lfHeight = MulDiv(lf.lfHeight, 112, 100);
+    lf.lfHeight = MulDiv(h, 112, 100);
     U.bold = CreateFontIndirectW(&lf);
+    lf.lfHeight = MulDiv(h, 160, 100);
+    U.title = CreateFontIndirectW(&lf);
 }
 
 void Layout() {
     HDWP d = BeginDeferWindowPos(static_cast<int>(U.ctls.size()));
     for (const Ctl& c : U.ctls) {
-        SendMessageW(c.wnd, WM_SETFONT, reinterpret_cast<WPARAM>(c.bold ? U.bold : U.font), FALSE);
+        HFONT f = c.font == kFontTitle ? U.title : c.font == kFontBold ? U.bold : U.font;
+        SendMessageW(c.wnd, WM_SETFONT, reinterpret_cast<WPARAM>(f), FALSE);
         if (d) d = DeferWindowPos(d, c.wnd, nullptr, Px(c.x), Px(c.y), Px(c.w), Px(c.h), SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (d) EndDeferWindowPos(d);
+    SendMessageW(U.nav, LB_SETITEMHEIGHT, 0, Px(kNavItem));
     InvalidateRect(U.hwnd, nullptr, TRUE);
 }
 
@@ -253,6 +347,15 @@ SIZE WindowSize() {
     RECT r{0, 0, Px(kW), Px(U.height)};
     AdjustWindowRectExForDpi(&r, kStyle, FALSE, kExStyle, U.dpi);
     return {r.right - r.left, r.bottom - r.top};
+}
+
+void ShowTab(int t) {
+    U.tab = g_lastTab = std::clamp(t, 0, kTabCount - 1);
+    for (const Ctl& c : U.ctls)
+        if (c.tab >= 0) ShowWindow(c.wnd, c.tab == U.tab ? SW_SHOWNA : SW_HIDE);
+    if (SendMessageW(U.nav, LB_GETCURSEL, 0, 0) != U.tab) SendMessageW(U.nav, LB_SETCURSEL, U.tab, 0);
+    HWND f = GetFocus();
+    if (f && IsChild(U.hwnd, f) && !IsWindowVisible(f)) SetFocus(U.nav);
 }
 
 // ---- hotkey boxes --------------------------------------------------------------------------
@@ -278,26 +381,27 @@ void ShowHotkey(int i) {
 // Status next to each box: off, duplicate, taken by another app.
 void CheckHotkeys() {
     Hotkey owned[kHotkeyCount];  // what Canivete itself has registered (saved settings)
-    ParseHotkey(g_settings.hkRegion, owned[0]);
-    ParseHotkey(g_settings.hkFull, owned[2]);
-    ParseHotkey(g_settings.hkColor, owned[3]);
-    ParseHotkey(g_settings.hkGif, owned[4]);
-    ParseHotkey(g_settings.hkVideo, owned[5]);
+    const std::wstring* saved[kHotkeyCount] = {&g_settings.hkRegion, nullptr, &g_settings.hkFull,
+                                               &g_settings.hkColor, &g_settings.hkGif, &g_settings.hkVideo};
+    for (int i = 0; i < kHotkeyCount; ++i)
+        if (saved[i] && FeatureOn(kHkFeature[i])) ParseHotkey(*saved[i], owned[i]);
     for (int i = 0; i < kHotkeyCount; ++i) {
         if (!Shown(i)) continue;
         std::wstring st;
         bool bad = false;
         const Hotkey& hk = U.hk[i];
-        if (!hk.vk) {
+        if (!HotkeyOn(i)) {
+            // the whole tab is greyed out
+        } else if (!hk.vk) {
             st = L"Off";
         } else {
             for (int j = 0; j < kHotkeyCount && !bad; ++j)
-                if (j != i && U.hk[j].vk && SameKey(hk, U.hk[j])) {
+                if (j != i && HotkeyOn(j) && U.hk[j].vk && SameKey(hk, U.hk[j])) {
                     st = std::wstring(L"Same as ") + kHkNames[j];
                     bad = true;
                 }
             const bool mine =
-                std::any_of(owned, owned + kHotkeyCount, [&](const Hotkey& o) { return SameKey(hk, o); });
+                std::any_of(owned, owned + kHotkeyCount, [&](const Hotkey& o) { return o.vk && SameKey(hk, o); });
             if (!bad && !mine) {
                 if (RegisterHotKey(U.hwnd, 900 + i, hk.mods, hk.vk)) {
                     UnregisterHotKey(U.hwnd, 900 + i);
@@ -446,21 +550,34 @@ void UpdateExample() {
 }
 
 void UpdateEnable() {
+    // A feature that is off: everything on its tab but the title and the switch is greyed out.
+    for (const Ctl& c : U.ctls)
+        if (c.tab > 0 && !c.header) EnableWindow(c.wnd, U.on[kTabs[c.tab].feature]);
     const bool save = Checked(IDC_SAVE);
     for (int id : {IDC_FOLDER, IDC_BROWSE, IDC_NAME, IDC_TOKENS, IDC_EXAMPLE, IDC_FORMAT})
         EnableWindow(Item(id), save);
     for (int id : {IDC_QLABEL, IDC_QUALITY, IDC_QSPIN}) EnableWindow(Item(id), save && JpgSelected());
 }
 
+void Toggle(int f) {
+    U.on[f] = !U.on[f];
+    InvalidateRect(Item(IDC_TOGGLE0 + f), nullptr, TRUE);
+    InvalidateRect(U.nav, nullptr, TRUE);
+    UpdateEnable();
+    CheckHotkeys();
+}
+
 void Populate() {
     const Settings& s = g_settings;
+    for (int f = 0; f < kFeatCount; ++f) U.on[f] = s.features[f];
     ParseHotkey(s.hkRegion, U.hk[0]);
     U.hk[1] = {};  // Window screenshot: now part of the region tool
     ParseHotkey(s.hkFull, U.hk[2]);
     ParseHotkey(s.hkColor, U.hk[3]);
     ParseHotkey(s.hkGif, U.hk[4]);
     ParseHotkey(s.hkVideo, U.hk[5]);
-    for (int i = 0; i < kHotkeyCount; ++i) ShowHotkey(i);
+    for (int i = 0; i < kHotkeyCount; ++i)
+        if (Shown(i)) ShowHotkey(i);
     int cf = 0;
     for (int i = 0; i < static_cast<int>(std::size(kColorFormats)); ++i)
         if (s.colorFormat == kColorFormats[i].key) cf = i;
@@ -482,10 +599,12 @@ void Populate() {
     CheckHotkeys();
     UpdateEnable();
     UpdateExample();
+    InvalidateRect(U.hwnd, nullptr, TRUE);
 }
 
 void Apply() {
     Settings s = g_settings;
+    for (int f = 0; f < kFeatCount; ++f) s.features[f] = U.on[f];
     std::wstring* hks[kHotkeyCount] = {&s.hkRegion, &s.hkWindow, &s.hkFull, &s.hkColor, &s.hkGif, &s.hkVideo};
     for (int i = 0; i < kHotkeyCount; ++i) *hks[i] = U.hk[i].vk ? HotkeyText(U.hk[i]) : L"None";
     s.saveToFile = Checked(IDC_SAVE);
@@ -512,6 +631,82 @@ void Apply() {
     Settings_Applied();
     SetDlgItemInt(U.hwnd, IDC_QUALITY, s.jpegQuality, FALSE);
     CheckHotkeys();
+}
+
+// ---- drawing the tab list and the On switches ----------------------------------------------
+
+void FillColor(HDC dc, const RECT& r, COLORREF c) {
+    SetDCBrushColor(dc, c);
+    FillRect(dc, &r, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+}
+
+void RoundFill(HDC dc, const RECT& r, int radius, COLORREF fill, COLORREF line) {
+    SetDCBrushColor(dc, fill);
+    SetDCPenColor(dc, line);
+    HGDIOBJ ob = SelectObject(dc, GetStockObject(DC_BRUSH));
+    HGDIOBJ op = SelectObject(dc, GetStockObject(DC_PEN));
+    RoundRect(dc, r.left, r.top, r.right, r.bottom, radius, radius);
+    SelectObject(dc, ob);
+    SelectObject(dc, op);
+}
+
+void DrawNavItem(const DRAWITEMSTRUCT& d) {
+    if (d.itemID == static_cast<UINT>(-1)) return;
+    HDC dc = d.hDC;
+    FillColor(dc, d.rcItem, kNavBg);
+    RECT b = d.rcItem;
+    InflateRect(&b, -Px(2), -Px(2));
+    if (d.itemState & ODS_SELECTED) {
+        RoundFill(dc, b, Px(8), kNavSel, kNavSel);
+        RECT bar{b.left, b.top + Px(9), b.left + Px(3), b.bottom - Px(9)};
+        FillColor(dc, bar, kAccent);
+    }
+    const TabDef& t = kTabs[d.itemID];
+    const bool off = t.feature >= 0 && !U.on[t.feature];
+    HGDIOBJ of = SelectObject(dc, U.font);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, off ? kGrey : GetSysColor(COLOR_WINDOWTEXT));
+    RECT tr = b;
+    tr.left += Px(14);
+    tr.right -= Px(10);
+    DrawTextW(dc, t.name, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+    if (off) DrawTextW(dc, L"Off", -1, &tr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dc, of);
+    if ((d.itemState & ODS_FOCUS) && !(d.itemState & ODS_NOFOCUSRECT)) DrawFocusRect(dc, &b);
+}
+
+void DrawToggle(const DRAWITEMSTRUCT& d) {
+    const int f = static_cast<int>(d.CtlID) - IDC_TOGGLE0;
+    const bool on = U.on[f];
+    HDC dc = d.hDC;
+    const RECT& rc = d.rcItem;
+    FillColor(dc, rc, GetSysColor(COLOR_WINDOW));
+    const int h = Px(20), w = Px(40);
+    const int top = (rc.top + rc.bottom - h) / 2;
+    RECT pill{rc.left + Px(2), top, rc.left + Px(2) + w, top + h};
+    if (on) RoundFill(dc, pill, h, kAccent, kAccent);
+    else RoundFill(dc, pill, h, GetSysColor(COLOR_WINDOW), RGB(110, 110, 110));
+    const int k = h - Px(8);
+    const int kx = on ? pill.right - Px(4) - k : pill.left + Px(4);
+    const RECT knob{kx, top + Px(4), kx + k, top + Px(4) + k};
+    const COLORREF kc = on ? RGB(255, 255, 255) : RGB(90, 90, 90);
+    SetDCBrushColor(dc, kc);
+    SetDCPenColor(dc, kc);
+    HGDIOBJ ob = SelectObject(dc, GetStockObject(DC_BRUSH));
+    HGDIOBJ op = SelectObject(dc, GetStockObject(DC_PEN));
+    Ellipse(dc, knob.left, knob.top, knob.right, knob.bottom);
+    SelectObject(dc, ob);
+    SelectObject(dc, op);
+    HGDIOBJ of = SelectObject(dc, U.font);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+    RECT tr{pill.right + Px(10), rc.top, rc.right, rc.bottom};
+    DrawTextW(dc, on ? L"On" : L"Off", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dc, of);
+    if ((d.itemState & ODS_FOCUS) && !(d.itemState & ODS_NOFOCUSRECT)) {
+        RECT fr = rc;
+        DrawFocusRect(dc, &fr);
+    }
 }
 
 void Browse() {
@@ -586,6 +781,7 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         U.dpi = GetDpiForWindow(h);
         MakeFonts();
         U.focusBrush = CreateSolidBrush(kFocusBg);
+        U.navBrush = CreateSolidBrush(kNavBg);
         Build();
         Layout();
         return 0;
@@ -594,14 +790,28 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         RECT rc;
         GetClientRect(h, &rc);
         FillRect(dc, &rc, GetSysColorBrush(COLOR_WINDOW));
+        RECT nav{0, 0, Px(kNavW), Px(U.footerY)};
+        FillColor(dc, nav, kNavBg);
         RECT f = rc;
         f.top = Px(U.footerY);
         FillRect(dc, &f, GetSysColorBrush(COLOR_BTNFACE));
         f.bottom = f.top + 1;
-        SetDCBrushColor(dc, RGB(220, 220, 220));
-        FillRect(dc, &f, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+        FillColor(dc, f, RGB(220, 220, 220));
         return 1;
     }
+    case WM_MEASUREITEM: {
+        auto* m = reinterpret_cast<MEASUREITEMSTRUCT*>(lp);
+        if (m->CtlType == ODT_LISTBOX) m->itemHeight = Px(kNavItem);
+        return TRUE;
+    }
+    case WM_DRAWITEM: {
+        const auto* d = reinterpret_cast<const DRAWITEMSTRUCT*>(lp);
+        if (d->CtlType == ODT_LISTBOX) DrawNavItem(*d);
+        else if (d->CtlType == ODT_BUTTON) DrawToggle(*d);
+        return TRUE;
+    }
+    case WM_CTLCOLORLISTBOX:
+        return reinterpret_cast<LRESULT>(U.navBrush);
     case WM_CTLCOLORSTATIC: {
         HDC dc = reinterpret_cast<HDC>(wp);
         const int id = GetDlgCtrlID(reinterpret_cast<HWND>(lp));
@@ -612,7 +822,7 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             br = U.focusBrush;
         } else if (id >= IDC_HKST0 && id < IDC_HKST0 + kHotkeyCount) {
             fg = U.bad[id - IDC_HKST0] ? kRed : kGrey;
-        } else if (id == IDC_HINT || id == IDC_EXAMPLE) {
+        } else if (id == IDC_HINT || id == IDC_EXAMPLE || id == IDC_DESC) {
             fg = kGrey;
         }
         SetBkColor(dc, bg);
@@ -620,7 +830,7 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return reinterpret_cast<LRESULT>(br);
     }
     case WM_CTLCOLORBTN:
-        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE));
+        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
     case WM_HK_CHANGED:
         if (U.capturing >= 0) ShowHotkey(U.capturing);
         if (wp) CheckHotkeys();
@@ -632,7 +842,9 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             HWND f = GetFocus();
             if (f && IsChild(h, f)) U.lastFocus = f;
         } else {
-            SetFocus(U.lastFocus && IsWindow(U.lastFocus) ? U.lastFocus : Item(IDOK));
+            const bool ok = U.lastFocus && IsWindow(U.lastFocus) && IsWindowVisible(U.lastFocus) &&
+                            IsWindowEnabled(U.lastFocus);
+            SetFocus(ok ? U.lastFocus : U.nav);
         }
         return 0;
     case WM_COMMAND: {
@@ -640,6 +852,10 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (id >= IDC_HK0 && id < IDC_HK0 + kHotkeyCount) {
             if (code == EN_SETFOCUS) StartCapture(id - IDC_HK0);
             else if (code == EN_KILLFOCUS) StopCapture();
+            return 0;
+        }
+        if (id >= IDC_TOGGLE0 && id < IDC_TOGGLE0 + static_cast<int>(kFeatCount)) {
+            if (code == BN_CLICKED || code == BN_DOUBLECLICKED) Toggle(id - IDC_TOGGLE0);
             return 0;
         }
         switch (id) {
@@ -652,6 +868,9 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case IDC_APPLY:
             Apply();
+            break;
+        case IDC_NAV:
+            if (code == LBN_SELCHANGE) ShowTab(static_cast<int>(SendMessageW(U.nav, LB_GETCURSEL, 0, 0)));
             break;
         case IDC_SAVE:
             UpdateEnable();
@@ -671,6 +890,12 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_TOKENS:
             TokenMenu();
             break;
+        case IDC_OPENRESIZE:
+            Resizer_Open({});
+            break;
+        case IDC_OPENRENAME:
+            Renamer_Open({});
+            break;
         }
         return 0;
     }
@@ -688,16 +913,17 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         U.hook = nullptr;
         U.capturing = -1;
         Hotkeys_Suspend(false);
-        U.hwnd = nullptr;
+        U.hwnd = U.nav = nullptr;
         U.ctls.clear();
         U.lastFocus = nullptr;
+        U.maxY = 0;
         return 0;
     case WM_NCDESTROY:
-        DeleteObject(U.font);
-        DeleteObject(U.bold);
-        DeleteObject(U.focusBrush);
-        U.font = U.bold = nullptr;
-        U.focusBrush = nullptr;
+        for (HGDIOBJ o : {static_cast<HGDIOBJ>(U.font), static_cast<HGDIOBJ>(U.bold), static_cast<HGDIOBJ>(U.title),
+                          static_cast<HGDIOBJ>(U.focusBrush), static_cast<HGDIOBJ>(U.navBrush)})
+            if (o) DeleteObject(o);
+        U.font = U.bold = U.title = nullptr;
+        U.focusBrush = U.navBrush = nullptr;
         break;
     }
     return DefWindowProcW(h, msg, wp, lp);
@@ -706,6 +932,20 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 }  // namespace
 
 HWND SettingsUI_Window() { return U.hwnd; }
+
+// Ctrl+Tab / Ctrl+Shift+Tab and Ctrl+PageDown / Ctrl+PageUp switch tabs.
+bool SettingsUI_Key(const MSG& m) {
+    if (!U.hwnd || m.message != WM_KEYDOWN || U.capturing >= 0) return false;
+    if (m.hwnd != U.hwnd && !IsChild(U.hwnd, m.hwnd)) return false;
+    if (GetKeyState(VK_CONTROL) >= 0) return false;
+    int step = 0;
+    if (m.wParam == VK_TAB) step = GetKeyState(VK_SHIFT) < 0 ? -1 : 1;
+    else if (m.wParam == VK_NEXT) step = 1;
+    else if (m.wParam == VK_PRIOR) step = -1;
+    if (!step) return false;
+    ShowTab((U.tab + step + kTabCount) % kTabCount);
+    return true;
+}
 
 void SettingsUI_Show() {
     if (U.hwnd) {
@@ -738,6 +978,7 @@ void SettingsUI_Show() {
     const int y = w.top + std::max(0L, (w.bottom - w.top - sz.cy) / 2);
     SetWindowPos(h, nullptr, x, y, sz.cx, sz.cy, SWP_NOZORDER | SWP_NOACTIVATE);
     Populate();
+    ShowTab(g_lastTab);
     ShowWindow(h, SW_SHOW);
     SetForegroundWindow(h);
 }

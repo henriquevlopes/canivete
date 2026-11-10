@@ -143,12 +143,13 @@ std::wstring RegisterHotkeys() {
         CaptureMode mode;
         const std::wstring* text;
         const wchar_t* name;
+        Feature feature;
     } const list[] = {
-        {CaptureMode::Region, &g_settings.hkRegion, L"Region screenshot"},
-        {CaptureMode::Full, &g_settings.hkFull, L"Full screenshot"},
-        {CaptureMode::Color, &g_settings.hkColor, L"Color picker"},
-        {CaptureMode::Gif, &g_settings.hkGif, L"Record GIF"},
-        {CaptureMode::Video, &g_settings.hkVideo, L"Record video"},
+        {CaptureMode::Region, &g_settings.hkRegion, L"Region screenshot", kFeatShots},
+        {CaptureMode::Full, &g_settings.hkFull, L"Full screenshot", kFeatShots},
+        {CaptureMode::Color, &g_settings.hkColor, L"Color picker", kFeatColor},
+        {CaptureMode::Gif, &g_settings.hkGif, L"Record GIF", kFeatGif},
+        {CaptureMode::Video, &g_settings.hkVideo, L"Record video", kFeatVideo},
     };
     std::wstring failed;
     for (const Entry& e : list) UnregisterHotKey(g_mainWnd, static_cast<int>(e.mode));
@@ -158,6 +159,7 @@ std::wstring RegisterHotkeys() {
         return failed;
     }
     for (const Entry& e : list) {
+        if (!FeatureOn(e.feature)) continue;
         const int id = static_cast<int>(e.mode);
         Hotkey hk;
         if (!ParseHotkey(*e.text, hk)) {
@@ -191,6 +193,7 @@ void ReloadIfChanged() {
     g_iniTime = t;
     LoadSettings();
     RegisterHotkeysOrWarn();
+    if (!TestMode()) Shell_Register();
     Log(L"Settings reloaded");
 }
 
@@ -202,6 +205,7 @@ std::wstring Settings_Applied() {
     LoadSettings();
     g_iniTime = IniTime();  // so the file watcher doesn't reload it a second time
     Log(L"Settings saved");
+    if (!TestMode()) Shell_Register();  // Explorer entries follow the feature switches
     return RegisterHotkeys();
 }
 
@@ -240,19 +244,27 @@ void ShowMenu() {
         if (!hk.empty() && _wcsicmp(hk.c_str(), L"none") != 0) s += L"\t" + hk;
         AppendMenuW(m, MF_STRING, id, s.c_str());
     };
-    item(ID_REGION, L"Region screenshot", g_settings.hkRegion);
-    item(ID_FULL, L"Full screenshot", g_settings.hkFull);
+    // Separator before a group, only when something came before it.
+    auto group = [&] {
+        if (GetMenuItemCount(m) > 0) AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    };
+    if (FeatureOn(kFeatShots)) {
+        item(ID_REGION, L"Region screenshot", g_settings.hkRegion);
+        item(ID_FULL, L"Full screenshot", g_settings.hkFull);
+    }
     if (Recorder_Active()) {
         item(ID_GIF, L"Stop recording", L"");
     } else {
-        item(ID_GIF, L"Record GIF", g_settings.hkGif);
-        item(ID_VIDEO, L"Record video", g_settings.hkVideo);
+        if (FeatureOn(kFeatGif)) item(ID_GIF, L"Record GIF", g_settings.hkGif);
+        if (FeatureOn(kFeatVideo)) item(ID_VIDEO, L"Record video", g_settings.hkVideo);
     }
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    item(ID_COLOR, L"Pick a color", g_settings.hkColor);
+    if (FeatureOn(kFeatColor)) {
+        group();
+        item(ID_COLOR, L"Pick a color", g_settings.hkColor);
+    }
     // Recent colors: a swatch and the value in the copy format; clicking copies it again.
     std::vector<HBITMAP> swatches;
-    const std::vector<COLORREF> recent = RecentColors();
+    const std::vector<COLORREF> recent = FeatureOn(kFeatColor) ? RecentColors() : std::vector<COLORREF>{};
     if (!recent.empty()) {
         HMENU sub = CreatePopupMenu();
         const int sz = GetSystemMetricsForDpi(SM_CYMENUCHECK, GetDpiForWindow(g_mainWnd));
@@ -284,10 +296,10 @@ void ShowMenu() {
         ReleaseDC(nullptr, screen);
         AppendMenuW(m, MF_POPUP, reinterpret_cast<UINT_PTR>(sub), L"Recent colors");
     }
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, ID_RESIZE, L"Resize images…");
-    AppendMenuW(m, MF_STRING, ID_RENAME, L"Rename files…");
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    if (FeatureOn(kFeatImages) || FeatureOn(kFeatRename)) group();
+    if (FeatureOn(kFeatImages)) AppendMenuW(m, MF_STRING, ID_RESIZE, L"Resize images…");
+    if (FeatureOn(kFeatRename)) AppendMenuW(m, MF_STRING, ID_RENAME, L"Rename files…");
+    group();
     AppendMenuW(m, MF_STRING, ID_OPEN_FOLDER, L"Open screenshots folder");
     AppendMenuW(m, MF_STRING, ID_SETTINGS, L"Settings…");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
@@ -657,6 +669,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
                 break;
             }
             HWND dlg = SettingsUI_Window();
+            if (dlg && SettingsUI_Key(msg)) continue;
             if (dlg && IsDialogMessageW(dlg, &msg)) continue;  // Tab, Enter, Esc in the Settings window
             HWND rs = Resizer_Window();
             if (rs && IsDialogMessageW(rs, &msg)) continue;

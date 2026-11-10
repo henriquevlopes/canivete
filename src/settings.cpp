@@ -15,6 +15,15 @@ const wchar_t kDefaultIni[] =
     L";\r\n"
     L"; Hotkeys: Ctrl, Alt, Shift, Win plus one key, e.g. Ctrl+Shift+S, PrintScreen, F9.\r\n"
     L"; Leave a hotkey empty to turn it off.\r\n"
+    L"[Features]\r\n"
+    L"; 0 turns a feature off: no hotkeys, no menu entries.\r\n"
+    L"Screenshots=1\r\n"
+    L"ColorPicker=1\r\n"
+    L"Gif=1\r\n"
+    L"Video=1\r\n"
+    L"ImageTools=1\r\n"
+    L"Renamer=1\r\n"
+    L"\r\n"
     L"[Hotkeys]\r\n"
     L"RegionScreenshot=Ctrl+PrintScreen\r\n"
     L"WindowScreenshot=None\r\n"
@@ -147,6 +156,7 @@ void LoadSettings() {
     s.hkColor = ReadStr(L"Hotkeys", L"ColorPicker", L"Win+C");
     s.hkGif = ReadStr(L"Hotkeys", L"RecordGif", L"Ctrl+Shift+PrintScreen");
     s.hkVideo = ReadStr(L"Hotkeys", L"RecordVideo", L"Shift+PrintScreen");
+    for (int f = 0; f < kFeatCount; ++f) s.features[f] = ReadBool(L"Features", kFeatureKeys[f], true);
     s.gifPreset = Lower(Trim(ReadStr(L"Gif", L"Preset", L"balanced")));
     s.videoPreset = Lower(Trim(ReadStr(L"Video", L"Preset", L"balanced")));
     s.colorFormat = Lower(Trim(ReadStr(L"ColorPicker", L"CopyFormat", L"gray")));
@@ -177,6 +187,7 @@ void LoadSettings() {
 
 void SaveSettings(const Settings& s) {
     LoadSettings();  // makes sure the file exists (with its comments) before writing keys into it
+    for (int f = 0; f < kFeatCount; ++f) WriteBool(L"Features", kFeatureKeys[f], s.features[f]);
     WriteStr(L"Hotkeys", L"RegionScreenshot", s.hkRegion);
     WriteStr(L"Hotkeys", L"WindowScreenshot", s.hkWindow);
     WriteStr(L"Hotkeys", L"FullScreenshot", s.hkFull);

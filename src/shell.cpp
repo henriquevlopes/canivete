@@ -15,10 +15,11 @@ struct SendTo {
     const wchar_t* name;
     const wchar_t* arg;
     const wchar_t* tip;
+    Feature feature;
 };
 const SendTo kSendTo[] = {
-    {L"Canivete - Resize images.lnk", L"--resize", L"Resize images with Canivete"},
-    {L"Canivete - Rename.lnk", L"--rename", L"Rename files and folders with Canivete"},
+    {L"Canivete - Resize images.lnk", L"--resize", L"Resize images with Canivete", kFeatImages},
+    {L"Canivete - Rename.lnk", L"--rename", L"Rename files and folders with Canivete", kFeatRename},
 };
 
 // The "Canivete" submenu on every file and folder (like XnShell's): key names sort the entries; a
@@ -67,7 +68,10 @@ void Put(HKEY key, const wchar_t* name, const std::wstring& v) {
                    static_cast<DWORD>((v.size() + 1) * sizeof(wchar_t)));
 }
 
-// Writes one copy of the submenu.
+bool IsRename(const MenuEntry& e) { return wcsncmp(e.path, L"5rename", 7) == 0; }
+bool Wanted(const MenuEntry& e) { return IsRename(e) ? FeatureOn(kFeatRename) : FeatureOn(kFeatImages); }
+
+// Writes one copy of the submenu, with the entries of the features that are on.
 void WriteMenu(const wchar_t* path, const std::wstring& exe, const std::wstring& marker) {
     RegDeleteTreeW(HKEY_CURRENT_USER, path);
     HKEY root;
@@ -78,7 +82,10 @@ void WriteMenu(const wchar_t* path, const std::wstring& exe, const std::wstring&
     Put(root, L"Icon", quoted + L",0");
     Put(root, L"SubCommands", L"");
     Put(root, L"MultiSelectModel", L"Player");  // shown for any number of items
+    bool first = true;
     for (const MenuEntry& e : kMenu) {
+        if (!Wanted(e)) continue;
+        const bool top = !wcschr(e.path, L'\\');
         HKEY k;
         if (RegCreateKeyExW(root, (std::wstring(L"shell\\") + e.path).c_str(), 0, nullptr, 0, KEY_WRITE, nullptr, &k,
                             nullptr) != ERROR_SUCCESS)
@@ -87,7 +94,7 @@ void WriteMenu(const wchar_t* path, const std::wstring& exe, const std::wstring&
         Put(k, L"MUIVerb", e.text);
         Put(k, L"MultiSelectModel", L"Player");
         if (!wcschr(e.path, L'\\') && !rename) Put(k, L"AppliesTo", L"System.Kind:=picture");
-        if (e.separatorBefore) {
+        if (e.separatorBefore && !(top && first)) {
             const DWORD flags = 0x20;  // ECF_SEPARATORBEFORE
             RegSetValueExW(k, L"CommandFlags", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&flags), sizeof(flags));
         }
@@ -102,6 +109,7 @@ void WriteMenu(const wchar_t* path, const std::wstring& exe, const std::wstring&
             }
         }
         RegCloseKey(k);
+        if (top) first = false;
     }
     Put(root, L"CaniveteMenu", marker);  // last, so a half-written menu is written again next time
     RegCloseKey(root);
@@ -109,21 +117,29 @@ void WriteMenu(const wchar_t* path, const std::wstring& exe, const std::wstring&
 
 // Writes the submenus again when the exe moved or the entries changed. Returns true when written.
 bool RegisterMenu(const std::wstring& exe) {
-    const std::wstring marker = exe + kMenuVersion;
-    bool current = true;
+    const bool images = FeatureOn(kFeatImages), rename = FeatureOn(kFeatRename);
+    const std::wstring marker = exe + kMenuVersion + (images ? L"i" : L"") + (rename ? L"r" : L"");
+    bool changed = false;
     for (const wchar_t* path : kMenus) {
+        // Folders only get Rename (the picture entries never show on a folder).
+        const bool folders = path == kMenus[1];
+        if (folders ? !rename : !(images || rename)) {
+            if (RegDeleteTreeW(HKEY_CURRENT_USER, path) == ERROR_SUCCESS) changed = true;
+            continue;
+        }
         wchar_t cur[MAX_PATH * 2] = {};
         DWORD size = sizeof(cur);
-        if (RegGetValueW(HKEY_CURRENT_USER, path, L"CaniveteMenu", RRF_RT_REG_SZ, nullptr, cur, &size) !=
-                ERROR_SUCCESS ||
-            marker != cur)
-            current = false;
+        if (RegGetValueW(HKEY_CURRENT_USER, path, L"CaniveteMenu", RRF_RT_REG_SZ, nullptr, cur, &size) ==
+                ERROR_SUCCESS &&
+            marker == cur)
+            continue;
+        if (!changed)
+            for (const wchar_t* old : kOldKeys) RegDeleteTreeW(HKEY_CURRENT_USER, old);
+        WriteMenu(path, exe, marker);
+        changed = true;
     }
-    if (current) return false;
-    for (const wchar_t* old : kOldKeys) RegDeleteTreeW(HKEY_CURRENT_USER, old);
-    for (const wchar_t* path : kMenus) WriteMenu(path, exe, marker);
-    Log(L"Explorer Canivete submenu registered");
-    return true;
+    if (changed) Log(L"Explorer Canivete submenu written (pictures %d, rename %d)", images, rename);
+    return changed;
 }
 
 }  // namespace
@@ -139,6 +155,10 @@ void Shell_Register() {
     CoTaskMemFree(dir);
     for (const SendTo& s : kSendTo) {
         const std::wstring lnk = sendTo + L"\\" + s.name;
+        if (!FeatureOn(s.feature)) {
+            DeleteFileW(lnk.c_str());
+            continue;
+        }
         if (!changed && GetFileAttributesW(lnk.c_str()) != INVALID_FILE_ATTRIBUTES) continue;
         ComPtr<IShellLinkW> sl;
         ComPtr<IPersistFile> pf;

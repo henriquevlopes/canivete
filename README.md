@@ -63,9 +63,13 @@ sits on top, so Enter takes it; Esc copies nothing. Windows reserves Win+C,
 so Win-key hotkeys it refuses are caught with a keyboard hook instead (the Start menu stays closed).
 Recent colors live in `%APPDATA%\Canivete\colors.txt`.
 
-Settings: tray > Settings… opens a window for hotkeys (click a box, press the keys), folder, file
-name (with an Insert menu of tokens and a live example), PNG/JPG and quality, full-screen mode,
-clipboard, preview, mouse pointer, magnifier, color copy format and start with Windows. Everything is stored in
+Settings: tray > Settings… opens a small window with a tab per feature on the left (General,
+Screenshots, Color picker, GIF recording, Video recording, Image tools, Renamer; Ctrl+Tab switches).
+General has the folder, file name (with an Insert menu of tokens and a live example), PNG/JPG and
+quality, and start with Windows; each feature tab has its hotkey (click the box, press the keys) and
+options. Each feature tab also has an On/Off switch: a feature that is off loses its hotkeys, its
+tray menu entries and its Explorer right-click and Send to entries (the list shows it as "Off").
+Everything is stored in
 `%APPDATA%\Canivete\settings.ini`; edits to that file apply as soon as it is saved.
 Log: `%APPDATA%\Canivete\canivete.log`.
 
@@ -161,7 +165,7 @@ Builds Release, installs to `%LOCALAPPDATA%\Programs\Canivete\Canivete.exe` and 
 
 - `src/main.cpp` — tray icon, hotkeys (plus a keyboard hook for reserved Win combos), menu, settings-file watch, single instance
 - `src/settings.cpp` — INI settings, hotkey parsing, log
-- `src/settings_ui.cpp` — Settings window (built in code, per-monitor DPI, hotkey recording hook)
+- `src/settings_ui.cpp` — Settings window: tab list, per-feature On switches (built in code, per-monitor DPI, hotkey recording hook)
 - `src/capture.cpp` — GDI screen grab, region overlay (frozen screen, window snapping, magnifier), color picker mode
 - `src/color.cpp` — color text formats, clipboard text, recent colors
 - `src/output.cpp` — PNG/JPG via WIC, file naming, clipboard, notification toast
