@@ -17,7 +17,8 @@ Plan and research notes: [PLAN.md](PLAN.md).
 | 4 | Renamer | done |
 | 5 | MP4 recording | done (video + sound) |
 | 6 | GIF recording | done |
-| 7 | Computer maintenance (updates, cleanup, startup apps, health) | done |
+| 7 | Computer maintenance (overview, updates, installed apps, cleanup, startup apps, health, daily check) | done |
+| 8 | Installer and self-update | done |
 
 ## Use
 
@@ -140,6 +141,14 @@ digits needed (01 for up to 99 items, 001 above). Delete removes a row from the 
 All renames are one Windows operation, so Ctrl+Z in Explorer undoes the whole batch.
 
 Computer maintenance: tray > Computer maintenance… (or Start menu > Computer Maintenance).
+- Overview: one list of everything that keeps the PC up to date and healthy, each with a colored dot
+  and what to do: Windows updates (and days since the last one), drivers and device problems, app
+  updates, graphics driver age, virus protection (definitions, last scan), restart, disk space per
+  drive, cleanup, battery wear, Canivete's own version, Store apps. Double-click a row (or Do it) to
+  deal with it. Last results are kept in `%APPDATA%\Canivete\maintenance.ini`.
+- Daily check (Settings > Maintenance, on by default): about once a day Canivete checks for updates
+  in the background and shows a notice when there are new ones (or virus protection needs a look);
+  clicking it opens the Overview. Updates already seen don't notify again.
 - Updates: Windows and driver updates (Windows Update), app updates (winget), and the graphics driver
   with a button to the maker's app (NVIDIA app, AMD Adrenalin, Intel). Tick what to install; apps left
   unticked stay unticked next time (`[Maintenance] SkipApps`). Install makes a restore point first
@@ -148,7 +157,15 @@ Computer maintenance: tray > Computer maintenance… (or Start menu > Computer M
   Delivery Optimization cache, old crash dumps, shader caches, Recycle Bin, DISM component cleanup).
   No registry cleaning.
 - Startup apps: the same switches as Task Manager's Startup tab (Run keys and Startup folders).
-- Health: uptime and restart advice, memory, disk space, repair (DISM + sfc), optimize drives, restore point.
+- Installed apps: every installed app (name, publisher, version, size, date) with search; Uninstall runs
+  the app's own uninstaller (msiexec /x for MSI apps).
+- Health: uptime and restart advice, memory, disk space, repair (DISM + sfc), optimize drives, restore
+  point, Defender quick scan.
+
+Updates of Canivete itself: it checks the public `henriquevlopes/canivete-releases` GitHub releases
+(no token, about once a day, Settings > General can turn it off), shows a notice and a tray menu item
+when a newer version is out, downloads the setup, checks its SHA256 against the release notes and
+installs it silently.
 
 Command line: `Canivete.exe --region | --window | --full | --color | --gif | --mp4 | --settings` acts in the running copy.
 `Canivete.exe --edit image.png` opens any image in the editor; `--alpha image.png` opens Make alpha.
@@ -159,6 +176,10 @@ files to the running one, so Explorer's one-copy-per-file launch ends in one win
 `Canivete.exe --maintenance` opens Computer maintenance (the Start menu's Computer Maintenance shortcut does this).
 `Canivete.exe --maint-admin <window> <task> [items]` is the elevated copy that window starts for one job; it refuses
 to run unless that window exists.
+`Canivete.exe --maint-check` runs the daily maintenance check now; `--check-update` checks for a new Canivete.
+`Canivete.exe --update-test` checks the releases repo, downloads the setup and verifies its SHA256 (self-test).
+`Canivete.exe --uninstall` removes Canivete's Explorer entries, shortcuts and autostart (the uninstaller runs it).
+`Canivete.exe --click-notice` (test mode only) acts as if the last notice was clicked.
 `Canivete.exe --do <action> a.jpg b.png` runs a right-click menu action (`small medium large half custom
 jpg png tif bmp right left 180 fliph flipv copy`).
 `Canivete.exe --grab out.png` (or `.jpg`) grabs all monitors to a file and exits (self-test).
@@ -176,6 +197,15 @@ powershell -ExecutionPolicy Bypass -File tools\deploy.ps1
 
 Builds Release, installs to `%LOCALAPPDATA%\Programs\Canivete\Canivete.exe` and restarts it.
 
+Setup file (Inno Setup 6, `winget install JRSoftware.InnoSetup`): `tools\make_setup.ps1` builds
+`dist\Canivete-Setup-<version>.exe`, a per-user installer (no admin) to the same folder, with a Start
+menu entry and an uninstaller in Windows' app list. `/TESTRUN` makes it leave the running copy alone
+(see `installer\canivete.iss`).
+
+Release: bump the version in `CMakeLists.txt`, then
+`powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Notes "What changed"`. It builds the setup
+and publishes it with its SHA256 on `henriquevlopes/canivete-releases`; running copies pick it up.
+
 ## Code
 
 - `src/main.cpp` — tray icon, hotkeys (plus a keyboard hook for reserved Win combos), menu, settings-file watch, single instance
@@ -192,6 +222,8 @@ Builds Release, installs to `%LOCALAPPDATA%\Programs\Canivete\Canivete.exe` and 
 - `src/video.cpp` — MP4 writer: BGRX to NV12 (BT.709), Media Foundation H.264 sink writer, hardware encoder with software fallback, AAC sound stream; the smaller copies offered after recording (decode, shrink, re-encode)
 - `src/audio.cpp` — video sound: WASAPI loopback of the default output + optional microphone, mixed, timed by capture clock
 - `src/alpha.cpp` — Make alpha window: freehand mask, detail/background picks, threshold engine, square power-of-two output
-- `src/maint.cpp` — Computer maintenance window: Updates, Cleanup, Startup apps, Health tabs; worker threads; elevated jobs report back with WM_COPYDATA
+- `src/maint.cpp` — Computer maintenance window: Overview, Updates, Installed apps, Cleanup, Startup apps, Health tabs; worker threads; elevated jobs report back with WM_COPYDATA; daily background check
+- `src/maint_info.cpp` — Overview checks: antivirus (Security Center + Defender WMI), device problems, battery wear, last Windows Update, installed apps
+- `src/update.cpp` — Canivete self-update: GitHub releases API (WinHTTP), SHA256 check (BCrypt), silent setup run
 - `src/maint_ops.cpp` — the checks and jobs: Windows Update agent (COM), winget, GPU driver info, cleanup whitelist, startup entries (StartupApproved), restore point, DISM/sfc, defrag
 - `src/shell.cpp` — Explorer right-click Canivete submenu (image actions, Rename), Send to shortcuts, Start menu Computer Maintenance

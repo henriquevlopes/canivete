@@ -14,15 +14,20 @@ HWND g_mainWnd = nullptr;
 
 namespace {
 
-enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_COLOR, ID_GIF, ID_OPEN_FOLDER, ID_SETTINGS, ID_EXIT, ID_RESIZE, ID_RENAME, ID_VIDEO, ID_MAINT };
+enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_COLOR, ID_GIF, ID_OPEN_FOLDER, ID_SETTINGS, ID_EXIT, ID_RESIZE, ID_RENAME, ID_VIDEO, ID_MAINT, ID_UPDATE };
 constexpr UINT ID_RECENT0 = 200;  // .. 209: recent colors in the tray menu
 constexpr UINT kCmdAlreadyRunning = 99;
 constexpr UINT kCmdSettings = 98;
 constexpr UINT kCmdMaint = 97;
+constexpr UINT kCmdUpdate = 96;      // --check-update
+constexpr UINT kCmdMaintCheck = 95;  // --maint-check: the daily background check, now
+constexpr UINT kCmdClickNotice = 94; // --click-notice (test copy): as if the last notice was clicked
 constexpr UINT_PTR kTimerDeferred = 10;
 constexpr UINT_PTR kTimerResize = 11;
 constexpr UINT_PTR kTimerRename = 12;
 constexpr UINT_PTR kTimerAction = 13;
+constexpr UINT_PTR kTimerDaily = 14;       // hourly: is the daily check due?
+constexpr UINT_PTR kTimerFirstCheck = 15;  // a few minutes after start
 constexpr ULONG_PTR kCopyResize = 0x52535A31;  // WM_COPYDATA tags: file list for the resizer
 constexpr ULONG_PTR kCopyRename = 0x524E4D31;  // ... and for the renamer
 constexpr ULONG_PTR kCopyAction = 0x41435431;  // ... and for a quick action (first entry = action name)
@@ -125,7 +130,10 @@ void TrayAdd() {
     Shell_NotifyIconW(NIM_SETVERSION, &g_nid);
 }
 
+std::function<void()> g_noticeClick;  // what clicking the notice on screen does
+
 void TrayBalloon(const wchar_t* title, const std::wstring& text) {
+    g_noticeClick = nullptr;
     if (TestMode()) {
         Log(L"Notice: %s - %s", title, text.c_str());
         return;
@@ -201,6 +209,11 @@ void ReloadIfChanged() {
 }  // namespace
 
 void Tray_Notify(const wchar_t* title, const std::wstring& text) { TrayBalloon(title, text); }
+
+void Tray_NotifyAction(const wchar_t* title, const std::wstring& text, std::function<void()> onClick) {
+    TrayBalloon(title, text);
+    g_noticeClick = std::move(onClick);
+}
 
 std::wstring Settings_Applied() {
     LoadSettings();
@@ -304,6 +317,10 @@ void ShowMenu() {
         group();
         AppendMenuW(m, MF_STRING, ID_MAINT, L"Computer maintenance…");
     }
+    if (Update_Info().available) {
+        group();
+        AppendMenuW(m, MF_STRING, ID_UPDATE, (L"Update Canivete to " + Update_Info().latest + L"…").c_str());
+    }
     group();
     AppendMenuW(m, MF_STRING, ID_OPEN_FOLDER, L"Open screenshots folder");
     AppendMenuW(m, MF_STRING, ID_SETTINGS, L"Settings…");
@@ -333,7 +350,23 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case NIN_SELECT:
         case NIN_KEYSELECT:
             ShowMenu();
+            break;
+        case NIN_BALLOONUSERCLICK:
+            if (auto f = std::move(g_noticeClick)) {
+                g_noticeClick = nullptr;
+                f();
+            }
+            break;
+        case NIN_BALLOONTIMEOUT:
+            g_noticeClick = nullptr;
+            break;
         }
+        return 0;
+    case WM_APP_MAINT:
+        Maint_OnBackground(lp);
+        return 0;
+    case WM_APP_UPDATE:
+        Update_OnMessage(wp, lp);
         return 0;
     case WM_APP_CAPTURE_DONE:
         Output_OnDone(lp);
@@ -344,6 +377,12 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             SettingsUI_Show();
         else if (wp == kCmdMaint)
             Maint_Show();
+        else if (wp == kCmdUpdate)
+            Update_Check(true);
+        else if (wp == kCmdMaintCheck)
+            Maint_Background(true);
+        else if (wp == kCmdClickNotice && TestMode())
+            SendMessageW(h, WM_APP_TRAY, 0, NIN_BALLOONUSERCLICK);
         else if (wp == kCmdAlreadyRunning)
             TrayBalloon(L"Canivete is already running", L"Right-click the red knife icon in the tray.");
         return 0;
@@ -371,6 +410,9 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case ID_MAINT:
             Maint_Show();
+            break;
+        case ID_UPDATE:
+            Update_Install();
             break;
         case ID_REGION:
         case ID_WINDOW:
@@ -410,7 +452,11 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_TIMER:
-        if (wp == kTimerDeferred) {
+        if (wp == kTimerDaily || wp == kTimerFirstCheck) {
+            if (wp == kTimerFirstCheck) KillTimer(h, kTimerFirstCheck);
+            Maint_Background();
+            Update_Background();
+        } else if (wp == kTimerDeferred) {
             KillTimer(h, kTimerDeferred);
             Capture_Start(g_deferredMode);
         } else if (wp == kTimerResize) {
@@ -562,6 +608,19 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
             LocalFree(argv);
             return r;
         }
+        if (!_wcsicmp(argv[1], L"--uninstall")) {  // run by the uninstaller: undo what Canivete added to Windows
+            LocalFree(argv);
+            CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            Shell_Unregister();
+            SetAutostart(false);
+            Log(L"--uninstall: Explorer entries, shortcuts and start with Windows removed");
+            CoUninitialize();
+            return 0;
+        }
+        if (!_wcsicmp(argv[1], L"--update-test")) {  // download and check the latest release, install nothing
+            LocalFree(argv);
+            return Update_SelfTest();
+        }
         if (!_wcsicmp(argv[1], L"--grab") && argc >= 3) return RunGrabTest(argv[2]);
         if (!_wcsicmp(argv[1], L"--edit") && argc >= 3) return RunEditor(argv[2]);
         if (!_wcsicmp(argv[1], L"--alpha") && argc >= 3) return RunAlpha(argv[2]);
@@ -617,6 +676,9 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
         }
         else if (!_wcsicmp(argv[1], L"--settings")) cmd = kCmdSettings;
         else if (!_wcsicmp(argv[1], L"--maintenance")) cmd = kCmdMaint;
+        else if (!_wcsicmp(argv[1], L"--check-update")) cmd = kCmdUpdate;
+        else if (!_wcsicmp(argv[1], L"--maint-check")) cmd = kCmdMaintCheck;
+        else if (!_wcsicmp(argv[1], L"--click-notice")) cmd = kCmdClickNotice;
     }
     LocalFree(argv);
 
@@ -661,6 +723,8 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     if (!TestMode()) Shell_Register();
     Log(L"Canivete %s started", CANIVETE_VERSION);
     if (cmd) PostMessageW(g_mainWnd, WM_APP_COMMAND, cmd, 0);
+    SetTimer(g_mainWnd, kTimerFirstCheck, 3 * 60 * 1000, nullptr);
+    SetTimer(g_mainWnd, kTimerDaily, 60 * 60 * 1000, nullptr);
     if (gifMs > 0) Recorder_Test(gifRect, gifMs, testVideo);
     if (listTag) {
         if (list.empty()) list.push_back(L"");  // still opens the window

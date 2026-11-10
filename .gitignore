@@ -3,3 +3,4 @@ out/
 .vs/
 res/icon_preview.png
 *.user
+dist/

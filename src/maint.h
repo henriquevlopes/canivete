@@ -71,6 +71,39 @@ struct Health {
 };
 Health ReadHealth();
 
+// ---- overview checks (maint_info.cpp)
+struct SecurityInfo {
+    bool known = false;     // an antivirus was found
+    std::wstring product;   // "Microsoft Defender Antivirus", …
+    bool on = false;        // real-time protection on
+    bool upToDate = true;   // virus definitions current
+    bool defender = false;  // the details below come from Defender
+    int sigAgeDays = -1;    // definitions age; -1 unknown
+    int scanAgeDays = -1;   // days since the last quick or full scan; -1 unknown / never
+};
+SecurityInfo ReadSecurity();
+struct DeviceProblem {
+    std::wstring name;
+    ULONG code = 0;  // Device Manager's problem code
+};
+std::vector<DeviceProblem> ScanDeviceProblems();
+struct BatteryInfo {
+    bool present = false;
+    ULONG design = 0, full = 0;  // mWh when new, and now
+};
+BatteryInfo ReadBattery();
+int DaysSinceLastUpdate();  // last successful Windows Update install; -1 unknown
+
+// ---- installed apps
+struct InstalledApp {
+    std::wstring key;  // "<M|W|U>|<Uninstall subkey>"
+    std::wstring name, publisher, version, date, uninstall, msi;
+    ULONGLONG size = 0;
+    bool machine = false;
+};
+std::vector<InstalledApp> ScanInstalled();
+bool SplitCommand(const std::wstring& cmd, std::wstring& exe, std::wstring& args);  // "exe" args
+
 // ---- jobs. "install" (items: "restore", "wu:<id>", "app:<id>"), "clean" (cleanup keys), "startup"
 // ("<on 0|1>|<StartupItem key>"), "repair", "optimize", "restore". Returns the process exit code.
 int RunTask(const std::wstring& task, const std::vector<std::wstring>& args, const Sink& sink);

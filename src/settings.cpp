@@ -178,6 +178,8 @@ void LoadSettings() {
     s.openEditor = ReadBool(L"Screenshot", L"OpenEditor", false);
     s.videoSound = ReadBool(L"Video", L"Sound", true);
     s.videoMic = ReadBool(L"Video", L"Microphone", false);
+    s.maintDaily = ReadBool(L"Maintenance", L"DailyCheck", true);
+    s.checkUpdates = ReadBool(L"General", L"CheckUpdates", true);
     s.format = Lower(Trim(ReadStr(L"Screenshot", L"Format", L"png")));
     if (s.format == L"jpeg") s.format = L"jpg";
     if (s.format != L"jpg") s.format = L"png";
@@ -209,6 +211,8 @@ void SaveSettings(const Settings& s) {
     WriteBool(L"Screenshot", L"OpenEditor", s.openEditor);
     WriteBool(L"Video", L"Sound", s.videoSound);
     WriteBool(L"Video", L"Microphone", s.videoMic);
+    WriteBool(L"Maintenance", L"DailyCheck", s.maintDaily);
+    WriteBool(L"General", L"CheckUpdates", s.checkUpdates);
 }
 
 std::wstring HotkeyText(const Hotkey& hk) {

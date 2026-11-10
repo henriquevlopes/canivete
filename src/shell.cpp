@@ -193,3 +193,18 @@ void Shell_Register() {
         pf->Save(lnk.c_str(), TRUE);
     }
 }
+
+void Shell_Unregister() {
+    for (const wchar_t* path : kMenus) RegDeleteTreeW(HKEY_CURRENT_USER, path);
+    for (const wchar_t* old : kOldKeys) RegDeleteTreeW(HKEY_CURRENT_USER, old);
+    PWSTR dir = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Programs, 0, nullptr, &dir))) {
+        DeleteFileW((std::wstring(dir) + L"\\Computer Maintenance.lnk").c_str());
+        CoTaskMemFree(dir);
+        dir = nullptr;
+    }
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_SendTo, 0, nullptr, &dir))) {
+        for (const SendTo& s : kSendTo) DeleteFileW((std::wstring(dir) + L"\\" + s.name).c_str());
+        CoTaskMemFree(dir);
+    }
+}

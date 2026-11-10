@@ -75,6 +75,9 @@ enum : int {
     IDC_OPENRESIZE,
     IDC_OPENRENAME,
     IDC_OPENMAINT,
+    IDC_MAINTDAILY,
+    IDC_CHECKUPD,
+    IDC_UPDNOW,
     IDC_OFFNOTE0 = 300,  // "Turned off" notes 300..305, one per Feature
 };
 
@@ -258,6 +261,10 @@ void Build() {
     Heading(L"Windows", y);
     y += 28;
     Check(IDC_AUTOSTART, L"Start Canivete with Windows", y);
+    y += 26;
+    Check(IDC_CHECKUPD, L"Tell me when a new version of Canivete is out", y);
+    y += 30;
+    Button(IDC_UPDNOW, L"Check for updates now", kL, y, 190, 28);
 
     // Screenshots
     y = BeginTab(1);
@@ -315,6 +322,8 @@ void Build() {
     Button(IDC_OPENRENAME, L"Open Rename files…", kL, y, 170, 28);
     y = BeginTab(7);
     Button(IDC_OPENMAINT, L"Open Maintenance…", kL, y, 170, 28);
+    y += 44;
+    Check(IDC_MAINTDAILY, L"Check once a day and tell me when something needs doing", y);
 
     U.buildTab = -1;
     U.footerY = std::max(U.maxY + 18, 12 + kTabCount * kNavItem + 16);
@@ -613,6 +622,8 @@ void Populate() {
     SetCheck(IDC_VSOUND, s.videoSound);
     SetCheck(IDC_VMIC, s.videoMic);
     SetCheck(IDC_AUTOSTART, AutostartEnabled());
+    SetCheck(IDC_CHECKUPD, s.checkUpdates);
+    SetCheck(IDC_MAINTDAILY, s.maintDaily);
     CheckHotkeys();
     UpdateEnable();
     UpdateExample();
@@ -640,6 +651,8 @@ void Apply() {
     s.openEditor = Checked(IDC_EDITOR);
     s.videoSound = Checked(IDC_VSOUND);
     s.videoMic = Checked(IDC_VMIC);
+    s.checkUpdates = Checked(IDC_CHECKUPD);
+    s.maintDaily = Checked(IDC_MAINTDAILY);
     const LRESULT cf = SendMessageW(Item(IDC_COLORFMT), CB_GETCURSEL, 0, 0);
     if (cf >= 0 && cf < static_cast<LRESULT>(std::size(kColorFormats))) s.colorFormat = kColorFormats[cf].key;
     SaveSettings(s);
@@ -936,6 +949,9 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case IDC_OPENMAINT:
             Maint_Show();
+            break;
+        case IDC_UPDNOW:
+            Update_Check(true);
             break;
         }
         return 0;

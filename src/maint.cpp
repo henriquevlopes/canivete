@@ -1,5 +1,6 @@
-// Maintenance window: Updates (Windows, drivers, apps), Cleanup, Startup apps and Health, as tabs in
-// a list on the left like Settings. Checks run on worker threads; jobs that need administrator
+// Maintenance window: Overview (everything that needs doing, in one list), Updates (Windows, drivers,
+// apps), Installed apps, Cleanup, Startup apps and Health, as tabs in a list on the left like Settings.
+// The last results are kept in maintenance.ini, which the daily background check also writes. Checks run on worker threads; jobs that need administrator
 // rights run in an elevated copy of Canivete (one Windows prompt per job) that reports back here
 // with WM_COPYDATA. Built in code so it lays out again at any monitor DPI.
 #include "maint.h"
@@ -13,6 +14,8 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cmath>
+#include <ctime>
 #include <memory>
 #include <set>
 #include <thread>
@@ -32,21 +35,25 @@ constexpr COLORREF kRed = RGB(196, 43, 28);
 constexpr COLORREF kNavBg = RGB(243, 243, 243);
 constexpr COLORREF kNavSel = RGB(226, 226, 226);
 constexpr COLORREF kAccent = RGB(0, 95, 184);
+constexpr COLORREF kDotColors[4] = {RGB(16, 137, 62), RGB(222, 145, 0), RGB(196, 43, 28), RGB(160, 160, 160)};
 // Layout in 96-DPI pixels.
 constexpr int kW = 940, kH = 640, kMinW = 760, kMinH = 520;
 constexpr int kNavW = 180, kNavItem = 34;
 
-constexpr int kUpdates = 0, kCleanup = 1, kStartup = 2, kHealth = 3, kTabCount = 4;
+constexpr int kOverview = 0, kUpdates = 1, kApps = 2, kCleanup = 3, kStartup = 4, kHealth = 5, kTabCount = 6;
+constexpr int kOk = 0, kWarn = 1, kBad = 2, kInfo = 3;  // Overview row levels (dot colors)
 
 struct TabDef {
     const wchar_t* name;
     const wchar_t* desc;
 };
 const TabDef kTabs[kTabCount] = {
+    {L"Overview", L"Everything that keeps this PC up to date and healthy. Double-click a row to deal with it."},
     {L"Updates", L"Windows, driver and app updates. Nothing is installed until you press Install."},
+    {L"Installed apps", L"Every app installed on this PC. Uninstall runs the app's own uninstaller."},
     {L"Cleanup", L"Space used by temporary files. Nothing is deleted until you press Clean; files in use are skipped."},
     {L"Startup apps", L"Apps that start when you sign in. Turning one off doesn't remove it; you can turn it on again."},
-    {L"Health", L"Restart advice, memory and disk space, and Windows' own repair and optimize tools."},
+    {L"Health", L"Restart advice, memory and disk space, a virus scan, and Windows' own repair and optimize tools."},
 };
 
 enum : int {
@@ -75,6 +82,13 @@ enum : int {
     IDC_HEOPT,
     IDC_HERESTORE,
     IDC_HELOG,
+    IDC_HESCAN,
+    IDC_OVCHECK = 180,
+    IDC_OVDO,
+    IDC_APSEARCH = 190,
+    IDC_APREFRESH,
+    IDC_APSETTINGS,
+    IDC_APUNINSTALL,
 };
 
 enum FontKind : int { kFontNormal, kFontBold, kFontTitle };
@@ -85,11 +99,31 @@ struct Ctl {
     int font;
 };
 
+struct OverviewData {
+    SecurityInfo sec;
+    std::vector<DeviceProblem> devices;
+    BatteryInfo battery;
+    int lastUpdateDays = -1;
+    Health health;
+    std::vector<GpuInfo> gpus;
+};
+struct OvRow {
+    std::wstring key, what, state, todo;
+    int level;
+};
 struct ScanResult {
     UpdateScan up;
     std::vector<CleanItem> clean;
     std::vector<StartupItem> startup;
+    OverviewData ov;
+    std::vector<InstalledApp> apps;
 };
+// The daily check, done in the background without the window.
+struct BgResult {
+    UpdateScan up;
+    SecurityInfo sec;
+};
+bool g_bgBusy = false;
 struct Progress {
     std::wstring key, text;
 };
@@ -113,6 +147,12 @@ struct UI {
     std::vector<CleanItem> clean;
     std::vector<StartupItem> startup;
     Health health;
+    OverviewData ov;
+    std::vector<OvRow> ovRows;
+    std::vector<InstalledApp> apps;
+    std::vector<int> appRows;  // list row -> apps index (the search filters)
+    HIMAGELIST dots = nullptr;
+    bool waitBg = false;  // Updates waits for the background check that is already running
     HWND lastFocus = nullptr;
 } U;
 
@@ -143,8 +183,10 @@ HWND Static(int id, const wchar_t* text, int tab, DWORD style = SS_LEFT) {
 }
 
 HWND MakeList(int t, std::initializer_list<std::pair<const wchar_t*, int>> cols, bool checks) {
-    HWND lv = Add(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER | WS_TABSTOP, IDC_LIST0 + t, t,
-                  WS_EX_CLIENTEDGE);
+    HWND lv = Add(WC_LISTVIEWW, L"",
+                  LVS_REPORT | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER | LVS_SHAREIMAGELISTS | WS_TABSTOP |
+                      (checks ? 0 : LVS_SINGLESEL),
+                  IDC_LIST0 + t, t, WS_EX_CLIENTEDGE);
     SetWindowTheme(lv, L"Explorer", nullptr);
     ListView_SetExtendedListViewStyle(
         lv, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP | (checks ? LVS_EX_CHECKBOXES : 0));
@@ -166,6 +208,19 @@ void Build() {
     Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX, IDC_TITLE, -1, 0, kFontTitle);
     Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX, IDC_DESC, -1);
     for (int t = 0; t < kTabCount; ++t) Static(IDC_STATUS0 + t, L"", t, SS_LEFT | SS_ENDELLIPSIS);
+
+    MakeList(kOverview, {{L"What", LVCFMT_LEFT}, {L"State", LVCFMT_LEFT}, {L"To do", LVCFMT_LEFT}}, false);
+    Button(IDC_OVCHECK, L"Check everything", kOverview);
+    Button(IDC_OVDO, L"Do it", kOverview, BS_DEFPUSHBUTTON);
+
+    HWND search = Add(WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, IDC_APSEARCH, kApps, WS_EX_CLIENTEDGE);
+    SendMessageW(search, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Search by name or publisher"));
+    MakeList(kApps, {{L"Name", LVCFMT_LEFT}, {L"Publisher", LVCFMT_LEFT}, {L"Version", LVCFMT_LEFT},
+                     {L"Size", LVCFMT_RIGHT}, {L"Installed", LVCFMT_LEFT}},
+             false);
+    Button(IDC_APREFRESH, L"Refresh", kApps);
+    Button(IDC_APSETTINGS, L"Windows app settings", kApps);
+    Button(IDC_APUNINSTALL, L"Uninstall…", kApps);
 
     MakeList(kUpdates, {{L"Update", LVCFMT_LEFT}, {L"Type", LVCFMT_LEFT}, {L"Version", LVCFMT_LEFT},
                         {L"Size", LVCFMT_RIGHT}, {L"Status", LVCFMT_LEFT}},
@@ -198,9 +253,46 @@ void Build() {
     Button(IDC_HEREPAIR, L"Repair system files", kHealth);
     Button(IDC_HEOPT, L"Optimize drives", kHealth);
     Button(IDC_HERESTORE, L"Make a restore point", kHealth);
+    Button(IDC_HESCAN, L"Quick virus scan", kHealth);
     HWND log = Add(WC_EDITW, L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_TABSTOP, IDC_HELOG,
                    kHealth, WS_EX_CLIENTEDGE);
     SendMessageW(log, EM_SETLIMITTEXT, 1 << 20, 0);
+}
+
+// Round colored dots for the Overview rows, drawn smooth at this DPI.
+void MakeDots() {
+    const int s = Px(16);
+    HIMAGELIST il = ImageList_Create(s, s, ILC_COLOR32, 4, 0);
+    for (COLORREF c : kDotColors) {
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+        bi.bmiHeader.biWidth = s;
+        bi.bmiHeader.biHeight = -s;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        void* bits = nullptr;
+        HBITMAP color = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (!color) continue;
+        auto* px = static_cast<uint32_t*>(bits);
+        const double rad = s * 0.3, mid = s / 2.0;
+        for (int y = 0; y < s; ++y)
+            for (int x = 0; x < s; ++x) {
+                const double a = std::clamp(rad + 0.5 - std::hypot(x + 0.5 - mid, y + 0.5 - mid), 0.0, 1.0);
+                px[y * s + x] = (static_cast<uint32_t>(a * 255 + 0.5) << 24) | (GetRValue(c) << 16) | (GetGValue(c) << 8) |
+                                GetBValue(c);
+            }
+        HBITMAP mask = CreateBitmap(s, s, 1, 1, nullptr);
+        ICONINFO ii{TRUE, 0, 0, mask, color};
+        if (HICON ic = CreateIconIndirect(&ii)) {
+            ImageList_ReplaceIcon(il, -1, ic);
+            DestroyIcon(ic);
+        }
+        DeleteObject(mask);
+        DeleteObject(color);
+    }
+    ListView_SetImageList(List(kOverview), il, LVSIL_SMALL);
+    if (U.dots) ImageList_Destroy(U.dots);
+    U.dots = il;
 }
 
 void MakeFonts() {
@@ -219,6 +311,7 @@ void MakeFonts() {
     for (const Ctl& c : U.ctls)
         SendMessageW(c.wnd, WM_SETFONT,
                      reinterpret_cast<WPARAM>(c.font == kFontTitle ? U.title : c.font == kFontBold ? U.bold : U.font), FALSE);
+    MakeDots();
 }
 
 void Layout() {
@@ -246,6 +339,12 @@ void Layout() {
         }
         put(IDC_STATUS0 + t, L, by + 5, x - L - 8, 20);
     };
+    // Overview, Installed apps
+    footer(kOverview, {{IDC_OVDO, 170}, {IDC_OVCHECK, 140}});
+    put(IDC_LIST0 + kOverview, L, top, CW, by - 12 - top);
+    footer(kApps, {{IDC_APUNINSTALL, 110}, {IDC_APSETTINGS, 170}, {IDC_APREFRESH, 100}});
+    put(IDC_APSEARCH, L, top, 280, 24);
+    put(IDC_LIST0 + kApps, L, top + 32, CW, by - 12 - top - 32);
     // Updates
     footer(kUpdates, {{IDC_UPINSTALL, 130}, {IDC_UPSTORE, 180}, {IDC_UPCHECK, 110}});
     const int rowY = by - 38;
@@ -265,7 +364,8 @@ void Layout() {
     footer(kHealth, {});
     put(IDC_HEINFO, L, top, CW, 96);
     int x = L;
-    for (const auto& [id, w] : {std::pair{IDC_HERESTART, 120}, {IDC_HEREPAIR, 160}, {IDC_HEOPT, 140}, {IDC_HERESTORE, 170}}) {
+    for (const auto& [id, w] : {std::pair{IDC_HERESTART, 110}, {IDC_HEREPAIR, 150}, {IDC_HEOPT, 120}, {IDC_HERESTORE, 160},
+                                {IDC_HESCAN, 130}}) {
         put(id, x, top + 104, w, 28);
         x += w + 8;
     }
@@ -287,6 +387,8 @@ void Layout() {
         }
         ListView_SetColumnWidth(lv, fill, std::max(Px(120), static_cast<int>(lr.right) - used - 2));
     };
+    cols(kOverview, {170, 200}, 1);
+    cols(kApps, {170, 110, 80, 90}, 0);
     cols(kUpdates, {80, 170, 70, 150}, 0);
     cols(kCleanup, {230, 100, 150}, 2);
     cols(kStartup, {200, 170, 150}, 2);
@@ -301,7 +403,14 @@ void UpdateButtons() {
     EnableWindow(Item(IDC_UPINSTALL), up && U.scanned[kUpdates]);
     for (int id : {IDC_CLMEASURE, IDC_CLRUN}) EnableWindow(Item(id), cl);
     for (int id : {IDC_STREFRESH, IDC_STAPPLY}) EnableWindow(Item(id), st);
-    for (int id : {IDC_HEREPAIR, IDC_HEOPT, IDC_HERESTORE}) EnableWindow(Item(id), he);
+    for (int id : {IDC_HEREPAIR, IDC_HEOPT, IDC_HERESTORE, IDC_HESCAN}) EnableWindow(Item(id), he);
+    EnableWindow(Item(IDC_OVCHECK), !U.busy[kOverview]);
+    const int ov = ListView_GetNextItem(List(kOverview), -1, LVNI_SELECTED);
+    const bool can = ov >= 0 && ov < static_cast<int>(U.ovRows.size()) && !U.ovRows[ov].todo.empty();
+    EnableWindow(Item(IDC_OVDO), can);
+    SetText(IDC_OVDO, can ? U.ovRows[ov].todo : L"Do it");
+    EnableWindow(Item(IDC_APREFRESH), !U.busy[kApps]);
+    EnableWindow(Item(IDC_APUNINSTALL), !U.busy[kApps] && ListView_GetNextItem(List(kApps), -1, LVNI_SELECTED) >= 0);
 }
 
 void ShowTab(int t) {
@@ -331,14 +440,16 @@ void OpenTab(int t) {
 
 // ---- filling the lists -------------------------------------------------------------------
 
-int AddRow(HWND lv, int i, const std::vector<std::wstring>& cells, bool checked) {
-    LVITEMW it{LVIF_TEXT | LVIF_PARAM};
+// checked: -1 = a list without check boxes. image: an Overview dot.
+int AddRow(HWND lv, int i, const std::vector<std::wstring>& cells, int checked, int image = -1) {
+    LVITEMW it{LVIF_TEXT | LVIF_PARAM | (image >= 0 ? LVIF_IMAGE : 0u)};
     it.iItem = i;
     it.lParam = i;
+    it.iImage = image;
     it.pszText = const_cast<wchar_t*>(cells[0].c_str());
     const int row = ListView_InsertItem(lv, &it);
     for (size_t c = 1; c < cells.size(); ++c) ListView_SetItemText(lv, row, static_cast<int>(c), const_cast<wchar_t*>(cells[c].c_str()));
-    ListView_SetCheckState(lv, row, checked);
+    if (checked >= 0) ListView_SetCheckState(lv, row, checked != 0);
     return row;
 }
 
@@ -405,7 +516,7 @@ void FillUpdates() {
         const bool on = app ? !skip.count(u.key.substr(4)) : !u.optional;
         std::wstring kind = u.kind;
         if (u.optional) kind += L" (optional)";
-        AddRow(lv, i, {u.name, kind, u.version, u.size ? SizeText(u.size) : L"", L""}, on);
+        AddRow(lv, i, {u.name, kind, u.version, u.size ? SizeText(u.size) : L"", L""}, on ? 1 : 0);
     }
     U.filling = false;
     // Graphics cards: what is installed, and where the maker's newer drivers come from.
@@ -428,7 +539,7 @@ void FillCleanup() {
     for (int i = 0; i < static_cast<int>(U.clean.size()); ++i) {
         const CleanItem& c = U.clean[i];
         std::wstring size = c.measured ? SizeText(c.size) : (c.key == L"winsxs" ? L"—" : L"needs admin");
-        AddRow(lv, i, {c.name, size, c.note, L""}, c.byDefault);
+        AddRow(lv, i, {c.name, size, c.note, L""}, c.byDefault ? 1 : 0);
     }
     U.filling = false;
     Summarize(kCleanup);
@@ -440,7 +551,7 @@ void FillStartup() {
     ListView_DeleteAllItems(lv);
     for (int i = 0; i < static_cast<int>(U.startup.size()); ++i) {
         const StartupItem& s = U.startup[i];
-        AddRow(lv, i, {s.name, s.where, s.command, L""}, s.on);
+        AddRow(lv, i, {s.name, s.where, s.command, L""}, s.on ? 1 : 0);
     }
     U.filling = false;
     Summarize(kStartup);
@@ -477,6 +588,270 @@ void FillHealth() {
     SetText(IDC_HEINFO, t);
 }
 
+// ---- last results (maintenance.ini) -------------------------------------------------------
+
+std::wstring CachePath() { return AppDataDir() + L"\\maintenance.ini"; }
+std::wstring CacheGet(const wchar_t* key) {
+    std::vector<wchar_t> buf(32768);
+    GetPrivateProfileStringW(L"Last", key, L"", buf.data(), static_cast<DWORD>(buf.size()), CachePath().c_str());
+    return buf.data();
+}
+long long CacheNum(const wchar_t* key, long long def = -1) {
+    const std::wstring s = CacheGet(key);
+    return s.empty() ? def : _wtoi64(s.c_str());
+}
+void CacheSet(const wchar_t* key, const std::wstring& v) {
+    WritePrivateProfileStringW(L"Last", key, v.c_str(), CachePath().c_str());
+}
+long long Now() { return static_cast<long long>(std::time(nullptr)); }
+
+std::wstring Plural(long long n, const wchar_t* one, const wchar_t* many) {
+    return std::to_wstring(n) + L" " + (n == 1 ? one : many);
+}
+
+struct Counts {
+    int win = 0, drv = 0, app = 0;  // -1 = couldn't check
+};
+// Updates that count as "to do": Windows (not the optional ones), drivers, and apps not skipped.
+std::vector<std::wstring> PendingKeys(const UpdateScan& up, Counts* c = nullptr) {
+    const std::set<std::wstring> skip = SkippedApps();
+    std::vector<std::wstring> keys;
+    Counts n;
+    for (const UpdateItem& u : up.items) {
+        if (u.key.rfind(L"app:", 0) == 0) {
+            if (skip.count(u.key.substr(4))) continue;
+            ++n.app;
+        } else if (u.kind == L"Driver") {
+            ++n.drv;
+        } else if (!u.optional) {
+            ++n.win;
+        } else {
+            continue;
+        }
+        keys.push_back(u.key);
+    }
+    if (!up.wuError.empty()) n.win = n.drv = -1;
+    if (!up.appError.empty()) n.app = -1;
+    if (c) *c = n;
+    return keys;
+}
+std::wstring JoinKeys(const std::vector<std::wstring>& keys) {
+    std::wstring s;
+    for (const auto& k : keys) s += (s.empty() ? L"" : L" ") + k;
+    return s;
+}
+// After a check: the counts for the Overview, and which updates have been seen (no notice for them).
+void SaveCounts(const UpdateScan& up) {
+    Counts c;
+    const std::vector<std::wstring> keys = PendingKeys(up, &c);
+    CacheSet(L"WinUpdates", std::to_wstring(c.win));
+    CacheSet(L"DriverUpdates", std::to_wstring(c.drv));
+    CacheSet(L"AppUpdates", std::to_wstring(c.app));
+    CacheSet(L"WinError", up.wuError);
+    CacheSet(L"AppError", up.appError);
+    CacheSet(L"LastCheck", std::to_wstring(Now()));
+    CacheSet(L"Notified", JoinKeys(keys));
+}
+void SaveClean() {
+    ULONGLONG b = 0;
+    for (const CleanItem& c : U.clean)
+        if (c.byDefault && c.measured) b += c.size;
+    CacheSet(L"CleanBytes", std::to_wstring(b));
+    CacheSet(L"CleanTime", std::to_wstring(Now()));
+}
+
+std::wstring DaysText(long long d) {
+    return d <= 0 ? L"today" : d == 1 ? L"yesterday" : std::to_wstring(d) + L" days ago";
+}
+std::wstring Ago(long long t) {
+    if (t <= 0) return L"never";
+    const long long s = std::max(0LL, Now() - t);
+    if (s < 120) return L"just now";
+    if (s < 3600) return std::to_wstring(s / 60) + L" minutes ago";
+    if (s < 86400) return Plural(s / 3600, L"hour ago", L"hours ago");
+    return DaysText(s / 86400);
+}
+// Days since a "YYYY-MM-DD" date; -1 unknown.
+int AgeDays(const std::wstring& date) {
+    SYSTEMTIME st{};
+    int y = 0, m = 0, d = 0;
+    if (swscanf_s(date.c_str(), L"%d-%d-%d", &y, &m, &d) != 3) return -1;
+    st.wYear = static_cast<WORD>(y);
+    st.wMonth = static_cast<WORD>(m);
+    st.wDay = static_cast<WORD>(d);
+    FILETIME ft, now;
+    if (!SystemTimeToFileTime(&st, &ft)) return -1;
+    GetSystemTimeAsFileTime(&now);
+    const ULONGLONG a = (static_cast<ULONGLONG>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    const ULONGLONG b = (static_cast<ULONGLONG>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+    return b > a ? static_cast<int>((b - a) / 864000000000ULL) : 0;
+}
+
+// ---- Overview ----------------------------------------------------------------------------
+
+void AddOv(const std::wstring& key, const std::wstring& what, int level, const std::wstring& state,
+           const std::wstring& todo) {
+    U.ovRows.push_back({key, what, state, todo, level});
+}
+
+void FillOverview() {
+    if (!U.hwnd) return;
+    std::wstring selKey;
+    HWND lv = List(kOverview);
+    const int sel = ListView_GetNextItem(lv, -1, LVNI_SELECTED);
+    if (sel >= 0 && sel < static_cast<int>(U.ovRows.size())) selKey = U.ovRows[sel].key;
+    U.ovRows.clear();
+    const OverviewData& o = U.ov;
+    const bool have = U.scanned[kOverview];
+
+    // Updates: from the last check (this window's or the daily one), kept in maintenance.ini.
+    const long long when = CacheNum(L"LastCheck", 0);
+    const long long win = CacheNum(L"WinUpdates"), drv = CacheNum(L"DriverUpdates"), app = CacheNum(L"AppUpdates");
+    const std::wstring notYet = U.busy[kUpdates] ? L"Checking…" : L"Not checked yet";
+    const std::wstring checkNow = U.busy[kUpdates] ? L"" : L"Check now";
+    if (!when) AddOv(L"wu", L"Windows updates", kInfo, notYet, checkNow);
+    else if (win < 0) AddOv(L"wu", L"Windows updates", kWarn, L"Couldn't check: " + CacheGet(L"WinError"), L"Check again");
+    else if (win > 0)
+        AddOv(L"wu", L"Windows updates", o.lastUpdateDays > 30 ? kBad : kWarn, Plural(win, L"update", L"updates") + L" waiting to install",
+              L"Install them");
+    else
+        AddOv(L"wu", L"Windows updates", kOk,
+              o.lastUpdateDays >= 0 ? L"Up to date (last one installed " + DaysText(o.lastUpdateDays) + L")" : L"Up to date", L"");
+
+    if (!o.devices.empty())
+        AddOv(L"devices", L"Drivers", kBad,
+              Plural(static_cast<long long>(o.devices.size()), L"device has a problem", L"devices have a problem") + L": " +
+                  o.devices[0].name,
+              L"Open Device Manager");
+    else if (when && drv > 0)
+        AddOv(L"drv", L"Drivers", kWarn, Plural(drv, L"driver update", L"driver updates") + L" from Windows Update", L"Install them");
+    else if (when && drv == 0)
+        AddOv(L"drv", L"Drivers", kOk, have ? L"Up to date, no device problems" : L"Up to date", L"");
+    else
+        AddOv(L"drv", L"Drivers", kInfo, have ? L"No device problems. Driver updates: " + notYet : notYet, L"");
+
+    if (!when) AddOv(L"app", L"App updates", kInfo, notYet, checkNow);
+    else if (app < 0) AddOv(L"app", L"App updates", kWarn, L"Couldn't check: " + CacheGet(L"AppError"), L"Check again");
+    else if (app > 0) AddOv(L"app", L"App updates", kWarn, Plural(app, L"app has an update", L"apps have updates"), L"Update them");
+    else AddOv(L"app", L"App updates", kOk, L"Up to date", L"");
+
+    for (size_t i = 0; i < o.gpus.size(); ++i) {
+        const GpuInfo& g = o.gpus[i];
+        const int age = AgeDays(g.date);
+        const bool old = age > 180;
+        std::wstring s = L"Driver " + g.version;
+        if (!g.date.empty()) s += L" from " + g.date;
+        s += L" (" + g.name + L")";
+        if (old) s = Plural(age / 30, L"month", L"months") + L" old: " + s;
+        AddOv(L"gpu" + std::to_wstring(i), o.gpus.size() > 1 ? L"Graphics driver " + std::to_wstring(i + 1) : L"Graphics driver", old ? kWarn : kOk, s, old ? g.openLabel : L"");
+    }
+
+    const SecurityInfo& sec = o.sec;
+    const std::wstring av = sec.product.empty() ? std::wstring(L"Virus protection") : sec.product;
+    if (!have) AddOv(L"av", L"Virus protection", kInfo, L"Checking…", L"");
+    else if (!sec.known) AddOv(L"av", L"Virus protection", kBad, L"No virus protection found", L"Open Windows Security");
+    else if (!sec.on) AddOv(L"av", L"Virus protection", kBad, av + L": real-time protection is off", L"Turn it on");
+    else if (!sec.upToDate || sec.sigAgeDays > 7)
+        AddOv(L"av", L"Virus protection", kBad,
+              av + L": virus definitions are out of date" + (sec.sigAgeDays > 0 ? L" (" + Plural(sec.sigAgeDays, L"day", L"days") + L" old)" : L""),
+              L"Update them");
+    else if (sec.sigAgeDays > 2)
+        AddOv(L"av", L"Virus protection", kWarn, av + L": virus definitions are " + Plural(sec.sigAgeDays, L"day", L"days") + L" old",
+              L"Update them");
+    else if (sec.defender && (sec.scanAgeDays < 0 || sec.scanAgeDays > 30))
+        AddOv(L"scan", L"Virus protection", kWarn,
+              av + L" is on; no scan " + (sec.scanAgeDays < 0 ? std::wstring(L"recorded") : L"in " + Plural(sec.scanAgeDays, L"day", L"days")),
+              L"Run a quick scan");
+    else AddOv(L"av", L"Virus protection", kOk, av + L" is on and up to date", L"");
+
+    const Health& h = have ? o.health : U.health;
+    const ULONGLONG days = h.uptimeMs / 86400000;
+    if (h.rebootPending || U.rebootNeeded) AddOv(L"restart", L"Restart", kBad, L"Needed to finish installing updates", L"Restart now");
+    else if (days >= 14) AddOv(L"restart", L"Restart", kWarn, L"Windows has been running for " + Duration(h.uptimeMs), L"Restart soon");
+    else AddOv(L"restart", L"Restart", kOk, L"Running for " + Duration(h.uptimeMs), L"");
+
+    for (const DriveSpace& d : h.drives) {
+        if (!d.total) continue;
+        const long long pct = static_cast<long long>(d.free * 100 / d.total);
+        const int lvl = pct < 5 ? kBad : pct < 15 ? kWarn : kOk;
+        AddOv(L"disk", L"Disk space " + d.root, lvl,
+              SizeText(d.free) + L" free of " + SizeText(d.total) + L" (" + std::to_wstring(pct) + L"%)",
+              lvl == kOk ? L"" : L"Free up space");
+    }
+
+    const long long cb = CacheNum(L"CleanBytes");
+    if (cb < 0) AddOv(L"clean", L"Cleanup", kInfo, U.busy[kCleanup] ? L"Measuring…" : L"Not measured yet", U.busy[kCleanup] ? L"" : L"Measure");
+    else if (cb > 5LL << 30) AddOv(L"clean", L"Cleanup", kWarn, SizeText(cb) + L" of temporary files can go", L"Clean up");
+    else AddOv(L"clean", L"Cleanup", kOk, SizeText(cb) + L" of temporary files", L"");
+
+    if (o.battery.present && o.battery.design && o.battery.full) {
+        const long long pct = std::min<long long>(100, static_cast<long long>(o.battery.full) * 100 / o.battery.design);
+        const int lvl = pct < 60 ? kBad : pct < 80 ? kWarn : kOk;
+        AddOv(L"battery", L"Battery", lvl, L"Holds " + std::to_wstring(pct) + L"% of the charge it held when new",
+              lvl == kBad ? L"Think about a new battery" : L"");
+    }
+
+    const UpdateInfo& ui = Update_Info();
+    const std::wstring ver = CANIVETE_VERSION;
+    if (Update_Busy()) AddOv(L"canivete", L"Canivete", kInfo, L"Version " + ver + L". Checking for a newer one…", L"");
+    else if (ui.available) AddOv(L"canivete", L"Canivete", kWarn, L"Version " + ui.latest + L" is out (this is " + ver + L")", L"Update Canivete");
+    else if (ui.checked) AddOv(L"canivete", L"Canivete", kOk, L"Up to date (version " + ver + L")", L"");
+    else if (!ui.error.empty()) AddOv(L"canivete", L"Canivete", kInfo, L"Version " + ver + L". Couldn't check: " + ui.error, L"Check again");
+    else AddOv(L"canivete", L"Canivete", kInfo, L"Version " + ver, L"Check for updates");
+
+    AddOv(L"store", L"Microsoft Store apps", kInfo, L"They update themselves", L"Open Store updates");
+
+    U.filling = true;
+    SendMessageW(lv, WM_SETREDRAW, FALSE, 0);
+    ListView_DeleteAllItems(lv);
+    int attention = 0, keep = -1;
+    for (int i = 0; i < static_cast<int>(U.ovRows.size()); ++i) {
+        const OvRow& r = U.ovRows[i];
+        AddRow(lv, i, {r.what, r.state, r.todo}, -1, r.level);
+        attention += r.level == kWarn || r.level == kBad;
+        if (!selKey.empty() && r.key == selKey && keep < 0) keep = i;
+    }
+    if (keep >= 0) ListView_SetItemState(lv, keep, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    SendMessageW(lv, WM_SETREDRAW, TRUE, 0);
+    U.filling = false;
+    std::wstring s = attention ? Plural(attention, L"thing needs", L"things need") + L" attention." : L"All good.";
+    s += L"  Updates last checked " + Ago(when) + L".";
+    SetStatus(kOverview, s);
+    UpdateButtons();
+}
+
+// ---- Installed apps ----------------------------------------------------------------------
+
+std::wstring Lower(std::wstring s) {
+    if (!s.empty()) CharLowerBuffW(s.data(), static_cast<DWORD>(s.size()));
+    return s;
+}
+
+void FillApps() {
+    HWND lv = List(kApps);
+    const int len = GetWindowTextLengthW(Item(IDC_APSEARCH));
+    std::wstring q(len, L'\0');
+    GetWindowTextW(Item(IDC_APSEARCH), q.data(), len + 1);
+    q = Lower(q);
+    U.filling = true;
+    SendMessageW(lv, WM_SETREDRAW, FALSE, 0);
+    ListView_DeleteAllItems(lv);
+    U.appRows.clear();
+    for (int i = 0; i < static_cast<int>(U.apps.size()); ++i) {
+        const InstalledApp& a = U.apps[i];
+        if (!q.empty() && Lower(a.name).find(q) == std::wstring::npos && Lower(a.publisher).find(q) == std::wstring::npos)
+            continue;
+        AddRow(lv, static_cast<int>(U.appRows.size()), {a.name, a.publisher, a.version, a.size ? SizeText(a.size) : L"", a.date}, -1);
+        U.appRows.push_back(i);
+    }
+    SendMessageW(lv, WM_SETREDRAW, TRUE, 0);
+    U.filling = false;
+    const long long n = static_cast<long long>(U.apps.size());
+    SetStatus(kApps, q.empty() ? Plural(n, L"app installed.", L"apps installed.")
+                               : std::to_wstring(U.appRows.size()) + L" of " + Plural(n, L"app", L"apps") + L" match.");
+    UpdateButtons();
+}
+
 // ---- checks and jobs ---------------------------------------------------------------------
 
 WPARAM Tag(int t) { return MAKEWPARAM(t, U.gen); }
@@ -488,9 +863,19 @@ void StartScan(int t) {
         U.scanned[t] = true;
         return;
     }
+    if (t == kUpdates && g_bgBusy) {  // the daily check is running: its results come here too
+        U.busy[t] = U.waitBg = true;
+        UpdateButtons();
+        SetStatus(t, L"Checking for updates…");
+        return;
+    }
     U.busy[t] = true;
     UpdateButtons();
-    SetStatus(t, t == kUpdates ? L"Checking for updates…" : t == kCleanup ? L"Measuring…" : L"Reading startup apps…");
+    SetStatus(t, t == kUpdates    ? L"Checking for updates…"
+                 : t == kCleanup  ? L"Measuring…"
+                 : t == kStartup  ? L"Reading startup apps…"
+                 : t == kApps     ? L"Reading installed apps…"
+                                  : L"Checking…");
     HWND w = U.hwnd;
     const WPARAM tag = Tag(t);
     std::thread([w, t, tag] {
@@ -502,8 +887,17 @@ void StartScan(int t) {
             });
         } else if (t == kCleanup) {
             r->clean = ScanCleanup();
-        } else {
+        } else if (t == kStartup) {
             r->startup = ScanStartup();
+        } else if (t == kApps) {
+            r->apps = ScanInstalled();
+        } else {
+            r->ov.sec = ReadSecurity();
+            r->ov.devices = ScanDeviceProblems();
+            r->ov.battery = ReadBattery();
+            r->ov.lastUpdateDays = DaysSinceLastUpdate();
+            r->ov.health = ReadHealth();
+            r->ov.gpus = ScanGpus();
         }
         CoUninitialize();
         PostOrDelete(w, WM_M_SCAN, tag, r);
@@ -516,15 +910,23 @@ void OnScan(int t, std::unique_ptr<ScanResult> r) {
     if (t == kUpdates) {
         U.up = std::move(r->up);
         FillUpdates();
+        SaveCounts(U.up);
         if (RebootPending()) U.rebootNeeded = true;
         ShowTab(U.tab);
     } else if (t == kCleanup) {
         U.clean = std::move(r->clean);
         FillCleanup();
+        SaveClean();
     } else if (t == kStartup) {
         U.startup = std::move(r->startup);
         FillStartup();
+    } else if (t == kApps) {
+        U.apps = std::move(r->apps);
+        FillApps();
+    } else if (t == kOverview) {
+        U.ov = std::move(r->ov);
     }
+    FillOverview();
     UpdateButtons();
 }
 
@@ -642,6 +1044,9 @@ void OnDone(int t, LPARAM code) {
         StartScan(kStartup);
     } else if (t == kHealth) {
         FillHealth();
+        StartScan(kOverview);  // a virus scan changes what Overview says
+    } else if (t == kApps && code != kDeclined && code != kNoStart) {
+        StartScan(kApps);
     } else if (t == kUpdates && code != kDeclined && code != kNoStart) {
         SetStatus(t, code == 0 ? L"Finished. Press Check again to see what's left." : L"Finished, with problems: see the Status column.");
     }
@@ -741,6 +1146,89 @@ void Open(const wchar_t* what, const wchar_t* params = nullptr) {
     ShellExecuteW(U.hwnd, L"open", what, params, nullptr, SW_SHOWNORMAL);
 }
 
+void UninstallSelected() {
+    const int row = ListView_GetNextItem(List(kApps), -1, LVNI_SELECTED);
+    if (row < 0 || row >= static_cast<int>(U.appRows.size()) || U.busy[kApps]) return;
+    const InstalledApp a = U.apps[U.appRows[row]];
+    std::wstring exe, args;
+    if (!a.msi.empty()) {
+        wchar_t sys[MAX_PATH];
+        GetSystemDirectoryW(sys, MAX_PATH);
+        exe = std::wstring(sys) + L"\\msiexec.exe";
+        args = L"/x " + a.msi;
+    } else if (!SplitCommand(a.uninstall, exe, args)) {
+        SetStatus(kApps, a.name + L" has no uninstaller of its own. Try Windows app settings.");
+        return;
+    }
+    if (TestMode()) {
+        Log(L"Uninstall (test copy, not run): %s %s", exe.c_str(), args.c_str());
+        SetStatus(kApps, L"Test copy: not uninstalling " + a.name + L".");
+        return;
+    }
+    if (MessageBoxW(U.hwnd, (L"Uninstall " + a.name + L"?\n\nIts own uninstaller opens; follow its steps.").c_str(),
+                    L"Canivete Maintenance", MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
+        return;
+    U.busy[kApps] = true;
+    UpdateButtons();
+    SetStatus(kApps, L"Uninstalling " + a.name + L"… Finish the steps in its window.");
+    HWND w = U.hwnd;
+    const WPARAM tag = Tag(kApps);
+    std::thread([w, tag, exe, args] {
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        SHELLEXECUTEINFOW sei{sizeof(sei)};
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+        sei.hwnd = w;
+        sei.lpFile = exe.c_str();
+        sei.lpParameters = args.c_str();
+        sei.nShow = SW_SHOWNORMAL;
+        LPARAM code;
+        if (!ShellExecuteExW(&sei)) {
+            code = GetLastError() == ERROR_CANCELLED ? kDeclined : kNoStart;
+        } else {
+            DWORD c = 0;
+            if (sei.hProcess) {
+                WaitForSingleObject(sei.hProcess, INFINITE);
+                GetExitCodeProcess(sei.hProcess, &c);
+                CloseHandle(sei.hProcess);
+            }
+            code = static_cast<LPARAM>(c);
+        }
+        CoUninitialize();
+        PostMessageW(w, WM_M_DONE, tag, code);
+    }).detach();
+}
+
+// What a row of the Overview leads to.
+void DoRow(int row) {
+    if (row < 0 || row >= static_cast<int>(U.ovRows.size())) return;
+    const std::wstring k = U.ovRows[row].key;
+    if (k == L"wu" || k == L"drv" || k == L"app") {
+        OpenTab(kUpdates);
+    } else if (k == L"devices") {
+        Open(L"devmgmt.msc");
+    } else if (k.rfind(L"gpu", 0) == 0) {
+        const size_t i = static_cast<size_t>(_wtoi(k.c_str() + 3));
+        if (i < U.ov.gpus.size() && !U.ov.gpus[i].open.empty()) Open(U.ov.gpus[i].open.c_str());
+    } else if (k == L"av") {
+        Open(L"windowsdefender:");
+    } else if (k == L"scan") {
+        OpenTab(kHealth);
+        StartTask(kHealth, L"scan", {}, false);
+    } else if (k == L"restart") {
+        RestartNow();
+    } else if (k == L"disk" || k == L"clean") {
+        OpenTab(kCleanup);
+    } else if (k == L"battery") {
+        Open(L"ms-settings:batterysaver");
+    } else if (k == L"canivete") {
+        if (Update_Info().available) Update_Install();
+        else Update_Check(true);
+        FillOverview();
+    } else if (k == L"store") {
+        Open(L"ms-windows-store://downloadsandupdates");
+    }
+}
+
 // ---- drawing the tab list ----------------------------------------------------------------
 
 void FillColor(HDC dc, const RECT& r, COLORREF c) {
@@ -788,12 +1276,37 @@ void OnCommand(int id, int code) {
         DestroyWindow(U.hwnd);
         break;
     case IDOK: {  // Enter: the tab's main button
-        const int main[kTabCount] = {IDC_UPINSTALL, IDC_CLRUN, IDC_STAPPLY, 0};
+        const int main[kTabCount] = {IDC_OVDO, IDC_UPINSTALL, 0, IDC_CLRUN, IDC_STAPPLY, 0};
         if (main[U.tab] && IsWindowEnabled(Item(main[U.tab]))) OnCommand(main[U.tab], BN_CLICKED);
         break;
     }
     case IDC_NAV:
         if (code == LBN_SELCHANGE) OpenTab(static_cast<int>(SendMessageW(U.nav, LB_GETCURSEL, 0, 0)));
+        break;
+    case IDC_OVCHECK:
+        StartScan(kOverview);
+        StartScan(kUpdates);
+        StartScan(kCleanup);
+        if (!Update_Busy()) Update_Check(false);
+        FillOverview();
+        break;
+    case IDC_OVDO:
+        DoRow(ListView_GetNextItem(List(kOverview), -1, LVNI_SELECTED));
+        break;
+    case IDC_APSEARCH:
+        if (code == EN_CHANGE) FillApps();
+        break;
+    case IDC_APREFRESH:
+        StartScan(kApps);
+        break;
+    case IDC_APSETTINGS:
+        Open(L"ms-settings:appsfeatures");
+        break;
+    case IDC_APUNINSTALL:
+        UninstallSelected();
+        break;
+    case IDC_HESCAN:
+        StartTask(kHealth, L"scan", {}, false);
         break;
     case IDC_UPCHECK:
         StartScan(kUpdates);
@@ -906,6 +1419,9 @@ LRESULT CALLBACK MaintProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             const auto* lv = reinterpret_cast<const NMLISTVIEW*>(lp);
             if ((lv->uChanged & LVIF_STATE) && ((lv->uNewState ^ lv->uOldState) & LVIS_STATEIMAGEMASK))
                 Summarize(static_cast<int>(n->idFrom) - IDC_LIST0);
+            if ((lv->uChanged & LVIF_STATE) && ((lv->uNewState ^ lv->uOldState) & LVIS_SELECTED)) UpdateButtons();
+        } else if (n->code == NM_DBLCLK && n->idFrom == IDC_LIST0 + kOverview) {
+            DoRow(reinterpret_cast<const NMITEMACTIVATE*>(lp)->iItem);
         }
         return 0;
     }
@@ -967,6 +1483,7 @@ LRESULT CALLBACK MaintProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         U.adminBusy = false;
         U.adminTab = -1;
         U.logPartial = false;
+        U.waitBg = false;
         return 0;
     case WM_NCDESTROY:
         for (HGDIOBJ o : {static_cast<HGDIOBJ>(U.font), static_cast<HGDIOBJ>(U.bold), static_cast<HGDIOBJ>(U.title),
@@ -974,6 +1491,8 @@ LRESULT CALLBACK MaintProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (o) DeleteObject(o);
         U.font = U.bold = U.title = nullptr;
         U.navBrush = nullptr;
+        if (U.dots) ImageList_Destroy(U.dots);
+        U.dots = nullptr;
         break;
     }
     return DefWindowProcW(h, msg, wp, lp);
@@ -1007,6 +1526,11 @@ void Maint_Show(int tab) {
     U.up = {};
     U.clean.clear();
     U.startup.clear();
+    U.ov = {};
+    U.ovRows.clear();
+    U.apps.clear();
+    U.appRows.clear();
+    U.waitBg = false;
     U.rebootNeeded = false;
     POINT p;
     GetCursorPos(&p);
@@ -1024,6 +1548,66 @@ void Maint_Show(int tab) {
     FillHealth();
     UpdateButtons();
     OpenTab(tab >= 0 ? tab : g_lastTab);
+    // Overview always; updates and cleanup again when the last results are over 12 hours old.
+    StartScan(kOverview);
+    if (Now() - CacheNum(L"LastCheck", 0) > 12 * 3600) StartScan(kUpdates);
+    if (Now() - CacheNum(L"CleanTime", 0) > 12 * 3600) StartScan(kCleanup);
+    if (g_settings.checkUpdates && !Update_Info().checked && !Update_Busy()) Update_Check(false);
+    FillOverview();
     ShowWindow(h, SW_SHOW);
     SetForegroundWindow(h);
+}
+
+void Maint_Refresh() { FillOverview(); }
+
+void Maint_Background(bool force) {
+    if (g_bgBusy || !FeatureOn(kFeatMaint)) return;
+    if (!force && (!g_settings.maintDaily || Now() - CacheNum(L"LastCheck", 0) < 20 * 3600)) return;
+    if (U.hwnd && U.busy[kUpdates]) return;  // the window is checking right now
+    g_bgBusy = true;
+    Log(L"Maintenance: daily check started");
+    HWND w = g_mainWnd;
+    std::thread([w] {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        auto* r = new BgResult;
+        r->up = ScanUpdates([](const std::wstring&, const std::wstring&) {});
+        r->sec = ReadSecurity();
+        CoUninitialize();
+        if (!PostMessageW(w, WM_APP_MAINT, 0, reinterpret_cast<LPARAM>(r))) delete r;
+    }).detach();
+}
+
+void Maint_OnBackground(LPARAM lp) {
+    std::unique_ptr<BgResult> r(reinterpret_cast<BgResult*>(lp));
+    g_bgBusy = false;
+    // A notice only for updates not seen (in the window or an earlier notice) yet.
+    Counts c;
+    const std::vector<std::wstring> keys = PendingKeys(r->up, &c);
+    const std::wstring told = L" " + CacheGet(L"Notified") + L" ";
+    int fresh = 0;
+    for (const auto& k : keys) fresh += told.find(L" " + k + L" ") == std::wstring::npos;
+    SaveCounts(r->up);
+    std::vector<std::wstring> parts;
+    if (c.win > 0) parts.push_back(Plural(c.win, L"Windows update", L"Windows updates"));
+    if (c.drv > 0) parts.push_back(Plural(c.drv, L"driver update", L"driver updates"));
+    if (c.app > 0) parts.push_back(Plural(c.app, L"app update", L"app updates"));
+    std::wstring text;
+    if (fresh && !parts.empty()) {
+        for (size_t i = 0; i < parts.size(); ++i)
+            text += (i == 0 ? L"" : i + 1 == parts.size() ? L" and " : L", ") + parts[i];
+        text += keys.size() == 1 ? L" is ready." : L" are ready.";
+    }
+    const SecurityInfo& s = r->sec;
+    if (!s.known || !s.on || !s.upToDate || s.sigAgeDays > 7)
+        text += (text.empty() ? L"" : L" ") + std::wstring(L"Virus protection needs a look.");
+    Log(L"Maintenance: daily check done: %d Windows, %d driver, %d app updates (%d new)", c.win, c.drv, c.app, fresh);
+    if (!text.empty()) Tray_NotifyAction(L"Computer maintenance", text + L" Click to see.", [] { Maint_Show(kOverview); });
+    if (U.hwnd && U.waitBg) {
+        U.waitBg = false;
+        auto res = std::make_unique<ScanResult>();
+        res->up = std::move(r->up);
+        OnScan(kUpdates, std::move(res));
+    } else {
+        FillOverview();
+    }
 }

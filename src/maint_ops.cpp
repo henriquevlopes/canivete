@@ -1182,6 +1182,10 @@ int RunTask(const std::wstring& task, const std::vector<std::wstring>& args, con
         sink(L"status", L"Optimizing drives…");
         failed += RunTool(L"Optimizing drives (trim for SSDs, defragment for hard disks)", SysExe(L"defrag.exe"),
                           L"/C /O /U /V", sink) != 0;
+    } else if (task == L"scan") {
+        sink(L"status", L"Quick virus scan (a few minutes)…");
+        failed += RunTool(L"Microsoft Defender quick scan", Expand(L"%ProgramFiles%\\Windows Defender\\MpCmdRun.exe"),
+                          L"-Scan -ScanType 1", sink) != 0;
     } else {
         return 2;
     }

@@ -16,6 +16,8 @@ constexpr wchar_t kMainClass[] = L"CaniveteMain";
 constexpr UINT WM_APP_TRAY = WM_APP + 1;          // tray icon callback
 constexpr UINT WM_APP_CAPTURE_DONE = WM_APP + 2;  // lParam = Output job, finished on a worker
 constexpr UINT WM_APP_COMMAND = WM_APP + 3;       // wParam = command id (from a second instance)
+constexpr UINT WM_APP_MAINT = WM_APP + 4;         // lParam = background maintenance check result
+constexpr UINT WM_APP_UPDATE = WM_APP + 5;        // Canivete update check / download finished (update.cpp)
 
 enum class CaptureMode { Region = 1, Window = 2, Full = 3, Color = 4, Gif = 5, Video = 6 };  // also the hotkey ids
 constexpr int kHotkeyCount = 6;
@@ -52,6 +54,8 @@ struct Settings {
     bool videoMic = false;    // videos: record the microphone
     std::wstring gifPreset;   // last GIF choice: a kGifPresets key
     std::wstring videoPreset; // last video choice: a kVideoPresets key
+    bool maintDaily = true;   // Maintenance: check once a day in the background and tell me what needs doing
+    bool checkUpdates = true; // General: tell me when a new version of Canivete is out
 };
 
 extern Settings g_settings;
@@ -92,6 +96,8 @@ void Hotkeys_Suspend(bool suspend);  // while a hotkey box in Settings has focus
 bool AutostartEnabled();
 void SetAutostart(bool on);
 void Tray_Notify(const wchar_t* title, const std::wstring& text);  // balloon from the tray icon
+// The same, and clicking the balloon runs onClick.
+void Tray_NotifyAction(const wchar_t* title, const std::wstring& text, std::function<void()> onClick);
 
 // ---- resizer.cpp ---------------------------------------------------------------------------
 void Resizer_Open(const std::vector<std::wstring>& files);  // opens the window, or adds to it
@@ -106,6 +112,7 @@ HWND Renamer_Window();
 
 // ---- shell.cpp -----------------------------------------------------------------------------
 void Shell_Register();  // Explorer right-click and Send to entries for the resizer and renamer
+void Shell_Unregister();  // removes them all (and the Start menu Maintenance shortcut): --uninstall
 
 // ---- settings_ui.cpp -----------------------------------------------------------------------
 void SettingsUI_Show();
@@ -113,9 +120,29 @@ bool SettingsUI_Key(const MSG& m);  // Ctrl+Tab between tabs; true = handled
 HWND SettingsUI_Window();  // for IsDialogMessage, nullptr when closed
 
 // ---- maint.cpp / maint_ops.cpp --------------------------------------------------------------
-void Maint_Show(int tab = -1);  // tab: 0 Updates, 1 Cleanup, 2 Startup apps, 3 Health; -1 = last one
+void Maint_Show(int tab = -1);  // tab: 0 Overview, 1 Updates, 2 Installed apps, 3 Cleanup, 4 Startup apps,
+                                // 5 Health; -1 = last one
 HWND Maint_Window();
 int Maint_AdminMain(int argc, wchar_t** argv);  // --maint-admin: the elevated copy that runs one job
+void Maint_Background(bool force = false);  // daily check (hourly timer); force: now, whatever the time
+void Maint_OnBackground(LPARAM result);      // WM_APP_MAINT
+void Maint_Refresh();                        // the Overview list again (after a Canivete update check)
+
+// ---- update.cpp ----------------------------------------------------------------------------
+struct UpdateInfo {
+    bool checked = false;    // GitHub answered
+    bool available = false;  // a newer, downloadable and verifiable version
+    std::wstring latest;     // "0.3.0"
+    std::wstring url, sha;   // setup download and its SHA-256 (hex)
+    std::wstring error;
+};
+const UpdateInfo& Update_Info();
+bool Update_Busy();
+void Update_Check(bool manual);  // manual: always says what it found
+void Update_Background();        // once a day when the setting is on
+void Update_Install();           // asks, downloads, checks, runs the setup and exits
+void Update_OnMessage(WPARAM wp, LPARAM lp);
+int Update_SelfTest();           // --update-test: download and check the latest release, install nothing
 
 // ---- 32-bit top-down DIB section with its own memory DC --------------------------------------
 struct Dib {
