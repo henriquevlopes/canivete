@@ -14,6 +14,7 @@
 // cleaned of the old background (blur-fusion foreground estimation, the method BiRefNet's authors
 // use), so the cut-out has no colored fringe on a new background.
 #include "app.h"
+#include "fluent.h"
 #include "theme.h"
 
 #include <bcrypt.h>
@@ -876,8 +877,11 @@ std::condition_variable g_jcv;
 std::deque<std::unique_ptr<Job>> g_jobs;
 bool g_workerAlive = false;
 std::atomic<bool> g_busy{false};
-HWND g_wnd = nullptr, g_text = nullptr, g_bar = nullptr, g_cancel = nullptr;
-HFONT g_font = nullptr;
+HWND g_wnd = nullptr, g_text = nullptr, g_cancel = nullptr;
+RECT g_barRect{};  // the progress bar, painted by the window
+int g_barPos = -1;  // 0..1000, or -1 = a segment that slides
+constexpr DWORD kWndStyle = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+constexpr DWORD kWndExStyle = WS_EX_TOPMOST;
 
 void Post(std::unique_ptr<Result> r) {
     if (!g_wnd || !PostMessageW(g_wnd, kMsgResult, 0, reinterpret_cast<LPARAM>(r.get()))) return;
@@ -971,23 +975,41 @@ void Layout(HWND h) {
     GetClientRect(h, &rc);
     const UINT dpi = GetDpiForWindow(h);
     auto S = [&](int v) { return MulDiv(v, dpi, 96); };
-    const int m = S(14), bw = S(88), bh = S(28);
-    MoveWindow(g_text, m, m, rc.right - 2 * m, S(36), TRUE);
-    MoveWindow(g_bar, m, m + S(42), rc.right - 3 * m - bw, S(14), TRUE);
-    MoveWindow(g_cancel, rc.right - m - bw, m + S(42) + S(7) - bh / 2, bw, bh, TRUE);
+    const int m = S(16), bw = S(96), bh = S(32), mid = S(60);
+    for (HWND c : {g_text, g_cancel}) SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(Fluent_Font(kTypeBody, dpi)), FALSE);
+    MoveWindow(g_text, m, S(14), rc.right - 2 * m, S(22), TRUE);
+    g_barRect = {m, mid - S(6), rc.right - 2 * m - bw, mid + S(6)};
+    MoveWindow(g_cancel, rc.right - m - bw, mid - bh / 2, bw, bh, TRUE);
+    InvalidateRect(h, nullptr, TRUE);
 }
 
 void ShowWindowNow() {
     const UINT dpi = GetDpiForWindow(g_wnd);
     RECT wa;
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
-    RECT r{0, 0, MulDiv(420, dpi, 96), MulDiv(92, dpi, 96)};
-    AdjustWindowRectExForDpi(&r, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_TOOLWINDOW | WS_EX_TOPMOST, dpi);
+    RECT r{0, 0, MulDiv(440, dpi, 96), MulDiv(92, dpi, 96)};
+    AdjustWindowRectExForDpi(&r, kWndStyle, FALSE, kWndExStyle, dpi);
     const int w = r.right - r.left, h = r.bottom - r.top, gap = MulDiv(16, dpi, 96);
     SetWindowPos(g_wnd, HWND_TOPMOST, wa.right - w - gap, wa.bottom - h - gap, w, h, SWP_NOACTIVATE);
     Layout(g_wnd);
     ShowWindow(g_wnd, SW_SHOWNOACTIVATE);
-    SetTimer(g_wnd, 1, 100, nullptr);
+    g_barPos = -1;  // starts as the sliding segment; WM_TIMER slows down once a real % arrives
+    SetTimer(g_wnd, 1, 33, nullptr);
+}
+
+void PaintWindow(HWND h, HDC dc) {
+    RECT rc;
+    GetClientRect(h, &rc);
+    const Palette& p = Pal();
+    HDC mem = CreateCompatibleDC(dc);
+    HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
+    HGDIOBJ old = SelectObject(mem, bmp);
+    FillRect(mem, &rc, Theme_Brush(p.window));
+    Fluent_DrawProgress(mem, g_barRect, GetDpiForWindow(h), g_barPos, GetTickCount64());
+    BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
 }
 
 void OpenAndSelect(const std::wstring& path) {
@@ -1074,12 +1096,11 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         wchar_t cur[512] = L"";
         GetWindowTextW(g_text, cur, 512);
         if (t != cur) SetWindowTextW(g_text, t.c_str());
-        const bool marquee = (GetWindowLongW(g_bar, GWL_STYLE) & PBS_MARQUEE) != 0;
-        if ((pos < 0) != marquee) {
-            SetWindowLongW(g_bar, GWL_STYLE, (GetWindowLongW(g_bar, GWL_STYLE) & ~PBS_MARQUEE) | (pos < 0 ? PBS_MARQUEE : 0));
-            SendMessageW(g_bar, PBM_SETMARQUEE, pos < 0, 30);
+        if ((pos < 0) != (g_barPos < 0)) SetTimer(h, 1, pos < 0 ? 33 : 100, nullptr);  // smooth while it slides
+        if (pos != g_barPos || pos < 0) {
+            g_barPos = pos;
+            InvalidateRect(h, &g_barRect, FALSE);
         }
-        if (pos >= 0) SendMessageW(g_bar, PBM_SETPOS, pos, 0);
         if (!g_busy) {
             KillTimer(h, 1);
             ShowWindow(h, SW_HIDE);
@@ -1089,6 +1110,23 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case kMsgResult:
         ShowResult(std::unique_ptr<Result>(reinterpret_cast<Result*>(lp)));
         return 0;
+    case WM_ERASEBKGND:
+        return 1;  // WM_PAINT covers it all
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        PaintWindow(h, dc);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = reinterpret_cast<HDC>(wp);
+        SetBkColor(dc, Pal().window);
+        SetTextColor(dc, Pal().text);
+        return reinterpret_cast<LRESULT>(Theme_Brush(Pal().window));
+    }
+    case WM_CTLCOLORBTN:
+        return reinterpret_cast<LRESULT>(Theme_Brush(Pal().window));
     case WM_COMMAND:
         if (LOWORD(wp) == kIdCancel) {
             g_pr.cancel = true;
@@ -1116,22 +1154,17 @@ void EnsureWindow() {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = g_hinst;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     wc.lpszClassName = L"CaniveteRemoveBackground";
-    wc.hIcon = LoadIconW(g_hinst, MAKEINTRESOURCEW(1));
+    LoadIconMetric(g_hinst, MAKEINTRESOURCEW(1), LIM_LARGE, &wc.hIcon);
+    LoadIconMetric(g_hinst, MAKEINTRESOURCEW(1), LIM_SMALL, &wc.hIconSm);
     RegisterClassExW(&wc);
-    g_wnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, wc.lpszClassName, L"Remove background",
-                            WS_POPUP | WS_CAPTION | WS_SYSMENU, 0, 0, 100, 100, nullptr, nullptr, g_hinst, nullptr);
-    NONCLIENTMETRICSW ncm{sizeof(ncm)};
-    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, GetDpiForWindow(g_wnd));
-    g_font = CreateFontIndirectW(&ncm.lfMessageFont);
+    // A normal window (not a tool window): Windows 11 gives it the Mica title bar like the others.
+    g_wnd = CreateWindowExW(kWndExStyle, wc.lpszClassName, L"Remove background", kWndStyle, 0, 0, 100, 100, nullptr,
+                            nullptr, g_hinst, nullptr);
     g_text = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_NOPREFIX | SS_ENDELLIPSIS, 0, 0, 10, 10, g_wnd,
                              nullptr, g_hinst, nullptr);
-    g_bar = CreateWindowExW(0, PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE, 0, 0, 10, 10, g_wnd, nullptr, g_hinst, nullptr);
-    SendMessageW(g_bar, PBM_SETRANGE32, 0, 1000);
     g_cancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 10, 10, g_wnd,
                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCancel)), g_hinst, nullptr);
-    for (HWND c : {g_text, g_cancel}) SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), FALSE);
     Theme_Window(g_wnd);
 }
 
