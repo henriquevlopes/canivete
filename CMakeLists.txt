@@ -28,6 +28,7 @@ add_executable(Canivete WIN32
     src/update.cpp
     src/upload.cpp
     src/theme.cpp
+    src/fluent.cpp
     src/rmbg.cpp
     src/rmbg_model.cpp
     src/overlay.cpp

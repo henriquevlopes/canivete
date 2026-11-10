@@ -32,6 +32,19 @@ struct Palette {
     COLORREF btn, btnHover, btnOn, btnOnHover, btnText;  // Make alpha buttons
     COLORREF hist, histBar, frame;     // levels box, its bars, frame around the result
     COLORREF numText;                  // the "1" on the number tool icon
+    // Windows 11 (Fluent) color tokens, solid over the base color (see fluent.h).
+    COLORREF base, layer;                                  // window, a raised layer
+    COLORREF card, cardStroke;                             // cards
+    COLORREF ctlFill, ctlHover, ctlPressed, ctlDisabled;   // buttons, text boxes
+    COLORREF ctlStroke, ctlStrokeBottom, ctlStrong;        // their outline; switch / check outline
+    COLORREF subtleHover, subtlePressed;                   // list entries, toolbar buttons
+    COLORREF divider;
+    COLORREF text2, text3, textDis;                        // secondary, tertiary, disabled text
+    COLORREF critical, success, caution;
+    COLORREF focusOuter, focusInner;                       // keyboard focus ring
+    COLORREF accentHover, accentPressed, accentDis, accentText;
+    COLORREF onAccentDis;                                  // text on a disabled accent button
+    bool highContrast;
 };
 
 const Palette& Pal();
@@ -42,3 +55,10 @@ void Theme_Init(HWND mainWnd);  // once at start: menus and following the Window
 void Theme_Window(HWND top);    // a top-level window built from controls: theme it now and on changes
 void Theme_Update();            // the setting or Windows changed: repaint every open window if needed
 void Theme_SettingsLoaded();    // called by LoadSettings (settings.ini may have been edited by hand)
+
+// Push buttons, check boxes and command links of themed windows are drawn the Windows 11 way.
+// A check box marked with Theme_AsSwitch is drawn as a switch: its text on the left, the switch
+// on the right (it still is a check box: BM_GETCHECK, Space and clicks work as before).
+void Theme_AsSwitch(HWND checkbox);
+// The color the window paints behind the control (WM_CTLCOLORSTATIC of its parent).
+COLORREF Theme_BackOf(HWND ctl);

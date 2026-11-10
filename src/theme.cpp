@@ -1,12 +1,14 @@
-// Light / dark theme for all windows (see theme.h).
+// Light / dark theme for all windows (see theme.h), with the Windows 11 colors and shapes of fluent.h.
 //
 // Standard controls go dark through the themes Windows' own Explorer uses (DarkMode_Explorer,
-// DarkMode_CFD, DarkMode_ItemsView) plus WM_CTLCOLOR* colors. Check boxes, radio buttons and command
-// links ignore text colors when themed, so in dark mode they are painted here (NM_CUSTOMDRAW).
+// DarkMode_CFD, DarkMode_ItemsView) plus WM_CTLCOLOR* colors. Push buttons, check boxes, radio buttons
+// and command links are painted here the Windows 11 way in both modes (NM_CUSTOMDRAW); High Contrast
+// keeps Windows' own drawing and colors.
 // Popup menus follow through uxtheme's SetPreferredAppMode / FlushMenuThemes (exports 135 / 136,
 // Windows 10 1903 and later; older Windows just keeps light menus).
 #include "app.h"
 #include "theme.h"
+#include "fluent.h"
 
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -78,75 +80,156 @@ bool WantDark() {
     return SystemDark();
 }
 
+COLORREF Blend(COLORREF a, COLORREF b, float t) {  // a..b
+    auto ch = [t](int x, int y) { return static_cast<BYTE>(x + (y - x) * t + 0.5f); };
+    return RGB(ch(GetRValue(a), GetRValue(b)), ch(GetGValue(a), GetGValue(b)), ch(GetBValue(a), GetBValue(b)));
+}
+
+// Windows' own colors, for High Contrast.
+void MakeContrastPalette() {
+    Palette& p = g_pal;
+    p = Palette{};
+    p.dark = false;
+    p.highContrast = true;
+    const COLORREF win = GetSysColor(COLOR_WINDOW), txt = GetSysColor(COLOR_WINDOWTEXT),
+                   btn = GetSysColor(COLOR_BTNFACE), hl = GetSysColor(COLOR_HIGHLIGHT),
+                   hlTxt = GetSysColor(COLOR_HIGHLIGHTTEXT), grey = GetSysColor(COLOR_GRAYTEXT);
+    p.window = p.base = p.layer = p.card = p.nav = p.footer = p.edit = p.ctlFill = p.ctlDisabled = win;
+    p.text = p.text2 = p.text3 = p.grey = p.hint = p.status = p.icon = p.btnText = txt;
+    p.textDis = p.iconOff = grey;
+    p.red = p.critical = p.caution = p.success = p.statusOk = txt;
+    p.navSel = p.subtleHover = p.subtlePressed = p.ctlHover = p.ctlPressed = p.toolSel = p.toolHover = hl;
+    p.line = p.divider = p.cardStroke = p.ctlStroke = p.ctlStrokeBottom = p.ctlStrong = p.barLine = p.ring = p.frame =
+        txt;
+    p.accent = p.accentHover = p.accentPressed = p.accentText = hl;
+    p.accentDis = grey;
+    p.onAccent = p.onAccentDis = hlTxt;
+    p.switchLine = p.switchKnob = txt;
+    p.focusBg = hl;
+    p.focusOuter = txt;
+    p.focusInner = win;
+    p.canvas = p.bar = p.hist = win;
+    p.histBar = txt;
+    p.btn = btn;
+    p.btnHover = p.btnOn = p.btnOnHover = hl;
+    p.numText = win;
+}
+
 void MakePalette(bool dark) {
+    if (HighContrast()) {
+        MakeContrastPalette();
+        return;
+    }
     Palette& p = g_pal;
     p.dark = dark;
+    p.highContrast = false;
+    const FluentAccent a = Fluent_ReadAccent();
+    // Windows 11 tokens (solid colors over the window color).
     if (dark) {
-        p.window = RGB(32, 32, 32);
-        p.text = RGB(240, 240, 240);
-        p.grey = RGB(165, 165, 165);
-        p.red = RGB(255, 153, 164);
-        p.nav = RGB(43, 43, 43);
-        p.navSel = RGB(64, 64, 64);
-        p.footer = RGB(43, 43, 43);
-        p.line = RGB(64, 64, 64);
-        p.accent = RGB(76, 194, 255);
+        p.base = RGB(0x20, 0x20, 0x20);
+        p.layer = RGB(0x27, 0x27, 0x27);
+        p.card = RGB(0x2B, 0x2B, 0x2B);
+        p.cardStroke = RGB(0x1D, 0x1D, 0x1D);
+        p.ctlFill = RGB(0x2D, 0x2D, 0x2D);
+        p.ctlHover = RGB(0x32, 0x32, 0x32);
+        p.ctlPressed = RGB(0x27, 0x27, 0x27);
+        p.ctlDisabled = RGB(0x2A, 0x2A, 0x2A);
+        p.ctlStroke = RGB(0x30, 0x30, 0x30);
+        p.ctlStrokeBottom = RGB(0x3A, 0x3A, 0x3A);
+        p.ctlStrong = RGB(0x9A, 0x9A, 0x9A);
+        p.subtleHover = RGB(0x2D, 0x2D, 0x2D);
+        p.subtlePressed = RGB(0x29, 0x29, 0x29);
+        p.divider = RGB(0x33, 0x33, 0x33);
+        p.text = RGB(0xFF, 0xFF, 0xFF);
+        p.text2 = RGB(0xCF, 0xCF, 0xCF);
+        p.text3 = RGB(0x9E, 0x9E, 0x9E);
+        p.textDis = RGB(0x71, 0x71, 0x71);
+        p.critical = RGB(0xFF, 0x99, 0xA4);
+        p.success = RGB(0x6C, 0xCB, 0x5F);
+        p.caution = RGB(0xFC, 0xE1, 0x00);
+        p.focusOuter = RGB(0xFF, 0xFF, 0xFF);
+        p.focusInner = RGB(0x00, 0x00, 0x00);
+        p.accent = a.light2;
+        p.accentText = a.light3;
         p.onAccent = RGB(0, 0, 0);
-        p.switchLine = RGB(200, 200, 200);
-        p.switchKnob = RGB(210, 210, 210);
+        p.accentDis = RGB(0x43, 0x43, 0x43);
+        p.onAccentDis = RGB(0xA7, 0xA7, 0xA7);
+    } else {
+        p.base = RGB(0xF3, 0xF3, 0xF3);
+        p.layer = RGB(0xF9, 0xF9, 0xF9);
+        p.card = RGB(0xFB, 0xFB, 0xFB);
+        p.cardStroke = RGB(0xE5, 0xE5, 0xE5);
+        p.ctlFill = RGB(0xFB, 0xFB, 0xFB);
+        p.ctlHover = RGB(0xF6, 0xF6, 0xF6);
+        p.ctlPressed = RGB(0xF5, 0xF5, 0xF5);
+        p.ctlDisabled = RGB(0xF5, 0xF5, 0xF5);
+        p.ctlStroke = RGB(0xE5, 0xE5, 0xE5);
+        p.ctlStrokeBottom = RGB(0xCC, 0xCC, 0xCC);
+        p.ctlStrong = RGB(0x8B, 0x8B, 0x8B);
+        p.subtleHover = RGB(0xEA, 0xEA, 0xEA);
+        p.subtlePressed = RGB(0xED, 0xED, 0xED);
+        p.divider = RGB(0xE5, 0xE5, 0xE5);
+        p.text = RGB(0x1A, 0x1A, 0x1A);
+        p.text2 = RGB(0x5C, 0x5C, 0x5C);
+        p.text3 = RGB(0x86, 0x86, 0x86);
+        p.textDis = RGB(0x9C, 0x9C, 0x9C);
+        p.critical = RGB(0xC4, 0x2B, 0x1C);
+        p.success = RGB(0x0F, 0x7B, 0x0F);
+        p.caution = RGB(0x9D, 0x5D, 0x00);
+        p.focusOuter = RGB(0x1A, 0x1A, 0x1A);
+        p.focusInner = RGB(0xFF, 0xFF, 0xFF);
+        p.accent = a.dark1;
+        p.accentText = a.dark2;
+        p.onAccent = RGB(0xFF, 0xFF, 0xFF);
+        p.accentDis = RGB(0xC5, 0xC5, 0xC5);
+        p.onAccentDis = RGB(0xFF, 0xFF, 0xFF);
+    }
+    // Hover / pressed accent: 90 % / 80 % of the accent over the window color.
+    p.accentHover = Blend(p.base, p.accent, 0.9f);
+    p.accentPressed = Blend(p.base, p.accent, 0.8f);
+
+    // The older names used by every window, mapped onto the tokens.
+    p.window = p.base;
+    p.grey = p.text2;
+    p.red = p.critical;
+    p.nav = p.base;
+    p.navSel = p.subtleHover;
+    p.footer = p.base;
+    p.line = p.divider;
+    p.switchLine = p.ctlStrong;
+    p.switchKnob = p.text2;
+    p.edit = p.ctlFill;
+    p.bar = p.layer;
+    p.barLine = p.divider;
+    p.icon = p.text;
+    p.hint = dark ? p.text2 : p.text;
+    p.status = dark ? p.text3 : p.text2;
+    p.statusOk = p.success;
+    p.btn = p.ctlFill;
+    p.btnHover = p.ctlHover;
+    p.btnText = p.text;
+    if (dark) {
         p.focusBg = RGB(92, 40, 46);
-        p.edit = RGB(45, 45, 45);
-        p.canvas = RGB(38, 38, 38);
-        p.bar = RGB(28, 28, 28);
-        p.barLine = RGB(60, 60, 60);
-        p.icon = RGB(225, 225, 225);
-        p.iconOff = RGB(100, 100, 100);
-        p.toolSel = RGB(72, 72, 72);
-        p.toolHover = RGB(54, 54, 54);
+        p.canvas = RGB(0x1C, 0x1C, 0x1C);
+        p.iconOff = p.textDis;
+        p.toolSel = RGB(0x3A, 0x3A, 0x3A);
+        p.toolHover = RGB(0x32, 0x32, 0x32);
         p.ring = RGB(110, 110, 110);
-        p.hint = RGB(200, 200, 200);
-        p.status = RGB(150, 150, 150);
-        p.statusOk = RGB(120, 220, 130);
-        p.btn = RGB(50, 50, 50);
-        p.btnHover = RGB(66, 66, 66);
-        p.btnOn = RGB(84, 84, 84);
-        p.btnOnHover = RGB(96, 96, 96);
-        p.btnText = RGB(235, 235, 235);
+        p.btnOn = RGB(0x45, 0x45, 0x45);
+        p.btnOnHover = RGB(0x50, 0x50, 0x50);
         p.hist = RGB(22, 22, 22);
         p.histBar = RGB(105, 105, 105);
         p.frame = RGB(80, 80, 80);
         p.numText = RGB(40, 40, 40);
     } else {
-        p.window = GetSysColor(COLOR_WINDOW);
-        p.text = GetSysColor(COLOR_WINDOWTEXT);
-        p.grey = RGB(105, 105, 105);
-        p.red = RGB(196, 43, 28);
-        p.nav = RGB(243, 243, 243);
-        p.navSel = RGB(226, 226, 226);
-        p.footer = GetSysColor(COLOR_BTNFACE);
-        p.line = RGB(220, 220, 220);
-        p.accent = RGB(0, 95, 184);
-        p.onAccent = RGB(255, 255, 255);
-        p.switchLine = RGB(110, 110, 110);
-        p.switchKnob = RGB(90, 90, 90);
         p.focusBg = RGB(255, 236, 236);
-        p.edit = GetSysColor(COLOR_WINDOW);
-        p.canvas = RGB(222, 222, 222);
-        p.bar = RGB(249, 249, 249);
-        p.barLine = RGB(218, 218, 218);
-        p.icon = RGB(40, 40, 40);
+        p.canvas = RGB(0xE4, 0xE4, 0xE4);
         p.iconOff = RGB(175, 175, 175);
-        p.toolSel = RGB(214, 214, 214);
-        p.toolHover = RGB(232, 232, 232);
+        p.toolSel = RGB(0xE0, 0xE0, 0xE0);
+        p.toolHover = p.subtleHover;
         p.ring = RGB(150, 150, 150);
-        p.hint = RGB(50, 50, 50);
-        p.status = RGB(100, 100, 100);
-        p.statusOk = RGB(16, 124, 16);
-        p.btn = RGB(229, 229, 229);
-        p.btnHover = RGB(214, 214, 214);
-        p.btnOn = RGB(196, 196, 196);
-        p.btnOnHover = RGB(184, 184, 184);
-        p.btnText = RGB(30, 30, 30);
+        p.btnOn = RGB(0xD6, 0xD6, 0xD6);
+        p.btnOnHover = RGB(0xCC, 0xCC, 0xCC);
         p.hist = RGB(236, 236, 236);
         p.histBar = RGB(165, 165, 165);
         p.frame = RGB(170, 170, 170);
@@ -154,33 +237,12 @@ void MakePalette(bool dark) {
     }
 }
 
-// ---- painting check boxes, radio buttons and command links in dark mode --------------------
+// ---- painting buttons, check boxes, radio buttons, switches and command links ---------------
+
+constexpr wchar_t kSwitchProp[] = L"Canivete.Switch";
+constexpr wchar_t kAccentProp[] = L"Canivete.Accent";
 
 int Scale(HWND h, int v) { return MulDiv(v, static_cast<int>(GetDpiForWindow(h)), 96); }
-
-Gdiplus::Color GpColor(COLORREF c) { return Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)); }
-
-void RoundRectSmooth(HDC dc, const RECT& rc, float radius, COLORREF fill, bool outline, COLORREF line) {
-    Gdiplus_Ensure();
-    Gdiplus::Graphics g(dc);
-    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-    Gdiplus::RectF r(static_cast<float>(rc.left) + 0.5f, static_cast<float>(rc.top) + 0.5f,
-                     static_cast<float>(rc.right - rc.left) - 1, static_cast<float>(rc.bottom - rc.top) - 1);
-    const float d = std::min({radius * 2, r.Width, r.Height});
-    Gdiplus::GraphicsPath p;
-    p.AddArc(r.X, r.Y, d, d, 180, 90);
-    p.AddArc(r.X + r.Width - d, r.Y, d, d, 270, 90);
-    p.AddArc(r.X + r.Width - d, r.Y + r.Height - d, d, d, 0, 90);
-    p.AddArc(r.X, r.Y + r.Height - d, d, d, 90, 90);
-    p.CloseFigure();
-    Gdiplus::SolidBrush b(GpColor(fill));
-    g.FillPath(&b, &p);
-    if (outline) {
-        Gdiplus::Pen pen(GpColor(line), 1);
-        g.DrawPath(&pen, &p);
-    }
-}
 
 std::wstring TextOf(HWND h) {
     std::wstring s(GetWindowTextLengthW(h), L'\0');
@@ -188,29 +250,29 @@ std::wstring TextOf(HWND h) {
     return s;
 }
 
+bool ShowFocus(HWND b) { return GetFocus() == b && !(SendMessageW(b, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS); }
+
 void DrawCommandLink(HWND b, HDC dc, const RECT& rc, UINT state, bool enabled) {
     const Palette& p = g_pal;
-    const bool hot = (state & BST_HOT) != 0, pushed = (state & BST_PUSHED) != 0, focus = GetFocus() == b;
-    if (enabled && (hot || pushed || focus)) {
-        const COLORREF fill = pushed ? RGB(58, 58, 58) : hot ? RGB(50, 50, 50) : p.window;
-        RoundRectSmooth(dc, rc, static_cast<float>(Scale(b, 4)), fill, true, focus ? p.accent : RGB(80, 80, 80));
-    }
+    const UINT dpi = GetDpiForWindow(b);
+    const bool hot = (state & BST_HOT) != 0, pushed = (state & BST_PUSHED) != 0;
+    // A Windows 11 card button: control fill, hover / pressed fills, rounded.
+    const COLORREF fill = !enabled ? p.ctlDisabled : pushed ? p.ctlPressed : hot ? p.ctlHover : p.ctlFill;
+    Fluent_RoundRect(dc, rc, static_cast<float>(Fluent_Px(dpi, 6)), fill, p.ctlStroke,
+                     std::max(1.0f, static_cast<float>(Fluent_Px(dpi, 1))));
     HFONT font = reinterpret_cast<HFONT>(SendMessageW(b, WM_GETFONT, 0, 0));
     LOGFONTW lf{};
     GetObjectW(font ? font : GetStockObject(DEFAULT_GUI_FONT), sizeof(lf), &lf);
-    lf.lfWeight = FW_SEMIBOLD;
-    HFONT bold = CreateFontIndirectW(&lf);
+    const int px = std::max(12, MulDiv(std::abs(lf.lfHeight ? lf.lfHeight : 14), 96, static_cast<int>(dpi)));
+    HFONT bold = Fluent_FontPx(px, true, dpi);
     SetBkMode(dc, TRANSPARENT);
-    const int pad = Scale(b, 10);
-    // arrow
+    const int pad = Scale(b, 12);
+    RECT ar{rc.left + pad, rc.top + Scale(b, 9), rc.left + pad + Scale(b, 16), rc.top + Scale(b, 9) + Scale(b, 18)};
+    Fluent_DrawGlyph(dc, ar, 0xE72A, 14, dpi, enabled ? p.accentText : p.textDis);  // Forward arrow
     HGDIOBJ old = SelectObject(dc, bold);
-    SetTextColor(dc, enabled ? p.accent : p.grey);
-    RECT ar{rc.left + pad, rc.top + Scale(b, 7), rc.left + pad + Scale(b, 20), rc.top + Scale(b, 30)};
-    DrawTextW(dc, L"→", 1, &ar, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
-    // title and note
-    const int left = rc.left + pad + Scale(b, 24);
-    SetTextColor(dc, enabled ? p.text : p.grey);
-    RECT tr{left, rc.top + Scale(b, 7), rc.right - pad, rc.bottom};
+    const int left = ar.right + Scale(b, 10);
+    SetTextColor(dc, enabled ? p.text : p.textDis);
+    RECT tr{left, rc.top + Scale(b, 8), rc.right - pad, rc.bottom};
     const std::wstring title = TextOf(b);
     DrawTextW(dc, title.c_str(), -1, &tr, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
     TEXTMETRICW tm{};
@@ -222,28 +284,76 @@ void DrawCommandLink(HWND b, HDC dc, const RECT& rc, UINT state, bool enabled) {
         SendMessageW(b, BCM_GETNOTE, reinterpret_cast<WPARAM>(&size), reinterpret_cast<LPARAM>(note.data()));
         note.resize(wcslen(note.c_str()));
         SelectObject(dc, font);
-        SetTextColor(dc, p.grey);
+        SetTextColor(dc, enabled ? p.text2 : p.textDis);
         RECT nr{left, tr.top + tm.tmHeight + Scale(b, 2), rc.right - pad, rc.bottom - Scale(b, 4)};
         DrawTextW(dc, note.c_str(), -1, &nr, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX | DT_END_ELLIPSIS);
     }
     SelectObject(dc, old);
-    DeleteObject(bold);
+    if (ShowFocus(b)) Fluent_DrawFocus(dc, rc, dpi, 6);
 }
 
-// NM_CUSTOMDRAW from a button, dark mode. Returns -1 to let the button draw itself.
-LRESULT DrawButton(HWND top, const NMCUSTOMDRAW& cd) {
+void DrawPush(HWND b, HDC dc, const RECT& rc, UINT state, bool enabled) {
+    const UINT dpi = GetDpiForWindow(b);
+    const bool accent = GetPropW(b, kAccentProp) != nullptr;
+    const bool focus = ShowFocus(b);
+    RECT br = rc;
+    if (focus) InflateRect(&br, -Scale(b, 3), -Scale(b, 3));  // room for the ring inside the control
+    const std::wstring text = TextOf(b);
+    const LRESULT ui = SendMessageW(b, WM_QUERYUISTATE, 0, 0);
+    Fluent_DrawButton(dc, br, dpi, text.c_str(), reinterpret_cast<HFONT>(SendMessageW(b, WM_GETFONT, 0, 0)), accent,
+                      (state & BST_HOT) != 0, (state & BST_PUSHED) != 0, enabled, false,
+                      (ui & UISF_HIDEACCEL) ? DT_HIDEPREFIX : 0);
+    if (focus) Fluent_DrawFocus(dc, rc, dpi, 7);
+}
+
+// The check box or radio glyph (20 x 20 at 96 DPI), Windows 11 style.
+void DrawCheckGlyph(HDC dc, const RECT& g, UINT dpi, bool radio, bool checked, bool mixed, bool hot, bool pushed,
+                    bool enabled) {
+    const Palette& p = g_pal;
+    const float one = std::max(1.0f, static_cast<float>(Fluent_Px(dpi, 1)));
+    const bool on = checked || mixed;
+    const COLORREF onFill = !enabled ? p.accentDis : pushed ? p.accentPressed : hot ? p.accentHover : p.accent;
+    const COLORREF offFill = !enabled ? p.ctlDisabled : pushed ? p.subtlePressed : hot ? p.subtleHover : p.ctlFill;
+    if (radio) {
+        const float d = static_cast<float>(g.right - g.left);
+        if (on) {
+            Fluent_RoundRect(dc, g, d / 2, onFill);
+            const int dot = Fluent_Px(dpi, pushed ? 6 : hot ? 10 : 8);
+            RECT dr{(g.left + g.right - dot) / 2, (g.top + g.bottom - dot) / 2, 0, 0};
+            dr.right = dr.left + dot;
+            dr.bottom = dr.top + dot;
+            Fluent_RoundRect(dc, dr, dot / 2.0f, enabled ? p.onAccent : p.onAccentDis);
+        } else {
+            Fluent_RoundRect(dc, g, d / 2, offFill, enabled ? p.ctlStrong : p.textDis, one);
+        }
+        return;
+    }
+    const float rad = static_cast<float>(Fluent_Px(dpi, 4));
+    if (on) {
+        Fluent_RoundRect(dc, g, rad, onFill);
+        Fluent_DrawGlyph(dc, g, mixed ? 0xE738 : 0xE73E, 12, dpi, enabled ? p.onAccent : p.onAccentDis);
+    } else {
+        Fluent_RoundRect(dc, g, rad, offFill, enabled ? p.ctlStrong : p.textDis, one);
+    }
+}
+
+// NM_CUSTOMDRAW from a button. Returns -1 to let the button draw itself.
+LRESULT DrawButton(const NMCUSTOMDRAW& cd) {
     HWND b = cd.hdr.hwndFrom;
-    const DWORD type = static_cast<DWORD>(GetWindowLongW(b, GWL_STYLE)) & BS_TYPEMASK;
+    const DWORD style = static_cast<DWORD>(GetWindowLongW(b, GWL_STYLE));
+    const DWORD type = style & BS_TYPEMASK;
     const bool check = type == BS_CHECKBOX || type == BS_AUTOCHECKBOX || type == BS_3STATE || type == BS_AUTO3STATE;
     const bool radio = type == BS_RADIOBUTTON || type == BS_AUTORADIOBUTTON;
     const bool link = type == BS_COMMANDLINK || type == BS_DEFCOMMANDLINK;
-    if (!check && !radio && !link) return -1;
+    const bool push = (type == BS_PUSHBUTTON || type == BS_DEFPUSHBUTTON) && !(style & (BS_ICON | BS_BITMAP)) &&
+                      !SendMessageW(b, BM_GETIMAGE, IMAGE_BITMAP, 0) && !SendMessageW(b, BM_GETIMAGE, IMAGE_ICON, 0);
+    if (!check && !radio && !link && !push) return -1;
     if (cd.dwDrawStage != CDDS_PREPAINT) return CDRF_DODEFAULT;  // CDDS_PREERASE comes first: skipping it skips the paint
     HDC dc = cd.hdc;
     const RECT rc = cd.rc;
-    // The background the window paints under this control (its WM_CTLCOLORSTATIC brush).
-    HBRUSH bg = reinterpret_cast<HBRUSH>(SendMessageW(top, WM_CTLCOLORSTATIC, reinterpret_cast<WPARAM>(dc),
-                                                      reinterpret_cast<LPARAM>(b)));
+    // The background the parent paints under this control (its WM_CTLCOLORSTATIC / BTN brush).
+    HBRUSH bg = reinterpret_cast<HBRUSH>(SendMessageW(GetParent(b), push ? WM_CTLCOLORBTN : WM_CTLCOLORSTATIC,
+                                                      reinterpret_cast<WPARAM>(dc), reinterpret_cast<LPARAM>(b)));
     FillRect(dc, &rc, bg ? bg : Theme_Brush(g_pal.window));
     const UINT state = static_cast<UINT>(SendMessageW(b, BM_GETSTATE, 0, 0));
     const bool enabled = IsWindowEnabled(b) != FALSE;
@@ -251,36 +361,48 @@ LRESULT DrawButton(HWND top, const NMCUSTOMDRAW& cd) {
         DrawCommandLink(b, dc, rc, state, enabled);
         return CDRF_SKIPDEFAULT;
     }
-    const int part = radio ? BP_RADIOBUTTON : BP_CHECKBOX;
-    const int look = !enabled ? 3 : (state & BST_PUSHED) ? 2 : (state & BST_HOT) ? 1 : 0;
-    const int which = (state & BST_CHECKED) ? 4 : (state & BST_INDETERMINATE) ? 8 : 0;
-    const int partState = 1 + look + which;
-    SIZE gs{Scale(b, 13), Scale(b, 13)};
-    if (HTHEME th = OpenThemeData(b, L"Button")) {  // the dark variant, from SetWindowTheme
-        GetThemePartSize(th, dc, part, partState, nullptr, TS_DRAW, &gs);
-        const RECT gr{rc.left, (rc.top + rc.bottom - gs.cy) / 2, rc.left + gs.cx, (rc.top + rc.bottom - gs.cy) / 2 + gs.cy};
-        DrawThemeBackground(th, dc, part, partState, &gr, nullptr);
-        CloseThemeData(th);
+    if (push) {
+        DrawPush(b, dc, rc, state, enabled);
+        return CDRF_SKIPDEFAULT;
     }
+    const UINT dpi = GetDpiForWindow(b);
+    const bool hot = (state & BST_HOT) != 0, pushed = (state & BST_PUSHED) != 0;
+    const bool checked = (state & BST_CHECKED) != 0, mixed = (state & BST_INDETERMINATE) != 0;
     const LRESULT ui = SendMessageW(b, WM_QUERYUISTATE, 0, 0);
     HGDIOBJ old = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(b, WM_GETFONT, 0, 0)));
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, enabled ? g_pal.text : g_pal.grey);
-    RECT tr = rc;
-    tr.left += gs.cx + Scale(b, 4);
     const std::wstring text = TextOf(b);
     const UINT fmt = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | ((ui & UISF_HIDEACCEL) ? DT_HIDEPREFIX : 0);
-    DrawTextW(dc, text.c_str(), -1, &tr, fmt);
-    if (GetFocus() == b && !(ui & UISF_HIDEFOCUS)) {
-        RECT fr = tr;
-        DrawTextW(dc, text.c_str(), -1, &fr, fmt | DT_CALCRECT);
-        fr.top = tr.top + (tr.bottom - tr.top - (fr.bottom - fr.top)) / 2;
-        fr.bottom = fr.top + (fr.bottom - fr.top);
-        InflateRect(&fr, 2, 1);
-        SetTextColor(dc, g_pal.text);
-        DrawFocusRect(dc, &fr);
+    RECT focusRc = rc;
+    if (check && GetPropW(b, kSwitchProp)) {
+        // Switch: the text on the left, "On" / "Off" and the switch on the right.
+        const SIZE sw = Fluent_SwitchSize(dpi);
+        const int edge = Scale(b, 4);
+        RECT trk{rc.right - edge - sw.cx, (rc.top + rc.bottom - sw.cy) / 2, rc.right - edge, 0};
+        trk.bottom = trk.top + sw.cy;
+        Fluent_DrawSwitch(dc, trk, dpi, checked, hot, enabled);
+        SetTextColor(dc, enabled ? g_pal.text : g_pal.textDis);
+        RECT orc{trk.left - Scale(b, 12) - Scale(b, 40), rc.top, trk.left - Scale(b, 12), rc.bottom};
+        DrawTextW(dc, checked ? L"On" : L"Off", -1, &orc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        if (!text.empty()) {
+            RECT tr{rc.left + edge, rc.top, orc.left - Scale(b, 8), rc.bottom};
+            DrawTextW(dc, text.c_str(), -1, &tr, fmt);
+        }
+    } else {
+        const int gsz = Scale(b, 20);
+        RECT gr{rc.left + Scale(b, 1), (rc.top + rc.bottom - gsz) / 2, rc.left + Scale(b, 1) + gsz, 0};
+        gr.bottom = gr.top + gsz;
+        DrawCheckGlyph(dc, gr, dpi, radio, checked, mixed, hot, pushed, enabled);
+        SetTextColor(dc, enabled ? g_pal.text : g_pal.textDis);
+        RECT tr = rc;
+        tr.left = gr.right + Scale(b, 8);
+        DrawTextW(dc, text.c_str(), -1, &tr, fmt);
+        RECT calc = tr;
+        DrawTextW(dc, text.c_str(), -1, &calc, fmt | DT_CALCRECT);
+        focusRc.right = std::min<LONG>(rc.right, calc.right + Scale(b, 4));
     }
     SelectObject(dc, old);
+    if (ShowFocus(b)) Fluent_DrawFocus(dc, focusRc, dpi, 4);
     return CDRF_SKIPDEFAULT;
 }
 
@@ -293,7 +415,7 @@ LRESULT CALLBACK TopSubclass(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR id, 
     switch (m) {
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORLISTBOX:
-        if (g_dark && !(m == WM_CTLCOLORLISTBOX && OwnerDrawList(reinterpret_cast<HWND>(lp)))) {
+        if (!g_pal.highContrast && !(m == WM_CTLCOLORLISTBOX && OwnerDrawList(reinterpret_cast<HWND>(lp)))) {
             HDC dc = reinterpret_cast<HDC>(wp);
             SetTextColor(dc, g_pal.text);
             SetBkColor(dc, g_pal.edit);
@@ -302,10 +424,10 @@ LRESULT CALLBACK TopSubclass(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR id, 
         break;
     case WM_NOTIFY: {
         const auto* n = reinterpret_cast<const NMHDR*>(lp);
-        if (g_dark && n->code == NM_CUSTOMDRAW) {
+        if (!g_pal.highContrast && n->code == NM_CUSTOMDRAW) {
             wchar_t cls[32];
             if (GetClassNameW(n->hwndFrom, cls, 32) && !_wcsicmp(cls, WC_BUTTONW)) {
-                const LRESULT r = DrawButton(h, *reinterpret_cast<const NMCUSTOMDRAW*>(lp));
+                const LRESULT r = DrawButton(*reinterpret_cast<const NMCUSTOMDRAW*>(lp));
                 if (r >= 0) return r;
             }
         }
@@ -314,6 +436,9 @@ LRESULT CALLBACK TopSubclass(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR id, 
     case WM_SETTINGCHANGE:
         if ((lp && !lstrcmpiW(reinterpret_cast<const wchar_t*>(lp), L"ImmersiveColorSet")) || wp == SPI_SETHIGHCONTRAST)
             Theme_Update();
+        break;
+    case WM_DWMCOLORIZATIONCOLORCHANGED:  // the accent color changed
+        Theme_Update();
         break;
     case WM_NCDESTROY:
         RemoveWindowSubclass(h, TopSubclass, id);
@@ -342,8 +467,9 @@ LRESULT CALLBACK ListSubclass(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR id,
 }
 
 LRESULT CALLBACK MainSubclass(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR) {
-    if (m == WM_SETTINGCHANGE &&
-        ((lp && !lstrcmpiW(reinterpret_cast<const wchar_t*>(lp), L"ImmersiveColorSet")) || wp == SPI_SETHIGHCONTRAST))
+    if ((m == WM_SETTINGCHANGE &&
+         ((lp && !lstrcmpiW(reinterpret_cast<const wchar_t*>(lp), L"ImmersiveColorSet")) || wp == SPI_SETHIGHCONTRAST)) ||
+        m == WM_DWMCOLORIZATIONCOLORCHANGED)
         Theme_Update();
     else if (m == WM_NCDESTROY)
         RemoveWindowSubclass(h, MainSubclass, id);
@@ -352,10 +478,10 @@ LRESULT CALLBACK MainSubclass(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR id,
 
 void SetTheme(HWND c, const wchar_t* dark, const wchar_t* light = nullptr) { SetWindowTheme(c, g_dark ? dark : light, nullptr); }
 
-// On text labels: Windows draws a disabled label engraved (a white shadow), which looks broken on dark.
-// Draw it plain grey instead.
+// On text labels: Windows draws a disabled label engraved (a white shadow). Draw it in the disabled
+// text color instead.
 LRESULT CALLBACK StaticSubclass(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR) {
-    if ((m == WM_PAINT || m == WM_PRINTCLIENT) && g_dark && !IsWindowEnabled(h)) {
+    if ((m == WM_PAINT || m == WM_PRINTCLIENT) && !g_pal.highContrast && !IsWindowEnabled(h)) {
         const DWORD st = static_cast<DWORD>(GetWindowLongW(h, GWL_STYLE));
         const DWORD type = st & SS_TYPEMASK;
         if (type == SS_LEFT || type == SS_CENTER || type == SS_RIGHT || type == SS_LEFTNOWORDWRAP) {
@@ -368,7 +494,7 @@ LRESULT CALLBACK StaticSubclass(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR i
             FillRect(dc, &rc, br ? br : Theme_Brush(g_pal.window));
             HGDIOBJ old = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(h, WM_GETFONT, 0, 0)));
             SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, g_pal.grey);
+            SetTextColor(dc, g_pal.textDis);
             UINT fmt = DT_EXPANDTABS | (type == SS_CENTER ? DT_CENTER : type == SS_RIGHT ? DT_RIGHT : DT_LEFT);
             if (type != SS_LEFTNOWORDWRAP) fmt |= DT_WORDBREAK;
             if (st & SS_NOPREFIX) fmt |= DT_NOPREFIX;
@@ -392,6 +518,8 @@ void ThemeControl(HWND c) {
     const DWORD style = static_cast<DWORD>(GetWindowLongW(c, GWL_STYLE));
     if (!_wcsicmp(cls, WC_BUTTONW)) {
         SetTheme(c, L"DarkMode_Explorer");
+        // The window's default button is the accent one (kept when the focus moves the default).
+        if ((style & BS_TYPEMASK) == BS_DEFPUSHBUTTON) SetPropW(c, kAccentProp, reinterpret_cast<HANDLE>(1));
     } else if (!_wcsicmp(cls, WC_STATICW)) {
         SetWindowSubclass(c, StaticSubclass, 1, 0);
     } else if (!_wcsicmp(cls, WC_EDITW)) {
@@ -410,8 +538,8 @@ void ThemeControl(HWND c) {
             SetTheme(hd, L"DarkMode_ItemsView");
         }
         if (HWND tt = ListView_GetToolTips(c)) SetTheme(tt, L"DarkMode_Explorer");
-        ListView_SetBkColor(c, g_pal.window);
-        ListView_SetTextBkColor(c, g_pal.window);
+        ListView_SetBkColor(c, g_pal.card);
+        ListView_SetTextBkColor(c, g_pal.card);
         ListView_SetTextColor(c, g_pal.text);
         SetWindowSubclass(c, ListSubclass, 1, 0);
     }
@@ -427,6 +555,7 @@ void ThemeTop(HWND top) {
     if (pAllowDarkForWindow) pAllowDarkForWindow(top, g_dark);
     const BOOL dark = g_dark;
     DwmSetWindowAttribute(top, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    Fluent_StyleWindow(top);
     SetWindowSubclass(top, TopSubclass, 1, 0);
     EnumChildWindows(top, ChildProc, 0);
 }
@@ -452,13 +581,13 @@ BOOL CALLBACK RepaintProc(HWND h, LPARAM) {
 void Evaluate(bool repaint) {
     LoadApi();
     const bool dark = WantDark();
-    if (g_ready && dark == g_dark) {
-        if (!dark) MakePalette(false);  // light keeps Windows' own colors, which may have changed
+    const Palette before = g_pal;
+    MakePalette(dark);  // always: the accent color or High Contrast colors may have changed
+    if (g_ready && dark == g_dark && before.accent == g_pal.accent && before.highContrast == g_pal.highContrast &&
+        before.text == g_pal.text && before.window == g_pal.window)
         return;
-    }
     g_ready = true;
     g_dark = dark;
-    MakePalette(dark);
     if (pSetPreferredAppMode) pSetPreferredAppMode(dark ? kForceDark : kForceLight);
     if (pFlushMenuThemes) pFlushMenuThemes();
     if (repaint) EnumWindows(RepaintProc, 0);
@@ -513,4 +642,20 @@ void Theme_Update() { Evaluate(true); }
 
 void Theme_SettingsLoaded() {
     if (g_ready && g_uiThread && GetCurrentThreadId() == g_uiThread) Evaluate(true);
+}
+
+void Theme_AsSwitch(HWND checkbox) {
+    if (checkbox) SetPropW(checkbox, kSwitchProp, reinterpret_cast<HANDLE>(1));
+}
+
+COLORREF Theme_BackOf(HWND ctl) {
+    HWND parent = GetParent(ctl);
+    if (!parent) return Pal().window;
+    HDC dc = GetDC(ctl);
+    HBRUSH br = reinterpret_cast<HBRUSH>(
+        SendMessageW(parent, WM_CTLCOLORSTATIC, reinterpret_cast<WPARAM>(dc), reinterpret_cast<LPARAM>(ctl)));
+    ReleaseDC(ctl, dc);
+    LOGBRUSH lb{};
+    if (br && GetObjectW(br, sizeof(lb), &lb) == sizeof(lb) && lb.lbStyle == BS_SOLID) return lb.lbColor;
+    return Pal().window;
 }
