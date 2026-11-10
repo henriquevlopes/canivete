@@ -4,6 +4,7 @@
 // straight into the H.264 encoder (video.cpp); Stop saves it to the screenshots folder at once.
 // The border, bar and save window are hidden from screen capture, so they never end up in a recording.
 #include "app.h"
+#include "theme.h"
 
 #include <commctrl.h>
 #include <shellapi.h>
@@ -381,6 +382,12 @@ LRESULT CALLBACK SaveProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_GIF_ENCODED:
         if (wp < kGifPresetCount) UpdateButton(static_cast<int>(wp));
         return 0;
+    case WM_ERASEBKGND: {
+        RECT rc;
+        GetClientRect(h, &rc);
+        FillRect(reinterpret_cast<HDC>(wp), &rc, Theme_Brush(Pal().window));
+        return 1;
+    }
     case WM_COMMAND: {
         const int id = LOWORD(wp);
         if (id >= IDC_PRESET0 && id < IDC_PRESET0 + kGifPresetCount) SaveChoice(id - IDC_PRESET0);
@@ -398,8 +405,10 @@ LRESULT CALLBACK SaveProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         Discard();
         return 0;
     case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
         SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
-        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+        SetTextColor(reinterpret_cast<HDC>(wp), Pal().text);
+        return reinterpret_cast<LRESULT>(Theme_Brush(Pal().window));
     case WM_DESTROY: {
         R.cancelEncode = true;
         for (std::thread& t : R.encoders)
@@ -476,6 +485,7 @@ void OpenSaveWindow() {
                                 WS_CHILD | WS_VISIBLE | SS_NOPREFIX | SS_ENDELLIPSIS, pad, H - pad - Px(24),
                                 W - 3 * pad - Px(100), Px(22), R.save, nullptr, g_hinst, nullptr);
     SendMessageW(hint, WM_SETFONT, reinterpret_cast<WPARAM>(R.saveFont), FALSE);
+    Theme_Window(R.save);
     ShowWindow(R.save, SW_SHOW);
     SetForegroundWindow(R.save);
     SetFocus(d);
@@ -587,7 +597,7 @@ void RecordingDone(bool full) {
 void PaintBar(HWND h, HDC dc) {
     RECT rc;
     GetClientRect(h, &rc);
-    FillRect(dc, &rc, GetSysColorBrush(COLOR_BTNFACE));
+    FillRect(dc, &rc, Theme_Brush(Pal().footer));
     const int cy = (rc.bottom - rc.top) / 2, d = Px(10);
     HGDIOBJ oldB = SelectObject(dc, GetStockObject(DC_BRUSH));
     HGDIOBJ oldP = SelectObject(dc, GetStockObject(NULL_PEN));
@@ -604,7 +614,7 @@ void PaintBar(HWND h, HDC dc) {
     }
     HGDIOBJ oldF = SelectObject(dc, R.barFont);
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, GetSysColor(COLOR_BTNTEXT));
+    SetTextColor(dc, Pal().text);
     RECT tr{Px(26), 0, Px(80), rc.bottom};
     DrawTextW(dc, s, -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
     SelectObject(dc, oldF);
@@ -640,6 +650,8 @@ LRESULT CALLBACK BarProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_REC_DONE:
         RecordingDone(wp != 0);
         return 0;
+    case WM_CTLCOLORBTN:
+        return reinterpret_cast<LRESULT>(Theme_Brush(Pal().footer));
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;  // clicking Stop must not take focus from the app being recorded
     }
@@ -703,6 +715,7 @@ void ShowRecordingWindows(const RECT& r) {
                                   bh - Px(14), R.bar, reinterpret_cast<HMENU>(IDC_CANCELREC), g_hinst, nullptr);
     SendMessageW(stop, WM_SETFONT, reinterpret_cast<WPARAM>(R.barFont), FALSE);
     SendMessageW(cancel, WM_SETFONT, reinterpret_cast<WPARAM>(R.barFont), FALSE);
+    Theme_Window(R.bar);
     ShowWindow(R.bar, SW_SHOWNOACTIVATE);
     SetTimer(R.bar, kTimerTick, 250, nullptr);
 }

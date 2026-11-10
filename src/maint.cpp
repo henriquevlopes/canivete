@@ -4,6 +4,7 @@
 // rights run in an elevated copy of Canivete (one Windows prompt per job) that reports back here
 // with WM_COPYDATA. Built in code so it lays out again at any monitor DPI.
 #include "maint.h"
+#include "theme.h"
 
 #include "../res/resource.h"
 
@@ -30,11 +31,6 @@ constexpr UINT WM_M_SCAN = WM_APP + 30;      // wp = MAKEWPARAM(tab, gen), lp = 
 constexpr UINT WM_M_PROGRESS = WM_APP + 31;  // wp = MAKEWPARAM(tab, gen), lp = new'd Progress
 constexpr UINT WM_M_DONE = WM_APP + 32;      // wp = MAKEWPARAM(tab, gen), lp = exit code
 constexpr LPARAM kDeclined = -1000, kNoStart = -1001;
-constexpr COLORREF kGrey = RGB(105, 105, 105);
-constexpr COLORREF kRed = RGB(196, 43, 28);
-constexpr COLORREF kNavBg = RGB(243, 243, 243);
-constexpr COLORREF kNavSel = RGB(226, 226, 226);
-constexpr COLORREF kAccent = RGB(0, 95, 184);
 constexpr COLORREF kDotColors[4] = {RGB(16, 137, 62), RGB(222, 145, 0), RGB(196, 43, 28), RGB(160, 160, 160)};
 // Layout in 96-DPI pixels.
 constexpr int kW = 940, kH = 640, kMinW = 760, kMinH = 520;
@@ -132,7 +128,6 @@ struct UI {
     HWND hwnd = nullptr, nav = nullptr;
     UINT dpi = 96;
     HFONT font = nullptr, bold = nullptr, title = nullptr;
-    HBRUSH navBrush = nullptr;
     std::vector<Ctl> ctls;
     int tab = 0;
     WORD gen = 0;  // a new number each time the window opens: results for an older window are dropped
@@ -1239,33 +1234,38 @@ void FillColor(HDC dc, const RECT& r, COLORREF c) {
 void DrawNavItem(const DRAWITEMSTRUCT& d) {
     if (d.itemID == static_cast<UINT>(-1)) return;
     HDC dc = d.hDC;
-    FillColor(dc, d.rcItem, kNavBg);
+    const Palette& p = Pal();
+    FillColor(dc, d.rcItem, p.nav);
     RECT b = d.rcItem;
     InflateRect(&b, -Px(2), -Px(2));
     if (d.itemState & ODS_SELECTED) {
-        SetDCBrushColor(dc, kNavSel);
-        SetDCPenColor(dc, kNavSel);
+        SetDCBrushColor(dc, p.navSel);
+        SetDCPenColor(dc, p.navSel);
         HGDIOBJ ob = SelectObject(dc, GetStockObject(DC_BRUSH));
         HGDIOBJ op = SelectObject(dc, GetStockObject(DC_PEN));
         RoundRect(dc, b.left, b.top, b.right, b.bottom, Px(8), Px(8));
         SelectObject(dc, ob);
         SelectObject(dc, op);
         RECT bar{b.left, b.top + Px(9), b.left + Px(3), b.bottom - Px(9)};
-        FillColor(dc, bar, kAccent);
+        FillColor(dc, bar, p.accent);
     }
     HGDIOBJ of = SelectObject(dc, U.font);
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+    SetTextColor(dc, p.text);
     RECT tr = b;
     tr.left += Px(14);
     tr.right -= Px(10);
     DrawTextW(dc, kTabs[d.itemID].name, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
     if (U.busy[d.itemID]) {
-        SetTextColor(dc, kGrey);
+        SetTextColor(dc, p.grey);
         DrawTextW(dc, L"…", -1, &tr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
     SelectObject(dc, of);
-    if ((d.itemState & ODS_FOCUS) && !(d.itemState & ODS_NOFOCUSRECT)) DrawFocusRect(dc, &b);
+    if ((d.itemState & ODS_FOCUS) && !(d.itemState & ODS_NOFOCUSRECT)) {
+        SetTextColor(dc, p.text);
+        SetBkColor(dc, p.nav);
+        DrawFocusRect(dc, &b);
+    }
 }
 
 // ---- window ------------------------------------------------------------------------------
@@ -1366,7 +1366,6 @@ LRESULT CALLBACK MaintProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE:
         U.dpi = GetDpiForWindow(h);
-        U.navBrush = CreateSolidBrush(kNavBg);
         Build();
         MakeFonts();
         return 0;
@@ -1384,9 +1383,9 @@ LRESULT CALLBACK MaintProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         HDC dc = reinterpret_cast<HDC>(wp);
         RECT rc;
         GetClientRect(h, &rc);
-        FillRect(dc, &rc, GetSysColorBrush(COLOR_WINDOW));
+        FillColor(dc, rc, Pal().window);
         RECT nav{0, 0, Px(kNavW), rc.bottom};
-        FillColor(dc, nav, kNavBg);
+        FillColor(dc, nav, Pal().nav);
         return 1;
     }
     case WM_MEASUREITEM: {
@@ -1400,19 +1399,20 @@ LRESULT CALLBACK MaintProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return TRUE;
     }
     case WM_CTLCOLORLISTBOX:
-        return reinterpret_cast<LRESULT>(U.navBrush);
+        return reinterpret_cast<LRESULT>(Theme_Brush(Pal().nav));
     case WM_CTLCOLORSTATIC: {
         HDC dc = reinterpret_cast<HDC>(wp);
         const int id = GetDlgCtrlID(reinterpret_cast<HWND>(lp));
-        COLORREF fg = GetSysColor(COLOR_WINDOWTEXT);
-        if (id == IDC_DESC || id == IDC_UPGPU || (id >= IDC_STATUS0 && id < IDC_STATUS0 + kTabCount)) fg = kGrey;
-        if (id == IDC_UPREBOOT) fg = kRed;
-        SetBkColor(dc, GetSysColor(COLOR_WINDOW));
+        const Palette& p = Pal();
+        COLORREF fg = p.text;
+        if (id == IDC_DESC || id == IDC_UPGPU || (id >= IDC_STATUS0 && id < IDC_STATUS0 + kTabCount)) fg = p.grey;
+        if (id == IDC_UPREBOOT) fg = p.red;
+        SetBkColor(dc, p.window);
         SetTextColor(dc, fg);
-        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+        return reinterpret_cast<LRESULT>(Theme_Brush(p.window));
     }
     case WM_CTLCOLORBTN:
-        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+        return reinterpret_cast<LRESULT>(Theme_Brush(Pal().window));
     case WM_NOTIFY: {
         const auto* n = reinterpret_cast<const NMHDR*>(lp);
         if (n->code == LVN_ITEMCHANGED && !U.filling) {
@@ -1486,11 +1486,9 @@ LRESULT CALLBACK MaintProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         U.waitBg = false;
         return 0;
     case WM_NCDESTROY:
-        for (HGDIOBJ o : {static_cast<HGDIOBJ>(U.font), static_cast<HGDIOBJ>(U.bold), static_cast<HGDIOBJ>(U.title),
-                          static_cast<HGDIOBJ>(U.navBrush)})
+        for (HGDIOBJ o : {static_cast<HGDIOBJ>(U.font), static_cast<HGDIOBJ>(U.bold), static_cast<HGDIOBJ>(U.title)})
             if (o) DeleteObject(o);
         U.font = U.bold = U.title = nullptr;
-        U.navBrush = nullptr;
         if (U.dots) ImageList_Destroy(U.dots);
         U.dots = nullptr;
         break;
@@ -1554,6 +1552,7 @@ void Maint_Show(int tab) {
     if (Now() - CacheNum(L"CleanTime", 0) > 12 * 3600) StartScan(kCleanup);
     if (g_settings.checkUpdates && !Update_Info().checked && !Update_Busy()) Update_Check(false);
     FillOverview();
+    Theme_Window(h);
     ShowWindow(h, SW_SHOW);
     SetForegroundWindow(h);
 }

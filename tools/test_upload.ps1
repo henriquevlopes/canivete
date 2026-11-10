@@ -3,7 +3,8 @@
 #   powershell -ExecutionPolicy Bypass -File tools\hidden_test.ps1 "powershell -ExecutionPolicy Bypass -File tools\test_upload.ps1"
 # It starts its own test copies of Canivete (CANIVETE_TEST must be set, as hidden_test.ps1 does) and
 # prints PASS/FAIL lines; the exit code is the number of failures.
-param([string]$Exe = (Join-Path $PSScriptRoot "..\build\Release\Canivete.exe"), [int]$Port = 18765)
+param([string]$Exe = (Join-Path $PSScriptRoot "..\build\Release\Canivete.exe"), [int]$Port = 18765,
+      [string]$Theme = "light")  # windows are captured into the test folder to look at
 
 $ErrorActionPreference = "Stop"
 $dir = $env:CANIVETE_TEST
@@ -74,7 +75,7 @@ function StartApp([hashtable]$upload, [hashtable]$shot = @{}, [string[]]$a = @()
     StopApp
     $ini = "[Screenshot]`r`nFolder=$dir\shots`r`nOpenEditor=0`r`nShowNotification=1`r`n"
     foreach ($k in $shot.Keys) { $ini = $ini -replace "(?m)^$k=.*`r`n", ""; $ini += "$k=$($shot[$k])`r`n" }
-    $ini += "[General]`r`nCheckUpdates=0`r`n[Maintenance]`r`nDailyCheck=0`r`n[Upload]`r`n"
+    $ini += "[General]`r`nCheckUpdates=0`r`nTheme=$Theme`r`n[Maintenance]`r`nDailyCheck=0`r`n[Upload]`r`n"
     foreach ($k in $upload.Keys) { $ini += "$k=$($upload[$k])`r`n" }
     [IO.File]::WriteAllText((Join-Path $dir "settings.ini"), $ini)
     Mark

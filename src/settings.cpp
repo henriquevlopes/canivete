@@ -1,5 +1,6 @@
 // Settings (INI file in %APPDATA%\Canivete), hotkey text parsing and a tiny log.
 #include "app.h"
+#include "theme.h"
 
 #include <shlobj.h>
 
@@ -193,12 +194,15 @@ void LoadSettings() {
     s.s3KeyId = Trim(ReadStr(L"Upload", L"S3AccessKeyId", L""));
     s.s3LinkBase = Trim(ReadStr(L"Upload", L"S3LinkBase", L""));
     s.s3Private = ReadBool(L"Upload", L"S3PrivateLinks", false);
+    s.theme = Lower(Trim(ReadStr(L"General", L"Theme", L"system")));
+    if (s.theme != L"light" && s.theme != L"dark") s.theme = L"system";
     s.format = Lower(Trim(ReadStr(L"Screenshot", L"Format", L"png")));
     if (s.format == L"jpeg") s.format = L"jpg";
     if (s.format != L"jpg") s.format = L"png";
     s.jpegQuality = GetPrivateProfileIntW(L"Screenshot", L"JpegQuality", 90, path.c_str());
     s.jpegQuality = s.jpegQuality < 1 ? 1 : s.jpegQuality > 100 ? 100 : s.jpegQuality;
     g_settings = s;
+    Theme_SettingsLoaded();
 }
 
 void SaveSettings(const Settings& s) {
@@ -239,6 +243,7 @@ void SaveSettings(const Settings& s) {
     WriteStr(L"Upload", L"S3AccessKeyId", s.s3KeyId);
     WriteStr(L"Upload", L"S3LinkBase", s.s3LinkBase);
     WriteBool(L"Upload", L"S3PrivateLinks", s.s3Private);
+    WriteStr(L"General", L"Theme", s.theme);
 }
 
 std::wstring HotkeyText(const Hotkey& hk) {

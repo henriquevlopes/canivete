@@ -68,6 +68,7 @@ struct Settings {
     std::wstring s3Bucket, s3Region, s3Prefix = L"canivete/", s3KeyId;
     std::wstring s3LinkBase;  // public address in front of the key (CloudFront, website); "" = the bucket's
     bool s3Private = false;   // presigned links that work for 7 days
+    std::wstring theme;       // General: "system" (follow Windows), "light" or "dark"
 };
 
 extern Settings g_settings;

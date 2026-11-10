@@ -19,6 +19,7 @@ Plan and research notes: [PLAN.md](PLAN.md).
 | 6 | GIF recording | done |
 | 7 | Computer maintenance (overview, updates, installed apps, cleanup, startup apps, health, daily check) | done |
 | 8 | Installer and self-update | done |
+| 9 | Uploads (Google Drive, Amazon S3) | done |
 
 ## Use
 
@@ -68,7 +69,8 @@ Recent colors live in `%APPDATA%\Canivete\colors.txt`.
 Settings: tray > Settings… opens a small window with a tab per feature on the left (General,
 Screenshots, Color picker, GIF recording, Video recording, Image tools, Renamer, Maintenance; Ctrl+Tab switches).
 General has the folder, file name (with an Insert menu of tokens and a live example), PNG/JPG and
-quality, and start with Windows; each feature tab has its hotkey (click the box, press the keys) and
+quality, start with Windows and Appearance (Follow Windows, Light or Dark: every Canivete window, its title bar and the
+tray menu switch at once, and Follow Windows tracks the Windows app mode live); each feature tab has its hotkey (click the box, press the keys) and
 options. Each feature also has an On/Off switch next to its name in the list: a feature that is off loses its hotkeys, its
 tray menu entries and its Explorer right-click and Send to entries (its tab is greyed out).
 Everything is stored in
@@ -162,6 +164,33 @@ Computer maintenance: tray > Computer maintenance… (or Start menu > Computer M
 - Health: uptime and restart advice, memory, disk space, repair (DISM + sfc), optimize drives, restore
   point, Defender quick scan.
 
+Uploads (Settings → Uploads): screenshots, GIFs and videos go to Google Drive or Amazon S3 and
+the link is copied, ready to paste. Upload button on the screenshot preview, in the editor (key U:
+copy, save, upload, close) and an "Also upload" box in the GIF/video save window; or tick
+"Upload by itself" for screenshots, GIFs and/or videos. A tray notice shows it going up (the tray
+tooltip shows the percent) and then "Link copied" (click it to open the link); errors say what to
+fix and clicking them opens Settings → Uploads. Passwords and keys are kept encrypted for this
+Windows user (DPAPI, `%APPDATA%\Canivete\secrets.ini`), never in settings.ini.
+- Google Drive (once): in Google Cloud Console make a project, enable the Google Drive API, set up
+  the OAuth consent screen (External, add yourself as a test user), then Credentials → Create
+  credentials → OAuth client ID → Desktop app. Paste its Client ID and Client secret into
+  Canivete and click Connect…: the browser asks which Google account to use. **Then publish the
+  app** (OAuth consent screen → Publish app → In production): while it is in Testing, Google ends
+  the sign-in after 7 days and you have to connect again. An unverified app is fine for your own
+  account (Google shows an "unverified" warning once; Advanced → continue). Canivete only gets
+  the `drive.file` permission: it sees only files it made itself. Files go into a "Canivete"
+  folder (changeable) and are shared "anyone with the link can view" (can be turned off).
+  Big files go up in 8 MB pieces and pick up where they stopped if the connection breaks.
+- Amazon S3 (once): make a bucket, then in IAM a user just for Canivete with this inline policy
+  (the "How to set it up…" button copies it, filled in with your bucket and folder), and an access
+  key for it ("Application running outside AWS"). That key never expires; don't use temporary
+  (session) keys, which stop working within hours.
+  `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:PutObject","s3:GetObject"],"Resource":"arn:aws:s3:::BUCKET/canivete/*"}]}`
+  Fill in bucket, region (e.g. `eu-west-1`), folder, access key ID and secret key, then Test.
+  Links: the bucket's own address (the bucket or folder must allow public reads), a "Link
+  address" in front (CloudFront or your own domain), or tick "Private bucket" for signed links
+  that work for 7 days. Up to 5 GB a file.
+
 Updates of Canivete itself: it checks the public `henriquevlopes/canivete-releases` GitHub releases
 (no token, about once a day, Settings > General can turn it off), shows a notice and a tray menu item
 when a newer version is out, downloads the setup, checks its SHA256 against the release notes and
@@ -180,6 +209,14 @@ to run unless that window exists.
 `Canivete.exe --update-test` checks the releases repo, downloads the setup and verifies its SHA256 (self-test).
 `Canivete.exe --uninstall` removes Canivete's Explorer entries, shortcuts and autostart (the uninstaller runs it).
 `Canivete.exe --click-notice` (test mode only) acts as if the last notice was clicked.
+`Canivete.exe --upload a.png b.mp4` uploads files with the running copy; `--drive-connect` starts the Google sign-in;
+`--s3-test` uploads a small test file. `--upload-selftest` checks the AWS signing (against AWS's own examples),
+PKCE and the encrypted secrets, and exits.
+`tools\test_upload.ps1` (run through `tools\hidden_test.ps1`) tests uploads end to end against a fake Google and AWS
+server (`tools\upload_mock.py`, needs Python): sign-in, resumable pieces with a broken connection, signatures,
+the Upload buttons, errors. Test copies only: `CANIVETE_UPLOAD_MOCK=http://127.0.0.1:port` sends every upload
+there, `--set-secret name value` stores a secret, `CANIVETE_GRAB_FAKE=1` makes screenshots a gradient (a hidden
+desktop has no screen).
 `Canivete.exe --do <action> a.jpg b.png` runs a right-click menu action (`small medium large half custom
 jpg png tif bmp right left 180 fliph flipv copy`).
 `Canivete.exe --grab out.png` (or `.jpg`) grabs all monitors to a file and exits (self-test).
@@ -224,6 +261,8 @@ and publishes it with its SHA256 on `henriquevlopes/canivete-releases`; running 
 - `src/alpha.cpp` — Make alpha window: freehand mask, detail/background picks, threshold engine, square power-of-two output
 - `src/maint.cpp` — Computer maintenance window: Overview, Updates, Installed apps, Cleanup, Startup apps, Health tabs; worker threads; elevated jobs report back with WM_COPYDATA; daily background check
 - `src/maint_info.cpp` — Overview checks: antivirus (Security Center + Defender WMI), device problems, battery wear, last Windows Update, installed apps
+- `src/theme.cpp` — dark/light theme: palette shared by every window, dark title bars, control themes (DarkMode_Explorer/CFD/ItemsView), dark check boxes, dark tray menu, live switch on `ImmersiveColorSet`
+- `src/upload.cpp` — uploads: Google sign-in (loopback + PKCE), Drive resumable upload, S3 SigV4 PUT and signed links (WinHTTP, BCrypt), DPAPI secrets, upload queue and notices
 - `src/update.cpp` — Canivete self-update: GitHub releases API (WinHTTP), SHA256 check (BCrypt), silent setup run
 - `src/maint_ops.cpp` — the checks and jobs: Windows Update agent (COM), winget, GPU driver info, cleanup whitelist, startup entries (StartupApproved), restore point, DISM/sfc, defrag
 - `src/shell.cpp` — Explorer right-click Canivete submenu (image actions, Rename), Send to shortcuts, Start menu Computer Maintenance
