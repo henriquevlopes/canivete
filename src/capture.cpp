@@ -145,6 +145,14 @@ void DrawCursor(HDC dc, int ox, int oy) {
 bool GrabInto(Dib& d, const RECT& r, bool withCursor) {
     const int w = r.right - r.left, h = r.bottom - r.top;
     if (w <= 0 || h <= 0 || !d.Create(w, h)) return false;
+    // Test copy on a hidden desktop (which has nothing to grab): CANIVETE_GRAB_FAKE=1 gives a gradient.
+    static const bool fake = TestMode() && GetEnvironmentVariableW(L"CANIVETE_GRAB_FAKE", nullptr, 0) > 0;
+    if (fake) {
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+                d.bits[static_cast<size_t>(y) * w + x] = ((x * 255 / w) << 16) | ((y * 255 / h) << 8) | 0x60;
+        return true;
+    }
     HDC screen = GetDC(nullptr);
     const BOOL ok = BitBlt(d.dc, 0, 0, w, h, screen, r.left, r.top, SRCCOPY | CAPTUREBLT);
     ReleaseDC(nullptr, screen);

@@ -180,6 +180,19 @@ void LoadSettings() {
     s.videoMic = ReadBool(L"Video", L"Microphone", false);
     s.maintDaily = ReadBool(L"Maintenance", L"DailyCheck", true);
     s.checkUpdates = ReadBool(L"General", L"CheckUpdates", true);
+    s.uploadService = Lower(Trim(ReadStr(L"Upload", L"Service", L"drive"))) == L"s3" ? L"s3" : L"drive";
+    s.uploadShots = ReadBool(L"Upload", L"AutoScreenshots", false);
+    s.uploadGif = ReadBool(L"Upload", L"AutoGif", false);
+    s.uploadVideo = ReadBool(L"Upload", L"AutoVideo", false);
+    s.driveClientId = Trim(ReadStr(L"Upload", L"DriveClientId", L""));
+    s.driveFolder = Trim(ReadStr(L"Upload", L"DriveFolder", L"Canivete"));
+    s.driveShare = ReadBool(L"Upload", L"DriveShare", true);
+    s.s3Bucket = Trim(ReadStr(L"Upload", L"S3Bucket", L""));
+    s.s3Region = Lower(Trim(ReadStr(L"Upload", L"S3Region", L"")));
+    s.s3Prefix = Trim(ReadStr(L"Upload", L"S3Prefix", L"canivete/"));
+    s.s3KeyId = Trim(ReadStr(L"Upload", L"S3AccessKeyId", L""));
+    s.s3LinkBase = Trim(ReadStr(L"Upload", L"S3LinkBase", L""));
+    s.s3Private = ReadBool(L"Upload", L"S3PrivateLinks", false);
     s.format = Lower(Trim(ReadStr(L"Screenshot", L"Format", L"png")));
     if (s.format == L"jpeg") s.format = L"jpg";
     if (s.format != L"jpg") s.format = L"png";
@@ -213,6 +226,19 @@ void SaveSettings(const Settings& s) {
     WriteBool(L"Video", L"Microphone", s.videoMic);
     WriteBool(L"Maintenance", L"DailyCheck", s.maintDaily);
     WriteBool(L"General", L"CheckUpdates", s.checkUpdates);
+    WriteStr(L"Upload", L"Service", s.uploadService);
+    WriteBool(L"Upload", L"AutoScreenshots", s.uploadShots);
+    WriteBool(L"Upload", L"AutoGif", s.uploadGif);
+    WriteBool(L"Upload", L"AutoVideo", s.uploadVideo);
+    WriteStr(L"Upload", L"DriveClientId", s.driveClientId);
+    WriteStr(L"Upload", L"DriveFolder", s.driveFolder);
+    WriteBool(L"Upload", L"DriveShare", s.driveShare);
+    WriteStr(L"Upload", L"S3Bucket", s.s3Bucket);
+    WriteStr(L"Upload", L"S3Region", s.s3Region);
+    WriteStr(L"Upload", L"S3Prefix", s.s3Prefix);
+    WriteStr(L"Upload", L"S3AccessKeyId", s.s3KeyId);
+    WriteStr(L"Upload", L"S3LinkBase", s.s3LinkBase);
+    WriteBool(L"Upload", L"S3PrivateLinks", s.s3Private);
 }
 
 std::wstring HotkeyText(const Hotkey& hk) {

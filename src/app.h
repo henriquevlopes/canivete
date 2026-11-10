@@ -18,6 +18,7 @@ constexpr UINT WM_APP_CAPTURE_DONE = WM_APP + 2;  // lParam = Output job, finish
 constexpr UINT WM_APP_COMMAND = WM_APP + 3;       // wParam = command id (from a second instance)
 constexpr UINT WM_APP_MAINT = WM_APP + 4;         // lParam = background maintenance check result
 constexpr UINT WM_APP_UPDATE = WM_APP + 5;        // Canivete update check / download finished (update.cpp)
+constexpr UINT WM_APP_UPLOAD = WM_APP + 6;        // upload started / progress / finished (upload.cpp)
 
 enum class CaptureMode { Region = 1, Window = 2, Full = 3, Color = 4, Gif = 5, Video = 6 };  // also the hotkey ids
 constexpr int kHotkeyCount = 6;
@@ -30,13 +31,15 @@ struct Hotkey {
 
 // Features that can be turned off in Settings (each tab's On switch). Off = no hotkeys, no tray menu
 // entries and no Explorer entries.
-enum Feature : int { kFeatShots, kFeatColor, kFeatGif, kFeatVideo, kFeatImages, kFeatRename, kFeatMaint, kFeatCount };
+enum Feature : int {
+    kFeatShots, kFeatColor, kFeatGif, kFeatVideo, kFeatImages, kFeatRename, kFeatMaint, kFeatUpload, kFeatCount
+};
 inline constexpr const wchar_t* kFeatureKeys[kFeatCount] = {L"Screenshots", L"ColorPicker", L"Gif",
                                                              L"Video",       L"ImageTools",  L"Renamer",
-                                                             L"Maintenance"};
+                                                             L"Maintenance", L"Uploads"};
 
 struct Settings {
-    bool features[kFeatCount] = {true, true, true, true, true, true, true};
+    bool features[kFeatCount] = {true, true, true, true, true, true, true, true};
     std::wstring hkRegion, hkWindow, hkFull, hkColor, hkGif, hkVideo;
     std::wstring folder;    // empty = Windows "Screenshots" folder
     std::wstring fileName;  // pattern with %tokens
@@ -56,6 +59,15 @@ struct Settings {
     std::wstring videoPreset; // last video choice: a kVideoPresets key
     bool maintDaily = true;   // Maintenance: check once a day in the background and tell me what needs doing
     bool checkUpdates = true; // General: tell me when a new version of Canivete is out
+    // Uploads (secrets are in secrets.ini, encrypted: see upload.cpp)
+    std::wstring uploadService = L"drive";  // "drive" or "s3"
+    bool uploadShots = false, uploadGif = false, uploadVideo = false;  // upload by itself after each one
+    std::wstring driveClientId;
+    std::wstring driveFolder = L"Canivete";  // "" = My Drive itself
+    bool driveShare = true;                  // anyone with the link can view
+    std::wstring s3Bucket, s3Region, s3Prefix = L"canivete/", s3KeyId;
+    std::wstring s3LinkBase;  // public address in front of the key (CloudFront, website); "" = the bucket's
+    bool s3Private = false;   // presigned links that work for 7 days
 };
 
 extern Settings g_settings;
@@ -98,6 +110,7 @@ void SetAutostart(bool on);
 void Tray_Notify(const wchar_t* title, const std::wstring& text);  // balloon from the tray icon
 // The same, and clicking the balloon runs onClick.
 void Tray_NotifyAction(const wchar_t* title, const std::wstring& text, std::function<void()> onClick);
+void Tray_SetTip(const std::wstring& tip);  // tray icon tooltip; "" = the usual one
 
 // ---- resizer.cpp ---------------------------------------------------------------------------
 void Resizer_Open(const std::vector<std::wstring>& files);  // opens the window, or adds to it
@@ -115,9 +128,31 @@ void Shell_Register();  // Explorer right-click and Send to entries for the resi
 void Shell_Unregister();  // removes them all (and the Start menu Maintenance shortcut): --uninstall
 
 // ---- settings_ui.cpp -----------------------------------------------------------------------
-void SettingsUI_Show();
+constexpr int kSettingsTabUploads = 5;
+void SettingsUI_Show(int tab = -1);  // -1 = the tab it was closed on
 bool SettingsUI_Key(const MSG& m);  // Ctrl+Tab between tabs; true = handled
 HWND SettingsUI_Window();  // for IsDialogMessage, nullptr when closed
+void SettingsUI_UploadStatus(const std::wstring& error);  // after a Drive sign-in or S3 test ("" = fine)
+
+// ---- upload.cpp ----------------------------------------------------------------------------
+enum class UploadKind { Screenshot, Gif, Video };
+bool Upload_Ready();                // on, and the chosen service is set up
+std::wstring Upload_ServiceName();  // "Google Drive" / "Amazon S3"
+bool Upload_Auto(UploadKind k);     // ready, and set to upload this kind by itself
+// Queues a file; the link goes on the clipboard when it's up. deleteAfter: a temporary file.
+void Upload_File(const std::wstring& path, bool deleteAfter = false);
+struct Image;
+struct CaptureResult;
+void Upload_Image(const Image& img, const CaptureResult& meta);  // a picture that has no file: temp PNG
+void Upload_DriveConnect();  // browser sign-in (uses the saved Client ID and secret)
+bool Upload_DriveConnecting();
+void Upload_DriveDisconnect();       // forgets the sign-in and tells Google
+std::wstring Upload_DriveAccount();  // the connected account, "" = not connected
+void Upload_S3Test();                // a small test file with the saved settings
+void Upload_OnMessage(WPARAM wp, LPARAM lp);
+std::wstring Upload_LoadSecret(const wchar_t* name);                     // DPAPI-encrypted, in secrets.ini
+void Upload_SaveSecret(const wchar_t* name, const std::wstring& value);  // "" removes it
+int Upload_SelfTest();  // --upload-selftest: signing against AWS's examples, PKCE, DPAPI
 
 // ---- maint.cpp / maint_ops.cpp --------------------------------------------------------------
 void Maint_Show(int tab = -1);  // tab: 0 Overview, 1 Updates, 2 Installed apps, 3 Cleanup, 4 Startup apps,
@@ -201,6 +236,7 @@ struct CaptureResult {
     RECT screenRect{};          // where it was on screen (physical pixels)
     std::wstring processName;   // app that was in front when the hotkey was pressed
     std::wstring windowTitle;
+    bool autoUpload = false;  // the editor's Done should also upload (auto mode or its Upload button)
 };
 
 void Capture_Init();  // creates the (hidden) overlay window up front so the first capture is instant

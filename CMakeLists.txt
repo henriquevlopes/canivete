@@ -26,6 +26,7 @@ add_executable(Canivete WIN32
     src/maint_ops.cpp
     src/maint_info.cpp
     src/update.cpp
+    src/upload.cpp
     res/canivete.rc
     res/app.manifest
 )
@@ -38,4 +39,4 @@ target_link_options(Canivete PRIVATE $<$<CONFIG:Release>:/LTCG /OPT:REF /OPT:ICF
 target_link_libraries(Canivete PRIVATE
     user32 gdi32 shell32 ole32 windowscodecs dwmapi shcore shlwapi comctl32 advapi32
     mfplat mfreadwrite mfuuid mf wuguid oleaut32 setupapi uxtheme
-    wbemuuid cfgmgr32 winhttp bcrypt)
+    wbemuuid cfgmgr32 winhttp bcrypt crypt32 ws2_32)

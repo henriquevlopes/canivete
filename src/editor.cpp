@@ -60,7 +60,7 @@ struct Shape {
     float scale = 1;  // text and markers: stretched by their corner handles
 };
 
-enum class Item { Tool, Color, Size, Undo, Redo, Copy, Save, Alpha, Done };
+enum class Item { Tool, Color, Size, Undo, Redo, Copy, Save, Alpha, Upload, Done };
 struct ItemRect {
     Item kind;
     int index;
@@ -605,6 +605,7 @@ void Layout(Editor& e) {
     add(Item::Copy, 0, btn);
     add(Item::Save, 0, btn);
     add(Item::Alpha, 0, btn);
+    add(Item::Upload, 0, btn);
     x += e.Px(6);
     add(Item::Done, 0, e.Px(78));
 
@@ -742,6 +743,11 @@ const wchar_t* Tip(const Editor& e, int i) {
     case Item::Copy: return L"Copy to the clipboard  (Ctrl+C)";
     case Item::Save: return L"Save to the screenshot file  (Ctrl+S)";
     case Item::Alpha: return L"Make alpha: turn details into a white-on-black square for Substance  (M)";
+    case Item::Upload: {
+        static std::wstring tip;
+        tip = L"Copy, save, upload to " + Upload_ServiceName() + L", copy the link and close  (U)";
+        return tip.c_str();
+    }
     case Item::Done: return L"Copy, save and close  (Enter)";
     }
     return nullptr;
@@ -871,6 +877,9 @@ void Paint(Editor& e, HDC hdc) {
                 break;
             case Item::Save:
                 Glyph(e, b, L"\xE74E", r, true);
+                break;
+            case Item::Upload:
+                Glyph(e, b, L"\xE898", r, true);
                 break;
             case Item::Alpha: {
                 HGDIOBJ old = SelectObject(b, e.bold);
@@ -1039,10 +1048,11 @@ void SaveNow(Editor& e) {
     ShowStatus(e, L"Saved  " + p);
 }
 
-void Done(Editor& e) {
+void Done(Editor& e, bool upload = false) {
     FinishText(e);
     auto r = std::make_shared<CaptureResult>(*e.src);
     r->img = CurrentImage(e);
+    r->autoUpload = r->autoUpload || upload;
     Output_EditDone(std::move(r), e.path);
     e.dirty = false;
     DestroyWindow(e.hwnd);
@@ -1079,6 +1089,7 @@ void Click(Editor& e, const ItemRect& it) {
     case Item::Copy: CopyNow(e); break;
     case Item::Save: SaveNow(e); break;
     case Item::Alpha: MakeAlpha(e); break;
+    case Item::Upload: Done(e, true); return;
     case Item::Done: Done(e); return;
     }
     Redraw(e);
@@ -1308,6 +1319,9 @@ void OnKey(Editor& e, UINT vk) {
         });
     } else if (vk == 'M') {
         MakeAlpha(e);
+        return;
+    } else if (vk == 'U') {
+        Done(e, true);
         return;
     } else if (vk >= '1' && vk < '1' + kColorCount) {
         SetColor(e, static_cast<int>(vk - '1'));

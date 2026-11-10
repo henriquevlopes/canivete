@@ -9,6 +9,7 @@
 
 #include <commctrl.h>
 #include <windowsx.h>
+#include <shellapi.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
 #include <wrl/client.h>
@@ -85,7 +86,27 @@ enum : int {
     IDC_MAINTDAILY,
     IDC_CHECKUPD,
     IDC_UPDNOW,
-    IDC_OFFNOTE0 = 300,  // "Turned off" notes 300..305, one per Feature
+    IDC_UPSERVICE,
+    IDC_UPHELP,
+    IDC_UPSHOTS,
+    IDC_UPGIF,
+    IDC_UPVIDEO,
+    IDC_DRVID,
+    IDC_DRVSECRET,
+    IDC_DRVCONNECT,
+    IDC_DRVSTATUS,
+    IDC_DRVFOLDER,
+    IDC_DRVSHARE,
+    IDC_S3BUCKET,
+    IDC_S3REGION,
+    IDC_S3PREFIX,
+    IDC_S3KEYID,
+    IDC_S3SECRET,
+    IDC_S3LINK,
+    IDC_S3PRIVATE,
+    IDC_S3TEST,
+    IDC_S3STATUS,
+    IDC_OFFNOTE0 = 300,  // "Turned off" notes 300..307, one per Feature
 };
 
 const wchar_t* const kHkNames[kHotkeyCount] = {L"Region screenshot", L"Window screenshot", L"Full screenshot",
@@ -104,6 +125,9 @@ const TabDef kTabs[] = {
     {L"Color picker", kFeatColor, L"Pick any color on the screen and copy its value."},
     {L"GIF recording", kFeatGif, L"Record an area of the screen as an animated GIF. You pick the size afterwards."},
     {L"Video recording", kFeatVideo, L"Record an area of the screen as an MP4 video. You pick the size afterwards."},
+    {L"Uploads", kFeatUpload,
+     L"Put screenshots, GIFs and videos on Google Drive or Amazon S3 and copy the link: with the Upload "
+     L"buttons, or by itself."},
     {L"Image tools", kFeatImages,
      L"Resize, convert, rotate and copy pictures: from the tray menu, Send to, and Explorer's right-click menu "
      L"(Show more options → Canivete)."},
@@ -123,6 +147,7 @@ struct Ctl {
     int font;
     int tab;      // -1 = always shown (tab list, footer)
     bool header;  // title, description and switch: stay enabled when the feature is off
+    int group;    // Uploads tab: 0 = always, 1 = Google Drive only, 2 = Amazon S3 only
 };
 
 struct UI {
@@ -133,6 +158,8 @@ struct UI {
     std::vector<Ctl> ctls;
     int buildTab = -1;
     bool buildHeader = false;
+    int buildGroup = 0;
+    bool driveBad = false, s3Bad = false;  // their status line shows an error (red)
     int maxY = 0, footerY = 0, height = 0;
     int tab = 0;
     HWND lastFocus = nullptr;
@@ -179,7 +206,7 @@ HWND Add(const wchar_t* cls, const wchar_t* text, DWORD style, int id, int x, in
          int font = kFontNormal) {
     HWND c = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0, U.hwnd,
                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hinst, nullptr);
-    U.ctls.push_back({c, x, y, w, h, font, U.buildTab, U.buildHeader});
+    U.ctls.push_back({c, x, y, w, h, font, U.buildTab, U.buildHeader, U.buildGroup});
     U.maxY = std::max(U.maxY, y + std::min(h, 34));  // (a combo box's height includes its drop-down list)
     return c;
 }
@@ -322,12 +349,70 @@ void Build() {
     y += 26;
     Check(IDC_VMIC, L"Record the microphone", y);
 
+    // Uploads
+    y = BeginTab(kSettingsTabUploads);
+    Label(L"Upload to", y);
+    HWND svc = Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, IDC_UPSERVICE, kCX, y, 170, 200);
+    SendMessageW(svc, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Google Drive"));
+    SendMessageW(svc, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Amazon S3"));
+    Button(IDC_UPHELP, L"How to set it up…", kR - 140, y - 1, 140, 26);
+    y += 36;
+    Label(L"Upload by itself", y);
+    Add(WC_BUTTONW, L"Screenshots", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_UPSHOTS, kCX, y + 2, 110, 20);
+    Add(WC_BUTTONW, L"GIFs", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_UPGIF, kCX + 116, y + 2, 70, 20);
+    Add(WC_BUTTONW, L"Videos", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_UPVIDEO, kCX + 192, y + 2, 90, 20);
+    y += 32;
+    const int y0 = y;
+    U.buildGroup = 1;  // Google Drive
+    Label(L"Client ID", y);
+    Edit(IDC_DRVID, kCX, y, kFW);
+    y += 32;
+    Label(L"Client secret", y);
+    Edit(IDC_DRVSECRET, kCX, y, kFW, ES_PASSWORD);
+    y += 32;
+    Label(L"Account", y);
+    Button(IDC_DRVCONNECT, L"Connect…", kCX, y - 1, 104, 26);
+    Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDC_DRVSTATUS, kCX + 112, y + 4, kFW - 112, 18);
+    y += 34;
+    Label(L"Drive folder", y);
+    SendMessageW(Edit(IDC_DRVFOLDER, kCX, y, 200), EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"My Drive itself"));
+    y += 32;
+    Add(WC_BUTTONW, L"Anyone with the link can view", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_DRVSHARE, kCX, y, kFW, 20);
+    y = y0;
+    U.buildGroup = 2;  // Amazon S3
+    Label(L"Bucket", y);
+    Edit(IDC_S3BUCKET, kCX, y, 170);
+    Add(WC_STATICW, L"Region", SS_RIGHT | SS_NOPREFIX, IDC_STATIC, kCX + 172, y + 4, 52, 18);
+    SendMessageW(Edit(IDC_S3REGION, kCX + 230, y, kFW - 230), EM_SETCUEBANNER, TRUE,
+                 reinterpret_cast<LPARAM>(L"eu-west-1"));
+    y += 32;
+    Label(L"Folder", y);
+    SendMessageW(Edit(IDC_S3PREFIX, kCX, y, kFW), EM_SETCUEBANNER, TRUE,
+                 reinterpret_cast<LPARAM>(L"The top of the bucket"));
+    y += 32;
+    Label(L"Access key ID", y);
+    Edit(IDC_S3KEYID, kCX, y, kFW);
+    y += 32;
+    Label(L"Secret key", y);
+    Edit(IDC_S3SECRET, kCX, y, kFW, ES_PASSWORD);
+    y += 32;
+    Label(L"Link address", y);
+    SendMessageW(Edit(IDC_S3LINK, kCX, y, kFW), EM_SETCUEBANNER, TRUE,
+                 reinterpret_cast<LPARAM>(L"Optional: https://files.example.com"));
+    y += 32;
+    Add(WC_BUTTONW, L"Private bucket: links work for 7 days", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_S3PRIVATE, kCX, y + 3,
+        kFW - 92, 20);
+    Button(IDC_S3TEST, L"Test", kR - 84, y, 84, 26);
+    y += 30;
+    Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDC_S3STATUS, kCX, y, kFW, 18);
+    U.buildGroup = 0;
+
     // Image tools, Renamer
-    y = BeginTab(5);
+    y = BeginTab(kSettingsTabUploads + 1);
     Button(IDC_OPENRESIZE, L"Open Resize images…", kL, y, 170, 28);
-    y = BeginTab(6);
+    y = BeginTab(kSettingsTabUploads + 2);
     Button(IDC_OPENRENAME, L"Open Rename files…", kL, y, 170, 28);
-    y = BeginTab(7);
+    y = BeginTab(kSettingsTabUploads + 3);
     Button(IDC_OPENMAINT, L"Open Maintenance…", kL, y, 170, 28);
     y += 44;
     Check(IDC_MAINTDAILY, L"Check once a day and tell me when something needs doing", y);
@@ -381,10 +466,15 @@ void ShowOffNote() {
         ShowWindow(Item(IDC_OFFNOTE0 + f), kTabs[U.tab].feature == f && !U.on[f] ? SW_SHOWNA : SW_HIDE);
 }
 
+// Which service's boxes the Uploads tab shows: 1 Google Drive, 2 Amazon S3.
+int UploadGroup() { return SendMessageW(Item(IDC_UPSERVICE), CB_GETCURSEL, 0, 0) == 1 ? 2 : 1; }
+
 void ShowTab(int t) {
     U.tab = g_lastTab = std::clamp(t, 0, kTabCount - 1);
+    const int group = UploadGroup();
     for (const Ctl& c : U.ctls)
-        if (c.tab >= 0) ShowWindow(c.wnd, c.tab == U.tab ? SW_SHOWNA : SW_HIDE);
+        if (c.tab >= 0)
+            ShowWindow(c.wnd, c.tab == U.tab && (!c.group || c.group == group) ? SW_SHOWNA : SW_HIDE);
     if (SendMessageW(U.nav, LB_GETCURSEL, 0, 0) != U.tab) SendMessageW(U.nav, LB_SETCURSEL, U.tab, 0);
     HWND f = GetFocus();
     if (f && IsChild(U.hwnd, f) && !IsWindowVisible(f)) SetFocus(U.nav);
@@ -600,6 +690,93 @@ void Toggle(int f) {
     CheckHotkeys();
 }
 
+// Secret boxes stay empty: typing replaces the saved secret, which is never shown again.
+void SecretBoxes() {
+    const std::pair<int, const wchar_t*> boxes[] = {{IDC_DRVSECRET, L"DriveClientSecret"}, {IDC_S3SECRET, L"S3SecretKey"}};
+    for (const auto& [id, name] : boxes) {
+        SetWindowTextW(Item(id), L"");
+        SendMessageW(Item(id), EM_SETCUEBANNER, TRUE,
+                     reinterpret_cast<LPARAM>(Upload_LoadSecret(name).empty() ? L"Paste it here"
+                                                                               : L"Saved (type to replace)"));
+    }
+}
+
+void DriveStatus(const std::wstring& error) {
+    std::wstring text;
+    const std::wstring account = Upload_DriveAccount();
+    if (!error.empty()) text = error;
+    else if (Upload_DriveConnecting()) text = L"Waiting for the browser: sign in and allow access…";
+    else if (!account.empty()) text = L"Connected: " + account;
+    else text = L"Not connected";
+    U.driveBad = !error.empty();
+    SetWindowTextW(Item(IDC_DRVSTATUS), text.c_str());
+    SetWindowTextW(Item(IDC_DRVCONNECT), account.empty() ? L"Connect…" : L"Disconnect");
+    EnableWindow(Item(IDC_DRVCONNECT), !Upload_DriveConnecting() && U.on[kFeatUpload]);
+    InvalidateRect(Item(IDC_DRVSTATUS), nullptr, TRUE);
+}
+
+void S3Status(const std::wstring& text, bool bad) {
+    U.s3Bad = bad;
+    SetWindowTextW(Item(IDC_S3STATUS), text.c_str());
+    InvalidateRect(Item(IDC_S3STATUS), nullptr, TRUE);
+}
+
+void UploadHelp() {
+    if (UploadGroup() == 1) {
+        const int r = MessageBoxW(
+            U.hwnd,
+            L"One-time setup, about 5 minutes, in your own Google account:\n\n"
+            L"1. Open console.cloud.google.com and make a project (any name, e.g. Canivete).\n"
+            L"2. APIs & Services → Library → Google Drive API → Enable.\n"
+            L"3. Google Auth Platform (OAuth consent screen): app name Canivete, your e-mail, audience "
+            L"External.\n"
+            L"4. Audience → Publish app (In production). Important: while it stays in Testing, Google signs "
+            L"Canivete out every 7 days. It doesn't need Google's verification for your own use: the first "
+            L"sign-in shows a warning, click Advanced → Go to Canivete.\n"
+            L"5. Clients → Create client → Desktop app. Copy its Client ID and Client secret into these boxes.\n"
+            L"6. Click Connect… and allow access in the browser.\n\n"
+            L"Canivete only sees the files it uploads itself, in the Drive folder set here.\n\n"
+            L"Open the Google Cloud console now?",
+            L"Google Drive uploads", MB_YESNO | MB_ICONINFORMATION);
+        if (r == IDYES)
+            ShellExecuteW(U.hwnd, L"open", L"https://console.cloud.google.com/apis/credentials", nullptr, nullptr,
+                          SW_SHOWNORMAL);
+        return;
+    }
+    std::wstring bucket = Trim(GetText(IDC_S3BUCKET)), prefix = Trim(GetText(IDC_S3PREFIX));
+    if (bucket.empty()) bucket = L"YOUR-BUCKET";
+    while (!prefix.empty() && (prefix.front() == L'/' || prefix.front() == L'\\')) prefix.erase(0, 1);
+    if (!prefix.empty() && prefix.back() != L'/') prefix += L'/';
+    const std::wstring policy =
+        L"{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:PutObject\","
+        L"\"s3:GetObject\"],\"Resource\":\"arn:aws:s3:::" +
+        bucket + L"/" + prefix + L"*\"}]}";
+    const int r = MessageBoxW(
+        U.hwnd,
+        (L"One-time setup in the AWS console:\n\n"
+         L"1. S3 → Create bucket, in a region near you (e.g. eu-west-1). Put the bucket name and region here.\n"
+         L"2. Public links: allow public reads of the folder (bucket policy, or CloudFront: put its address in "
+         L"Link address). Or keep the bucket private and tick Private bucket: links then work for 7 days.\n"
+         L"3. IAM → Users → Create user (e.g. canivete-upload), without console access.\n"
+         L"4. Give it an inline policy that only allows this folder of this bucket:\n" +
+         policy +
+         L"\n5. Security credentials → Create access key (\"Application running outside AWS\"). Copy the key ID "
+         L"and secret key here. This kind of key doesn't expire. Don't use temporary keys (from SSO or a role): "
+         L"they stop working after a few hours.\n6. Click Test.\n\nCopy the policy to the clipboard?")
+            .c_str(),
+        L"Amazon S3 uploads", MB_YESNO | MB_ICONINFORMATION);
+    if (r == IDYES && OpenClipboard(U.hwnd)) {
+        EmptyClipboard();
+        const size_t bytes = (policy.size() + 1) * sizeof(wchar_t);
+        if (HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+            memcpy(GlobalLock(g), policy.c_str(), bytes);
+            GlobalUnlock(g);
+            if (!SetClipboardData(CF_UNICODETEXT, g)) GlobalFree(g);
+        }
+        CloseClipboard();
+    }
+}
+
 void Populate() {
     const Settings& s = g_settings;
     for (int f = 0; f < kFeatCount; ++f) U.on[f] = s.features[f];
@@ -631,8 +808,23 @@ void Populate() {
     SetCheck(IDC_AUTOSTART, AutostartEnabled());
     SetCheck(IDC_CHECKUPD, s.checkUpdates);
     SetCheck(IDC_MAINTDAILY, s.maintDaily);
+    SendMessageW(Item(IDC_UPSERVICE), CB_SETCURSEL, s.uploadService == L"s3" ? 1 : 0, 0);
+    SetCheck(IDC_UPSHOTS, s.uploadShots);
+    SetCheck(IDC_UPGIF, s.uploadGif);
+    SetCheck(IDC_UPVIDEO, s.uploadVideo);
+    SetWindowTextW(Item(IDC_DRVID), s.driveClientId.c_str());
+    SetWindowTextW(Item(IDC_DRVFOLDER), s.driveFolder.c_str());
+    SetCheck(IDC_DRVSHARE, s.driveShare);
+    SetWindowTextW(Item(IDC_S3BUCKET), s.s3Bucket.c_str());
+    SetWindowTextW(Item(IDC_S3REGION), s.s3Region.c_str());
+    SetWindowTextW(Item(IDC_S3PREFIX), s.s3Prefix.c_str());
+    SetWindowTextW(Item(IDC_S3KEYID), s.s3KeyId.c_str());
+    SetWindowTextW(Item(IDC_S3LINK), s.s3LinkBase.c_str());
+    SetCheck(IDC_S3PRIVATE, s.s3Private);
+    SecretBoxes();
     CheckHotkeys();
     UpdateEnable();
+    DriveStatus(L"");
     UpdateExample();
     InvalidateRect(U.hwnd, nullptr, TRUE);
 }
@@ -662,12 +854,39 @@ void Apply() {
     s.maintDaily = Checked(IDC_MAINTDAILY);
     const LRESULT cf = SendMessageW(Item(IDC_COLORFMT), CB_GETCURSEL, 0, 0);
     if (cf >= 0 && cf < static_cast<LRESULT>(std::size(kColorFormats))) s.colorFormat = kColorFormats[cf].key;
+    s.uploadService = UploadGroup() == 2 ? L"s3" : L"drive";
+    s.uploadShots = Checked(IDC_UPSHOTS);
+    s.uploadGif = Checked(IDC_UPGIF);
+    s.uploadVideo = Checked(IDC_UPVIDEO);
+    s.driveClientId = Trim(GetText(IDC_DRVID));
+    s.driveFolder = Trim(GetText(IDC_DRVFOLDER));
+    s.driveShare = Checked(IDC_DRVSHARE);
+    s.s3Bucket = Trim(GetText(IDC_S3BUCKET));
+    s.s3Region = Trim(GetText(IDC_S3REGION));
+    for (auto& c : s.s3Region) c = static_cast<wchar_t>(towlower(c));
+    s.s3Prefix = Trim(GetText(IDC_S3PREFIX));
+    s.s3KeyId = Trim(GetText(IDC_S3KEYID));
+    s.s3LinkBase = Trim(GetText(IDC_S3LINK));
+    s.s3Private = Checked(IDC_S3PRIVATE);
+    // A new Client ID belongs with a new sign-in.
+    if (s.driveClientId != g_settings.driveClientId && !Upload_DriveAccount().empty()) Upload_DriveDisconnect();
+    const std::pair<int, const wchar_t*> secrets[] = {{IDC_DRVSECRET, L"DriveClientSecret"},
+                                                      {IDC_S3SECRET, L"S3SecretKey"}};
+    bool newSecret = false;
+    for (const auto& [id, name] : secrets) {
+        const std::wstring v = Trim(GetText(id));
+        if (v.empty()) continue;
+        Upload_SaveSecret(name, v);
+        newSecret = true;
+    }
+    if (newSecret) SecretBoxes();
     SaveSettings(s);
     const bool autostart = Checked(IDC_AUTOSTART);
     if (autostart != AutostartEnabled()) SetAutostart(autostart);
     Settings_Applied();
     SetDlgItemInt(U.hwnd, IDC_QUALITY, s.jpegQuality, FALSE);
     CheckHotkeys();
+    DriveStatus(L"");
 }
 
 // ---- drawing the tab list and the On switches ----------------------------------------------
@@ -923,6 +1142,8 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             br = U.focusBrush;
         } else if (id >= IDC_HKST0 && id < IDC_HKST0 + kHotkeyCount) {
             fg = U.bad[id - IDC_HKST0] ? kRed : kGrey;
+        } else if (id == IDC_DRVSTATUS || id == IDC_S3STATUS) {
+            fg = (id == IDC_DRVSTATUS ? U.driveBad : U.s3Bad) ? kRed : kGrey;
         } else if (id == IDC_HINT || id == IDC_EXAMPLE || id == IDC_DESC ||
                    (id >= IDC_OFFNOTE0 && id < IDC_OFFNOTE0 + static_cast<int>(kFeatCount))) {
             fg = kGrey;
@@ -1000,6 +1221,38 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_UPDNOW:
             Update_Check(true);
             break;
+        case IDC_UPSERVICE:
+            if (code == CBN_SELCHANGE) ShowTab(U.tab);
+            break;
+        case IDC_UPHELP:
+            UploadHelp();
+            break;
+        case IDC_DRVCONNECT:
+            if (!Upload_DriveAccount().empty()) {
+                Upload_DriveDisconnect();
+                DriveStatus(L"");
+                break;
+            }
+            Apply();
+            if (g_settings.driveClientId.empty() || Upload_LoadSecret(L"DriveClientSecret").empty()) {
+                DriveStatus(L"Fill in the Client ID and Client secret first (How to set it up…).");
+                break;
+            }
+            Upload_DriveConnect();
+            DriveStatus(L"");
+            break;
+        case IDC_S3TEST: {
+            Apply();
+            const Settings& s = g_settings;
+            if (s.s3Bucket.empty() || s.s3Region.empty() || s.s3KeyId.empty() ||
+                Upload_LoadSecret(L"S3SecretKey").empty()) {
+                S3Status(L"Fill in the bucket, region, access key ID and secret key first.", true);
+                break;
+            }
+            S3Status(L"Testing…", false);
+            Upload_S3Test();
+            break;
+        }
         }
         return 0;
     }
@@ -1051,9 +1304,16 @@ bool SettingsUI_Key(const MSG& m) {
     return true;
 }
 
-void SettingsUI_Show() {
+void SettingsUI_UploadStatus(const std::wstring& error) {
+    if (!U.hwnd) return;
+    if (UploadGroup() == 2) S3Status(error.empty() ? L"It works: a test file went up." : error, !error.empty());
+    else DriveStatus(error);
+}
+
+void SettingsUI_Show(int tab) {
     if (U.hwnd) {
         if (IsIconic(U.hwnd)) ShowWindow(U.hwnd, SW_RESTORE);
+        if (tab >= 0) ShowTab(tab);
         SetForegroundWindow(U.hwnd);
         return;
     }
@@ -1082,7 +1342,7 @@ void SettingsUI_Show() {
     const int y = w.top + std::max(0L, (w.bottom - w.top - sz.cy) / 2);
     SetWindowPos(h, nullptr, x, y, sz.cx, sz.cy, SWP_NOZORDER | SWP_NOACTIVATE);
     Populate();
-    ShowTab(g_lastTab);
+    ShowTab(tab >= 0 ? tab : g_lastTab);
     ShowWindow(h, SW_SHOW);
     SetForegroundWindow(h);
 }

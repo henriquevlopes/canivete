@@ -27,7 +27,7 @@ constexpr int kVideoFps = 30;
 constexpr uint64_t kMaxBytes = 4ull << 30;    // the recording stops itself at 4 GB of changes
 constexpr COLORREF kRed = RGB(232, 44, 56);
 constexpr DWORD kExcludeFromCapture = 0x11;   // WDA_EXCLUDEFROMCAPTURE
-enum { IDC_STOP = 101, IDC_CANCELREC = 102, IDC_PRESET0 = 110, IDC_DISCARD = 120, IDC_INFO = 121 };
+enum { IDC_STOP = 101, IDC_CANCELREC = 102, IDC_PRESET0 = 110, IDC_DISCARD = 120, IDC_INFO = 121, IDC_UPLOADTOO = 122 };
 constexpr UINT_PTR kTimerTick = 1, kTimerTestStop = 2;
 
 double NowMs() {
@@ -359,8 +359,11 @@ void SaveChoice(int i) {
             R.rec->soundInfo.empty() ? L"off" : R.rec->soundInfo.c_str(), path.c_str());
     } else
         Log(L"GIF saved (%s, %s) -> %s", PresetKey(i), SizeText(e.size).c_str(), path.c_str());
-    Tray_Notify(video ? L"Video saved" : L"GIF saved", path.substr(path.find_last_of(L'\\') + 1) + L"  (" + what +
-                                                           L")\nCopied: paste it into a chat or a folder.");
+    HWND up = GetDlgItem(R.save, IDC_UPLOADTOO);
+    if (up && SendMessageW(up, BM_GETCHECK, 0, 0) == BST_CHECKED) Upload_File(path, false);  // its own notices
+    else
+        Tray_Notify(video ? L"Video saved" : L"GIF saved", path.substr(path.find_last_of(L'\\') + 1) + L"  (" + what +
+                                                               L")\nCopied: paste it into a chat or a folder.");
     DestroyWindow(R.save);
 }
 
@@ -383,6 +386,12 @@ LRESULT CALLBACK SaveProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (id >= IDC_PRESET0 && id < IDC_PRESET0 + kGifPresetCount) SaveChoice(id - IDC_PRESET0);
         else if (id == IDOK) SaveChoice(R.def);
         else if (id == IDC_DISCARD || id == IDCANCEL) Discard();
+        else if (id == IDC_UPLOADTOO && HIWORD(wp) == BN_CLICKED) {  // remembered for next time
+            const bool on = SendMessageW(reinterpret_cast<HWND>(lp), BM_GETCHECK, 0, 0) == BST_CHECKED;
+            const bool video = SavingVideo();
+            (video ? g_settings.uploadVideo : g_settings.uploadGif) = on;
+            SaveSettingValue(L"Upload", video ? L"AutoVideo" : L"AutoGif", on ? L"1" : L"0");
+        }
         return 0;
     }
     case WM_CLOSE:
@@ -415,7 +424,9 @@ void OpenSaveWindow() {
     const UINT dpi = DpiAt(area);
     R.scale = dpi / 96.0;
     const int W = Px(470), pad = Px(16), btnH = Px(58);
-    const int H = pad + Px(24) + Px(8) + kGifPresetCount * (btnH + Px(6)) + Px(10) + Px(28) + pad;
+    const bool canUpload = Upload_Ready();
+    const int H = pad + Px(24) + Px(8) + kGifPresetCount * (btnH + Px(6)) + (canUpload ? Px(30) : 0) + Px(10) +
+                  Px(28) + pad;
     RECT wr{0, 0, W, H};
     const DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU, ex = WS_EX_DLGMODALFRAME;
     AdjustWindowRectExForDpi(&wr, style, FALSE, ex, dpi);
@@ -448,6 +459,14 @@ void OpenSaveWindow() {
         SendMessageW(b, WM_SETFONT, reinterpret_cast<WPARAM>(R.saveFont), FALSE);
         SendMessageW(b, BCM_SETNOTE, 0, reinterpret_cast<LPARAM>(Note(i).c_str()));
         by += btnH + Px(6);
+    }
+    if (canUpload) {
+        const std::wstring label = L"Also upload to " + Upload_ServiceName() + L" and copy the link";
+        HWND c = CreateWindowExW(0, WC_BUTTONW, label.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                 pad, by + Px(2), W - 2 * pad, Px(24), R.save,
+                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_UPLOADTOO)), g_hinst, nullptr);
+        SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(R.saveFont), FALSE);
+        if (Upload_Auto(rec.video ? UploadKind::Video : UploadKind::Gif)) SendMessageW(c, BM_SETCHECK, BST_CHECKED, 0);
     }
     HWND d = CreateWindowExW(0, WC_BUTTONW, L"Discard", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                              W - pad - Px(100), H - pad - Px(28), Px(100), Px(28), R.save,

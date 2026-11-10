@@ -7,6 +7,7 @@
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <wincodec.h>
+#include <windowsx.h>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -214,7 +215,16 @@ struct Toast {
     std::shared_ptr<CaptureResult> last;  // the capture shown, so a click can open it in the editor
     double scale = 1;
     int alpha = 0;
+    bool canUpload = false;  // shows the Upload button
+    bool overUpload = false;
+    RECT uploadRect{};
 } T;
+
+void UploadShown() {
+    std::shared_ptr<CaptureResult> last = T.last;
+    if (!T.path.empty()) Upload_File(T.path, false);
+    else if (last) Upload_Image(last->img, *last);
+}
 
 void ToastHide() {
     KillTimer(T.hwnd, kTimerHold);
@@ -241,7 +251,27 @@ void ToastPaint(HDC dc) {
                                DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     SetBkMode(dc, TRANSPARENT);
     RECT r1{pad, T.thumbRect.bottom + pad / 2, rc.right - pad, T.thumbRect.bottom + pad / 2 + lineH};
-    HGDIOBJ old = SelectObject(dc, bold);
+    T.uploadRect = {};
+    HGDIOBJ old = SelectObject(dc, normal);
+    if (T.canUpload) {
+        const wchar_t* label = L"Upload";
+        SIZE ts{};
+        GetTextExtentPoint32W(dc, label, 6, &ts);
+        const int bw = ts.cx + pad, bh = lineH + static_cast<int>(std::lround(2 * T.scale));
+        T.uploadRect = {r1.right - bw, r1.top - 1, r1.right, r1.top - 1 + bh};
+        const int round = static_cast<int>(std::lround(8 * T.scale));
+        SetDCBrushColor(dc, T.overUpload ? RGB(0, 103, 192) : RGB(62, 62, 62));
+        SetDCPenColor(dc, T.overUpload ? RGB(0, 120, 215) : RGB(96, 96, 96));
+        HGDIOBJ ob = SelectObject(dc, GetStockObject(DC_BRUSH)), op = SelectObject(dc, GetStockObject(DC_PEN));
+        RoundRect(dc, T.uploadRect.left, T.uploadRect.top, T.uploadRect.right, T.uploadRect.bottom, round, round);
+        SelectObject(dc, ob);
+        SelectObject(dc, op);
+        SetTextColor(dc, RGB(255, 255, 255));
+        RECT lr = T.uploadRect;
+        DrawTextW(dc, label, -1, &lr, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+        r1.right = T.uploadRect.left - pad / 2;
+    }
+    SelectObject(dc, bold);
     SetTextColor(dc, RGB(255, 255, 255));
     DrawTextW(dc, T.line1.c_str(), -1, &r1, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
     RECT r2{pad, r1.bottom, rc.right - pad, r1.bottom + lineH};
@@ -264,13 +294,36 @@ LRESULT CALLBACK ToastProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
-    case WM_MOUSEMOVE:  // keep it up while the mouse is on it
+    case WM_MOUSEMOVE: {  // keep it up while the mouse is on it
         KillTimer(h, kTimerFade);
         T.alpha = kAlphaFull;
         SetLayeredWindowAttributes(h, 0, static_cast<BYTE>(T.alpha), LWA_ALPHA);
         SetTimer(h, kTimerHold, 2500, nullptr);
+        const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        const bool over = T.canUpload && PtInRect(&T.uploadRect, pt);
+        if (over != T.overUpload) {
+            T.overUpload = over;
+            InvalidateRect(h, nullptr, FALSE);
+            if (over) {  // to notice when the mouse leaves the window
+                TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, h, 0};
+                TrackMouseEvent(&tme);
+            }
+        }
         return 0;
-    case WM_LBUTTONUP: {  // click = edit the screenshot
+    }
+    case WM_MOUSELEAVE:
+        if (T.overUpload) {
+            T.overUpload = false;
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return 0;
+    case WM_LBUTTONUP: {  // click = edit the screenshot; the Upload button uploads it
+        const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (T.canUpload && PtInRect(&T.uploadRect, pt)) {
+            UploadShown();
+            ToastHide();
+            return 0;
+        }
         std::shared_ptr<CaptureResult> last = T.last;
         const std::wstring path = T.path;
         ToastHide();
@@ -328,6 +381,8 @@ void ToastShow(const CaptureResult& r, const std::wstring& path, bool copied) {
     const int H = pad + th + pad / 2 + 2 * lineH + pad;
     T.thumbRect = {pad + (innerW - tw) / 2, pad, pad + (innerW - tw) / 2 + tw, pad + th};
     T.path = path;
+    T.canUpload = Upload_Ready();
+    T.overUpload = false;
     T.line1 = copied && !path.empty() ? L"Copied and saved" : copied ? L"Copied to clipboard" : L"Saved";
     wchar_t sz[64];
     swprintf_s(sz, L"%d × %d", r.img.w, r.img.h);
@@ -356,6 +411,7 @@ void Output_ShowColor(COLORREF c, POINT at, const std::wstring& line1, const std
     r.screenRect = {at.x, at.y, at.x + 1, at.y + 1};
     ToastShow(r, L"", false);
     T.last.reset();
+    T.canUpload = false;
     T.line1 = line1;
     T.line2 = line2;
     InvalidateRect(T.hwnd, nullptr, FALSE);
@@ -413,7 +469,7 @@ void Output_Init() {
     T.hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED, kToastClass,
                              L"Canivete", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, g_hinst, nullptr);
     // Never let the notification itself end up in the next screenshot.
-    SetWindowDisplayAffinity(T.hwnd, WDA_EXCLUDEFROMCAPTURE);
+    if (!TestMode()) SetWindowDisplayAffinity(T.hwnd, WDA_EXCLUDEFROMCAPTURE);  // tests capture it to look at it
 }
 
 void Output_Process(std::unique_ptr<CaptureResult> r) {
@@ -454,12 +510,22 @@ void Output_OnDone(LPARAM lp) {
     std::unique_ptr<Job> job(reinterpret_cast<Job*>(lp));
     if (g_settings.copyToClipboard) SetClipboardImage(job->r->img, job->png);
     std::shared_ptr<CaptureResult> r(std::move(job->r));
+    const bool upload = Upload_Auto(UploadKind::Screenshot);
     if (g_settings.openEditor) {
+        r->autoUpload = upload;  // after editing, when Done is pressed
         Editor_Open(std::move(r), job->path);
         return;
     }
+    if (upload) {
+        if (!job->path.empty()) Upload_File(job->path, false);
+        else Upload_Image(r->img, *r);
+    }
     if (g_settings.showNotification) {
         ToastShow(*r, job->path, g_settings.copyToClipboard);
+        if (upload) {
+            T.canUpload = false;
+            T.line1 += L" · uploading";
+        }
         T.last = std::move(r);
     }
 }
@@ -515,8 +581,18 @@ void Output_EditDone(std::shared_ptr<CaptureResult> r, const std::wstring& path)
     SetClipboardImage(r->img, EncodePng(r->img));
     std::wstring saved;
     if (!path.empty() || g_settings.saveToFile) saved = Output_SaveImage(r->img, *r, path);
+    const bool upload = r->autoUpload;
+    r->autoUpload = false;
+    if (upload) {
+        if (!saved.empty()) Upload_File(saved, false);
+        else Upload_Image(r->img, *r);
+    }
     ToastShow(*r, saved, true);
     T.line1 = saved.empty() ? L"Edited image copied" : L"Edited image copied and saved";
+    if (upload) {
+        T.canUpload = false;
+        T.line1 += L" · uploading";
+    }
     T.last = std::move(r);
 }
 

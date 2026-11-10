@@ -22,6 +22,8 @@ constexpr UINT kCmdMaint = 97;
 constexpr UINT kCmdUpdate = 96;      // --check-update
 constexpr UINT kCmdMaintCheck = 95;  // --maint-check: the daily background check, now
 constexpr UINT kCmdClickNotice = 94; // --click-notice (test copy): as if the last notice was clicked
+constexpr UINT kCmdDriveConnect = 93;  // --drive-connect: Google Drive sign-in (as the Settings button)
+constexpr UINT kCmdS3Test = 92;        // --s3-test: upload a small test file to S3
 constexpr UINT_PTR kTimerDeferred = 10;
 constexpr UINT_PTR kTimerResize = 11;
 constexpr UINT_PTR kTimerRename = 12;
@@ -31,6 +33,7 @@ constexpr UINT_PTR kTimerFirstCheck = 15;  // a few minutes after start
 constexpr ULONG_PTR kCopyResize = 0x52535A31;  // WM_COPYDATA tags: file list for the resizer
 constexpr ULONG_PTR kCopyRename = 0x524E4D31;  // ... and for the renamer
 constexpr ULONG_PTR kCopyAction = 0x41435431;  // ... and for a quick action (first entry = action name)
+constexpr ULONG_PTR kCopyUpload = 0x55504C31;  // ... and files to upload (--upload)
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
 UINT g_taskbarCreated = 0;
@@ -45,6 +48,11 @@ std::vector<std::pair<std::wstring, std::wstring>> g_actionQueue;  // (action, f
 
 // Queues a file list from the command line or another copy and starts the gather timer.
 void QueueList(ULONG_PTR tag, const std::vector<std::wstring>& entries) {
+    if (tag == kCopyUpload) {
+        for (const std::wstring& e : entries)
+            if (!e.empty()) Upload_File(e);
+        return;
+    }
     if (tag == kCopyAction) {
         if (entries.empty()) return;
         for (size_t i = 1; i < entries.size(); ++i)
@@ -233,6 +241,13 @@ void Tray_NotifyAction(const wchar_t* title, const std::wstring& text, std::func
     g_noticeClick = std::move(onClick);
 }
 
+void Tray_SetTip(const std::wstring& tip) {
+    if (TestMode()) return;  // no tray icon
+    g_nid.uFlags = NIF_TIP | NIF_SHOWTIP;
+    wcsncpy_s(g_nid.szTip, tip.empty() ? kAppName : tip.c_str(), _TRUNCATE);
+    Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+}
+
 std::wstring Settings_Applied() {
     LoadSettings();
     g_iniTime = IniTime();  // so the file watcher doesn't reload it a second time
@@ -399,6 +414,9 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP_UPDATE:
         Update_OnMessage(wp, lp);
         return 0;
+    case WM_APP_UPLOAD:
+        Upload_OnMessage(wp, lp);
+        return 0;
     case WM_APP_CAPTURE_DONE:
         Output_OnDone(lp);
         return 0;
@@ -412,6 +430,10 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             Update_Check(true);
         else if (wp == kCmdMaintCheck)
             Maint_Background(true);
+        else if (wp == kCmdDriveConnect)
+            Upload_DriveConnect();
+        else if (wp == kCmdS3Test)
+            Upload_S3Test();
         else if (wp == kCmdClickNotice && TestMode())
             SendMessageW(h, WM_APP_TRAY, 0, NIN_BALLOONUSERCLICK);
         else if (wp == kCmdAlreadyRunning)
@@ -419,7 +441,9 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_COPYDATA: {  // --resize / --rename / --do from another copy: ' '-separated entries
         const auto* cd = reinterpret_cast<const COPYDATASTRUCT*>(lp);
-        if (cd->dwData != kCopyResize && cd->dwData != kCopyRename && cd->dwData != kCopyAction) return FALSE;
+        if (cd->dwData != kCopyResize && cd->dwData != kCopyRename && cd->dwData != kCopyAction &&
+            cd->dwData != kCopyUpload)
+            return FALSE;
         std::vector<std::wstring> entries;
         const wchar_t* p = static_cast<const wchar_t*>(cd->lpData);
         const size_t n = cd->cbData / sizeof(wchar_t);
@@ -626,6 +650,8 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
         } else if (!_wcsicmp(argv[1], L"--do") && argc >= 3) {
             listTag = kCopyAction;
             list.push_back(argv[2]);
+        } else if (!_wcsicmp(argv[1], L"--upload") && argc >= 3) {
+            listTag = kCopyUpload;
         }
         if (listTag) {
             for (int i = listTag == kCopyAction ? 3 : 2; i < argc; ++i) {
@@ -646,6 +672,15 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
             SetAutostart(false);
             Log(L"--uninstall: Explorer entries, shortcuts and start with Windows removed");
             CoUninitialize();
+            return 0;
+        }
+        if (!_wcsicmp(argv[1], L"--upload-selftest")) {  // signing and secrets against known answers
+            LocalFree(argv);
+            return Upload_SelfTest();
+        }
+        if (!_wcsicmp(argv[1], L"--set-secret") && argc >= 4 && TestMode()) {  // test copy: name value
+            Upload_SaveSecret(argv[2], argv[3]);
+            LocalFree(argv);
             return 0;
         }
         if (!_wcsicmp(argv[1], L"--update-test")) {  // download and check the latest release, install nothing
@@ -710,11 +745,17 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
         else if (!_wcsicmp(argv[1], L"--check-update")) cmd = kCmdUpdate;
         else if (!_wcsicmp(argv[1], L"--maint-check")) cmd = kCmdMaintCheck;
         else if (!_wcsicmp(argv[1], L"--click-notice")) cmd = kCmdClickNotice;
+        else if (!_wcsicmp(argv[1], L"--drive-connect")) cmd = kCmdDriveConnect;
+        else if (!_wcsicmp(argv[1], L"--s3-test")) cmd = kCmdS3Test;
     }
     LocalFree(argv);
 
     // One copy only. A second launch passes its command to the running one.
-    HANDLE mutex = CreateMutexW(nullptr, FALSE, TestMode() ? L"Local\\Canivete.Test" : L"Local\\Canivete.Running");
+    // Test copies with different test folders (parallel test runs) are not the same copy.
+    const std::wstring mutexName =
+        TestMode() ? L"Local\\Canivete.Test." + std::to_wstring(std::hash<std::wstring>{}(AppDataDir()))
+                   : std::wstring(L"Local\\Canivete.Running");
+    HANDLE mutex = CreateMutexW(nullptr, FALSE, mutexName.c_str());
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         if (listTag) {
             if (list.empty()) list.push_back(L"");  // still opens the window
