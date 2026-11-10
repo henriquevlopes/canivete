@@ -1,6 +1,8 @@
 // What happens after a capture: PNG/JPG encode (WIC) + save on a worker thread, then clipboard and a
 // small "saved" notification with a thumbnail on the main thread.
 #include "app.h"
+#include "fluent.h"
+#include "theme.h"
 
 #include <shellapi.h>
 #include <shellscalingapi.h>
@@ -244,54 +246,58 @@ void ToastHide() {
 void ToastPaint(HDC dc) {
     RECT rc;
     GetClientRect(T.hwnd, &rc);
-    SetDCBrushColor(dc, RGB(32, 32, 32));
-    FillRect(dc, &rc, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
-    SetDCBrushColor(dc, RGB(80, 80, 80));
-    FrameRect(dc, &rc, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+    const Palette& p = Pal();
+    const UINT dpi = static_cast<UINT>(std::lround(96 * T.scale));
+    // Drawn off screen, then copied: no flicker when the Upload button changes.
+    HDC mem = CreateCompatibleDC(dc);
+    HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
+    HGDIOBJ oldBmp = SelectObject(mem, bmp);
+    // Windows 11 flyout colors: the card color in dark mode, the window color in light mode.
+    const COLORREF bg = p.dark ? p.card : p.window;
+    SetDCBrushColor(mem, bg);
+    FillRect(mem, &rc, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+    if (!Fluent_IsWin11() || p.highContrast) {  // Windows 11 draws the thin border itself
+        SetDCBrushColor(mem, p.highContrast ? p.text : p.divider);
+        FrameRect(mem, &rc, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+    }
     if (T.thumb.dc)
-        BitBlt(dc, T.thumbRect.left, T.thumbRect.top, T.thumb.w, T.thumb.h, T.thumb.dc, 0, 0, SRCCOPY);
+        BitBlt(mem, T.thumbRect.left, T.thumbRect.top, T.thumb.w, T.thumb.h, T.thumb.dc, 0, 0, SRCCOPY);
     const int pad = static_cast<int>(std::lround(12 * T.scale));
     const int lineH = static_cast<int>(std::lround(20 * T.scale));
-    HFONT bold = CreateFontW(-static_cast<int>(std::lround(14 * T.scale)), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
-                             DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-    HFONT normal = CreateFontW(-static_cast<int>(std::lround(13 * T.scale)), 0, 0, 0, FW_NORMAL, 0, 0, 0,
-                               DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-    SetBkMode(dc, TRANSPARENT);
+    HFONT strong = Fluent_Font(kTypeBodyStrong, dpi), body = Fluent_Font(kTypeBody, dpi),
+          caption = Fluent_Font(kTypeCaption, dpi);
+    SetBkMode(mem, TRANSPARENT);
     RECT r1{pad, T.thumbRect.bottom + pad / 2, rc.right - pad, T.thumbRect.bottom + pad / 2 + lineH};
     T.uploadRect = {};
-    HGDIOBJ old = SelectObject(dc, normal);
+    HGDIOBJ old = SelectObject(mem, body);
     if (T.canUpload) {
         const wchar_t* label = L"Upload";
         SIZE ts{};
-        GetTextExtentPoint32W(dc, label, 6, &ts);
-        const int bw = ts.cx + pad, bh = lineH + static_cast<int>(std::lround(2 * T.scale));
-        T.uploadRect = {r1.right - bw, r1.top - 1, r1.right, r1.top - 1 + bh};
-        const int round = static_cast<int>(std::lround(8 * T.scale));
-        SetDCBrushColor(dc, T.overUpload ? RGB(0, 103, 192) : RGB(62, 62, 62));
-        SetDCPenColor(dc, T.overUpload ? RGB(0, 120, 215) : RGB(96, 96, 96));
-        HGDIOBJ ob = SelectObject(dc, GetStockObject(DC_BRUSH)), op = SelectObject(dc, GetStockObject(DC_PEN));
-        RoundRect(dc, T.uploadRect.left, T.uploadRect.top, T.uploadRect.right, T.uploadRect.bottom, round, round);
-        SelectObject(dc, ob);
-        SelectObject(dc, op);
-        SetTextColor(dc, RGB(255, 255, 255));
-        RECT lr = T.uploadRect;
-        DrawTextW(dc, label, -1, &lr, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+        GetTextExtentPoint32W(mem, label, 6, &ts);
+        const int bw = ts.cx + 2 * pad, bh = static_cast<int>(std::lround(28 * T.scale));
+        const int top = r1.top + (2 * lineH - bh) / 2;  // centered on the two lines of text
+        T.uploadRect = {r1.right - bw, top, r1.right, top + bh};
+        Fluent_DrawButton(mem, T.uploadRect, dpi, label, body, true, T.overUpload, false, true, false);
         r1.right = T.uploadRect.left - pad / 2;
     }
-    SelectObject(dc, bold);
-    SetTextColor(dc, RGB(255, 255, 255));
-    DrawTextW(dc, T.line1.c_str(), -1, &r1, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-    RECT r2{pad, r1.bottom, rc.right - pad, r1.bottom + lineH};
-    SelectObject(dc, normal);
-    SetTextColor(dc, RGB(180, 180, 180));
-    DrawTextW(dc, T.line2.c_str(), -1, &r2, DT_SINGLELINE | DT_VCENTER | DT_PATH_ELLIPSIS | DT_NOPREFIX);
-    SelectObject(dc, old);
-    DeleteObject(bold);
-    DeleteObject(normal);
+    SelectObject(mem, strong);
+    SetTextColor(mem, p.text);
+    DrawTextW(mem, T.line1.c_str(), -1, &r1, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+    RECT r2{pad, r1.bottom, r1.right, r1.bottom + lineH};
+    SelectObject(mem, caption);
+    SetTextColor(mem, p.text2);
+    DrawTextW(mem, T.line2.c_str(), -1, &r2, DT_SINGLELINE | DT_VCENTER | DT_PATH_ELLIPSIS | DT_NOPREFIX);
+    SelectObject(mem, old);
+    BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(mem);
 }
 
 LRESULT CALLBACK ToastProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;  // WM_PAINT covers it all
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(h, &ps);
@@ -401,6 +407,7 @@ void ToastShow(const CaptureResult& r, const std::wstring& path, bool copied) {
     KillTimer(T.hwnd, kTimerFade);
     T.alpha = kAlphaFull;
     SetLayeredWindowAttributes(T.hwnd, 0, static_cast<BYTE>(T.alpha), LWA_ALPHA);
+    Fluent_StylePopup(T.hwnd);  // rounded corners and the border color of the current theme
     SetWindowPos(T.hwnd, HWND_TOPMOST, x, y, W, H, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     InvalidateRect(T.hwnd, nullptr, FALSE);
     SetTimer(T.hwnd, kTimerHold, 2500, nullptr);
