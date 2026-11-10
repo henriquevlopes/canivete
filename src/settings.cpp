@@ -23,6 +23,7 @@ const wchar_t kDefaultIni[] =
     L"Video=1\r\n"
     L"ImageTools=1\r\n"
     L"Renamer=1\r\n"
+    L"Maintenance=1\r\n"
     L"\r\n"
     L"[Hotkeys]\r\n"
     L"RegionScreenshot=Ctrl+PrintScreen\r\n"

@@ -28,12 +28,13 @@ struct Hotkey {
 
 // Features that can be turned off in Settings (each tab's On switch). Off = no hotkeys, no tray menu
 // entries and no Explorer entries.
-enum Feature : int { kFeatShots, kFeatColor, kFeatGif, kFeatVideo, kFeatImages, kFeatRename, kFeatCount };
+enum Feature : int { kFeatShots, kFeatColor, kFeatGif, kFeatVideo, kFeatImages, kFeatRename, kFeatMaint, kFeatCount };
 inline constexpr const wchar_t* kFeatureKeys[kFeatCount] = {L"Screenshots", L"ColorPicker", L"Gif",
-                                                             L"Video",       L"ImageTools",  L"Renamer"};
+                                                             L"Video",       L"ImageTools",  L"Renamer",
+                                                             L"Maintenance"};
 
 struct Settings {
-    bool features[kFeatCount] = {true, true, true, true, true, true};
+    bool features[kFeatCount] = {true, true, true, true, true, true, true};
     std::wstring hkRegion, hkWindow, hkFull, hkColor, hkGif, hkVideo;
     std::wstring folder;    // empty = Windows "Screenshots" folder
     std::wstring fileName;  // pattern with %tokens
@@ -110,6 +111,11 @@ void Shell_Register();  // Explorer right-click and Send to entries for the resi
 void SettingsUI_Show();
 bool SettingsUI_Key(const MSG& m);  // Ctrl+Tab between tabs; true = handled
 HWND SettingsUI_Window();  // for IsDialogMessage, nullptr when closed
+
+// ---- maint.cpp / maint_ops.cpp --------------------------------------------------------------
+void Maint_Show(int tab = -1);  // tab: 0 Updates, 1 Cleanup, 2 Startup apps, 3 Health; -1 = last one
+HWND Maint_Window();
+int Maint_AdminMain(int argc, wchar_t** argv);  // --maint-admin: the elevated copy that runs one job
 
 // ---- 32-bit top-down DIB section with its own memory DC --------------------------------------
 struct Dib {

@@ -149,7 +149,28 @@ void Shell_Register() {
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
     const bool changed = RegisterMenu(exe);
 
+    // Start menu: Computer Maintenance.
     PWSTR dir = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Programs, 0, nullptr, &dir))) {
+        const std::wstring lnk = std::wstring(dir) + L"\\Computer Maintenance.lnk";
+        CoTaskMemFree(dir);
+        dir = nullptr;
+        if (!FeatureOn(kFeatMaint)) {
+            DeleteFileW(lnk.c_str());
+        } else if (changed || GetFileAttributesW(lnk.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            ComPtr<IShellLinkW> sl;
+            ComPtr<IPersistFile> pf;
+            if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&sl))) &&
+                SUCCEEDED(sl.As(&pf))) {
+                sl->SetPath(exe);
+                sl->SetArguments(L"--maintenance");
+                sl->SetIconLocation(exe, 0);
+                sl->SetDescription(L"Updates, cleanup and startup apps (Canivete)");
+                pf->Save(lnk.c_str(), TRUE);
+            }
+        }
+    }
+
     if (FAILED(SHGetKnownFolderPath(FOLDERID_SendTo, 0, nullptr, &dir))) return;
     const std::wstring sendTo = dir;
     CoTaskMemFree(dir);

@@ -17,6 +17,7 @@ Plan and research notes: [PLAN.md](PLAN.md).
 | 4 | Renamer | done |
 | 5 | MP4 recording | done (video + sound) |
 | 6 | GIF recording | done |
+| 7 | Computer maintenance (updates, cleanup, startup apps, health) | done |
 
 ## Use
 
@@ -64,7 +65,7 @@ so Win-key hotkeys it refuses are caught with a keyboard hook instead (the Start
 Recent colors live in `%APPDATA%\Canivete\colors.txt`.
 
 Settings: tray > Settings… opens a small window with a tab per feature on the left (General,
-Screenshots, Color picker, GIF recording, Video recording, Image tools, Renamer; Ctrl+Tab switches).
+Screenshots, Color picker, GIF recording, Video recording, Image tools, Renamer, Maintenance; Ctrl+Tab switches).
 General has the folder, file name (with an Insert menu of tokens and a live example), PNG/JPG and
 quality, and start with Windows; each feature tab has its hotkey (click the box, press the keys) and
 options. Each feature also has an On/Off switch next to its name in the list: a feature that is off loses its hotkeys, its
@@ -138,12 +139,26 @@ in one click: in front (`01 Holiday.jpg`), at the end (`Holiday 01.jpg`), a new 
 digits needed (01 for up to 99 items, 001 above). Delete removes a row from the list.
 All renames are one Windows operation, so Ctrl+Z in Explorer undoes the whole batch.
 
+Computer maintenance: tray > Computer maintenance… (or Start menu > Computer Maintenance).
+- Updates: Windows and driver updates (Windows Update), app updates (winget), and the graphics driver
+  with a button to the maker's app (NVIDIA app, AMD Adrenalin, Intel). Tick what to install; apps left
+  unticked stay unticked next time (`[Maintenance] SkipApps`). Install makes a restore point first
+  (optional) and asks Windows for permission once.
+- Cleanup: a fixed list of safe places (temp files older than a week, Windows Update downloads,
+  Delivery Optimization cache, old crash dumps, shader caches, Recycle Bin, DISM component cleanup).
+  No registry cleaning.
+- Startup apps: the same switches as Task Manager's Startup tab (Run keys and Startup folders).
+- Health: uptime and restart advice, memory, disk space, repair (DISM + sfc), optimize drives, restore point.
+
 Command line: `Canivete.exe --region | --window | --full | --color | --gif | --mp4 | --settings` acts in the running copy.
 `Canivete.exe --edit image.png` opens any image in the editor; `--alpha image.png` opens Make alpha.
 `Canivete.exe --alpha-bench in.png out.png [x y]... [box x y w h]` makes an alpha with no window (test).
 `Canivete.exe --resize a.jpg b.png folder` opens the resizer with those files (each copy hands its
 files to the running one, so Explorer's one-copy-per-file launch ends in one window).
 `Canivete.exe --rename a.txt folder` opens the renamer the same way.
+`Canivete.exe --maintenance` opens Computer maintenance (the Start menu's Computer Maintenance shortcut does this).
+`Canivete.exe --maint-admin <window> <task> [items]` is the elevated copy that window starts for one job; it refuses
+to run unless that window exists.
 `Canivete.exe --do <action> a.jpg b.png` runs a right-click menu action (`small medium large half custom
 jpg png tif bmp right left 180 fliph flipv copy`).
 `Canivete.exe --grab out.png` (or `.jpg`) grabs all monitors to a file and exits (self-test).
@@ -177,4 +192,6 @@ Builds Release, installs to `%LOCALAPPDATA%\Programs\Canivete\Canivete.exe` and 
 - `src/video.cpp` — MP4 writer: BGRX to NV12 (BT.709), Media Foundation H.264 sink writer, hardware encoder with software fallback, AAC sound stream; the smaller copies offered after recording (decode, shrink, re-encode)
 - `src/audio.cpp` — video sound: WASAPI loopback of the default output + optional microphone, mixed, timed by capture clock
 - `src/alpha.cpp` — Make alpha window: freehand mask, detail/background picks, threshold engine, square power-of-two output
-- `src/shell.cpp` — Explorer right-click Canivete submenu (image actions, Rename) and Send to shortcuts
+- `src/maint.cpp` — Computer maintenance window: Updates, Cleanup, Startup apps, Health tabs; worker threads; elevated jobs report back with WM_COPYDATA
+- `src/maint_ops.cpp` — the checks and jobs: Windows Update agent (COM), winget, GPU driver info, cleanup whitelist, startup entries (StartupApproved), restore point, DISM/sfc, defrag
+- `src/shell.cpp` — Explorer right-click Canivete submenu (image actions, Rename), Send to shortcuts, Start menu Computer Maintenance

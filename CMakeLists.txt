@@ -22,6 +22,8 @@ add_executable(Canivete WIN32
     src/alpha.cpp
     src/video.cpp
     src/audio.cpp
+    src/maint.cpp
+    src/maint_ops.cpp
     res/canivete.rc
     res/app.manifest
 )
@@ -33,4 +35,4 @@ target_compile_options(Canivete PRIVATE /W4 /utf-8 /permissive- /EHsc
 target_link_options(Canivete PRIVATE $<$<CONFIG:Release>:/LTCG /OPT:REF /OPT:ICF>)
 target_link_libraries(Canivete PRIVATE
     user32 gdi32 shell32 ole32 windowscodecs dwmapi shcore shlwapi comctl32 advapi32
-    mfplat mfreadwrite mfuuid mf)
+    mfplat mfreadwrite mfuuid mf wuguid oleaut32 setupapi uxtheme)

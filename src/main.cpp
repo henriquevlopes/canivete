@@ -14,10 +14,11 @@ HWND g_mainWnd = nullptr;
 
 namespace {
 
-enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_COLOR, ID_GIF, ID_OPEN_FOLDER, ID_SETTINGS, ID_EXIT, ID_RESIZE, ID_RENAME, ID_VIDEO };
+enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_COLOR, ID_GIF, ID_OPEN_FOLDER, ID_SETTINGS, ID_EXIT, ID_RESIZE, ID_RENAME, ID_VIDEO, ID_MAINT };
 constexpr UINT ID_RECENT0 = 200;  // .. 209: recent colors in the tray menu
 constexpr UINT kCmdAlreadyRunning = 99;
 constexpr UINT kCmdSettings = 98;
+constexpr UINT kCmdMaint = 97;
 constexpr UINT_PTR kTimerDeferred = 10;
 constexpr UINT_PTR kTimerResize = 11;
 constexpr UINT_PTR kTimerRename = 12;
@@ -299,6 +300,10 @@ void ShowMenu() {
     if (FeatureOn(kFeatImages) || FeatureOn(kFeatRename)) group();
     if (FeatureOn(kFeatImages)) AppendMenuW(m, MF_STRING, ID_RESIZE, L"Resize images…");
     if (FeatureOn(kFeatRename)) AppendMenuW(m, MF_STRING, ID_RENAME, L"Rename files…");
+    if (FeatureOn(kFeatMaint)) {
+        group();
+        AppendMenuW(m, MF_STRING, ID_MAINT, L"Computer maintenance…");
+    }
     group();
     AppendMenuW(m, MF_STRING, ID_OPEN_FOLDER, L"Open screenshots folder");
     AppendMenuW(m, MF_STRING, ID_SETTINGS, L"Settings…");
@@ -337,6 +342,8 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp >= 1 && wp <= kHotkeyCount) Capture_Start(static_cast<CaptureMode>(wp));
         else if (wp == kCmdSettings)
             SettingsUI_Show();
+        else if (wp == kCmdMaint)
+            Maint_Show();
         else if (wp == kCmdAlreadyRunning)
             TrayBalloon(L"Canivete is already running", L"Right-click the red knife icon in the tray.");
         return 0;
@@ -361,6 +368,9 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case ID_RENAME:
             Renamer_Open({});
+            break;
+        case ID_MAINT:
+            Maint_Show();
             break;
         case ID_REGION:
         case ID_WINDOW:
@@ -429,6 +439,7 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (HWND w = SettingsUI_Window()) DestroyWindow(w);
         if (HWND w = Resizer_Window()) DestroyWindow(w);
         if (HWND w = Renamer_Window()) DestroyWindow(w);
+        if (HWND w = Maint_Window()) DestroyWindow(w);
         if (HWND w = Alpha_Window()) DestroyWindow(w);
         Recorder_Shutdown();
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
@@ -546,6 +557,11 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
                 list.push_back(n && n < MAX_PATH * 4 ? full : argv[i]);
             }
         }
+        if (!_wcsicmp(argv[1], L"--maint-admin")) {
+            const int r = Maint_AdminMain(argc, argv);
+            LocalFree(argv);
+            return r;
+        }
         if (!_wcsicmp(argv[1], L"--grab") && argc >= 3) return RunGrabTest(argv[2]);
         if (!_wcsicmp(argv[1], L"--edit") && argc >= 3) return RunEditor(argv[2]);
         if (!_wcsicmp(argv[1], L"--alpha") && argc >= 3) return RunAlpha(argv[2]);
@@ -600,6 +616,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
             if (!TestMode()) return 1;  // the UI test only runs in a private test copy
         }
         else if (!_wcsicmp(argv[1], L"--settings")) cmd = kCmdSettings;
+        else if (!_wcsicmp(argv[1], L"--maintenance")) cmd = kCmdMaint;
     }
     LocalFree(argv);
 
@@ -675,6 +692,8 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
             if (rs && IsDialogMessageW(rs, &msg)) continue;
             HWND rn = Renamer_Window();
             if (rn && IsDialogMessageW(rn, &msg)) continue;
+            HWND mt = Maint_Window();
+            if (mt && IsDialogMessageW(mt, &msg)) continue;
             HWND gs = Recorder_Window();
             if (gs && IsDialogMessageW(gs, &msg)) continue;
             TranslateMessage(&msg);

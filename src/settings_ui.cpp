@@ -74,6 +74,7 @@ enum : int {
     IDC_NAV,
     IDC_OPENRESIZE,
     IDC_OPENRENAME,
+    IDC_OPENMAINT,
     IDC_OFFNOTE0 = 300,  // "Turned off" notes 300..305, one per Feature
 };
 
@@ -98,6 +99,9 @@ const TabDef kTabs[] = {
      L"(Show more options → Canivete)."},
     {L"Renamer", kFeatRename,
      L"Rename many files and folders at once: from the tray menu, Send to, and Explorer's right-click menu."},
+    {L"Maintenance", kFeatMaint,
+     L"Windows, driver and app updates, cleanup, startup apps and restart advice: from the tray menu and the "
+     L"Start menu (Computer Maintenance)."},
 };
 constexpr int kTabCount = static_cast<int>(std::size(kTabs));
 
@@ -309,6 +313,8 @@ void Build() {
     Button(IDC_OPENRESIZE, L"Open Resize images…", kL, y, 170, 28);
     y = BeginTab(6);
     Button(IDC_OPENRENAME, L"Open Rename files…", kL, y, 170, 28);
+    y = BeginTab(7);
+    Button(IDC_OPENMAINT, L"Open Maintenance…", kL, y, 170, 28);
 
     U.buildTab = -1;
     U.footerY = std::max(U.maxY + 18, 12 + kTabCount * kNavItem + 16);
@@ -927,6 +933,9 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case IDC_OPENRENAME:
             Renamer_Open({});
+            break;
+        case IDC_OPENMAINT:
+            Maint_Show();
             break;
         }
         return 0;
