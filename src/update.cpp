@@ -2,12 +2,22 @@
 // is newer, downloads its setup, checks the file's SHA-256 against the one written in the release
 // notes ("SHA256: <hex>"), runs it silently and exits. The installer replaces the files and starts
 // Canivete again. Checked once a day (General: "Tell me when a new version is out") and on request.
+//
+// The notes also carry "SIG: <base64>": an ECDSA P-256 signature of "canivete-update|<version>|<sha>"
+// made with an offline key (tools/sign_update.ps1). Only a release whose signature checks out against
+// the public key below is offered, so someone who gets hold of the GitHub account still can't ship a
+// version of their own.
 #include "app.h"
 
 #include <bcrypt.h>
+#include <netlistmgr.h>
 #include <shellapi.h>
+#include <wincrypt.h>
 #include <winhttp.h>
+#include <wrl/client.h>
 
+#include <algorithm>
+#include <climits>
 #include <ctime>
 #include <memory>
 #include <string>
@@ -18,9 +28,22 @@ namespace {
 constexpr wchar_t kHost[] = L"api.github.com";
 constexpr wchar_t kLatest[] = L"/repos/henriquevlopes/canivete-releases/releases/latest";
 constexpr wchar_t kDownloadPrefix[] = L"https://github.com/henriquevlopes/canivete-releases/releases/download/";
+constexpr ULONGLONG kMaxSetup = 64ull << 20;  // a bigger "setup" is not ours
+
+// BCRYPT_ECCPUBLIC_BLOB (ECDSA P-256) of the update signing key, made by tools/make_update_key.ps1.
+// The private half stays on the release PC (%APPDATA%\Canivete-release\update_key.bin, DPAPI).
+constexpr BYTE kUpdatePublicKey[72] = {
+    0x45, 0x43, 0x53, 0x31, 0x20, 0x00, 0x00, 0x00, 0xEB, 0x9C, 0x66, 0x5E,
+    0x47, 0xBA, 0x3F, 0x54, 0xFA, 0xCA, 0xF9, 0x00, 0x24, 0x8A, 0xE3, 0xB4,
+    0x57, 0xEE, 0x02, 0xD7, 0xB5, 0xD4, 0xDA, 0x92, 0x80, 0x47, 0xED, 0x05,
+    0x79, 0xA1, 0xDC, 0x76, 0x1F, 0x52, 0xCE, 0x2B, 0x6D, 0x64, 0xF4, 0x5B,
+    0x0B, 0x20, 0x10, 0x24, 0x24, 0x34, 0x49, 0x2C, 0xCC, 0xF6, 0x4A, 0x51,
+    0x11, 0xE5, 0x43, 0xD6, 0x9D, 0xC4, 0x99, 0x5C, 0xD4, 0x61, 0x0E, 0xBC,
+};
 
 UpdateInfo g_info;
 bool g_checking = false, g_installing = false, g_manual = false;
+long long g_retryAt = 0;  // offline at the last try: not before this (time())
 
 std::wstring StatePath() { return AppDataDir() + L"\\state.ini"; }
 std::wstring ReadState(const wchar_t* key) {
@@ -76,8 +99,14 @@ std::string JsonString(const std::string& j, const std::string& key, size_t from
         else if (c == 'r') out += '\r';
         else if (c == 't') out += '\t';
         else if (c == 'u' && p + 4 < j.size()) {
-            const unsigned cp = static_cast<unsigned>(std::stoul(j.substr(p + 1, 4), nullptr, 16));
-            if (cp < 0x80) out += static_cast<char>(cp);
+            unsigned cp = 0;
+            bool hex = true;
+            for (size_t h = 1; h <= 4; ++h) {
+                const char d = j[p + h];
+                hex = hex && isxdigit(static_cast<unsigned char>(d));
+                cp = cp * 16 + static_cast<unsigned>(isdigit(static_cast<unsigned char>(d)) ? d - '0' : (tolower(d) - 'a' + 10));
+            }
+            if (hex && cp < 0x80) out += static_cast<char>(cp);
             p += 4;
         } else out += c;
     }
@@ -85,7 +114,8 @@ std::string JsonString(const std::string& j, const std::string& key, size_t from
     return out;
 }
 
-// GET over HTTPS. url: a full https:// URL. Into a string, or into a file when path is given.
+// GET over HTTPS. url: a full https:// URL. Into a string, or into a file when path is given (a new
+// file: an existing one is never written through, and more than kMaxSetup bytes are refused).
 bool HttpGet(const std::wstring& url, bool api, std::string* body, const std::wstring& path, std::wstring& err) {
     URL_COMPONENTS uc{sizeof(uc)};
     wchar_t host[256], urlPath[2048];
@@ -114,14 +144,16 @@ bool HttpGet(const std::wstring& url, bool api, std::string* body, const std::ws
             if (status == 200) {
                 HANDLE f = INVALID_HANDLE_VALUE;
                 if (!path.empty())
-                    f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                    f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
                 ok = path.empty() || f != INVALID_HANDLE_VALUE;
                 char buf[65536];
+                ULONGLONG total = 0;
                 for (DWORD got = 0; ok && WinHttpReadData(r, buf, sizeof(buf), &got) && got;) {
                     if (body) body->append(buf, got);
                     DWORD wrote = 0;
                     if (f != INVALID_HANDLE_VALUE && (!WriteFile(f, buf, got, &wrote, nullptr) || wrote != got)) ok = false;
                     if (body && body->size() > (8u << 20)) ok = false;
+                    if ((total += got) > kMaxSetup) ok = false;
                 }
                 if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
                 if (!ok) err = L"The download didn't finish.";
@@ -139,9 +171,10 @@ bool HttpGet(const std::wstring& url, bool api, std::string* body, const std::ws
     return ok;
 }
 
-std::wstring Sha256(const std::wstring& path) {
-    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return {};
+// SHA-256 (hex) of what an open file holds, read from its start.
+std::wstring Sha256(HANDLE f) {
+    LARGE_INTEGER zero{};
+    if (!SetFilePointerEx(f, zero, nullptr, FILE_BEGIN)) return {};
     BCRYPT_ALG_HANDLE alg = nullptr;
     BCRYPT_HASH_HANDLE h = nullptr;
     std::wstring hex;
@@ -162,8 +195,39 @@ std::wstring Sha256(const std::wstring& path) {
     }
     if (h) BCryptDestroyHash(h);
     if (alg) BCryptCloseAlgorithmProvider(alg, 0);
-    CloseHandle(f);
     return hex;
+}
+
+// Checks "SIG:" (base64 of r||s) for this version and SHA-256 against kUpdatePublicKey.
+bool SignatureOk(const std::wstring& version, const std::wstring& shaHex, const std::string& sigB64) {
+    BYTE sig[64];
+    DWORD n = sizeof(sig);
+    if (sigB64.empty() || shaHex.size() != 64 ||
+        !CryptStringToBinaryA(sigB64.c_str(), static_cast<DWORD>(sigB64.size()), CRYPT_STRING_BASE64, sig, &n, nullptr,
+                              nullptr) ||
+        n != sizeof(sig))
+        return false;
+    std::string msg = "canivete-update|";
+    for (wchar_t c : version) {
+        if (c > 0x7E || c < 0x20) return false;
+        msg += static_cast<char>(c);
+    }
+    msg += '|';
+    for (wchar_t c : shaHex) {
+        if (!iswxdigit(c)) return false;
+        msg += static_cast<char>(towlower(c));
+    }
+    BYTE digest[32];
+    if (!BCRYPT_SUCCESS(BCryptHash(BCRYPT_SHA256_ALG_HANDLE, nullptr, 0,
+                                   reinterpret_cast<PUCHAR>(msg.data()), static_cast<ULONG>(msg.size()), digest, 32)))
+        return false;
+    BCRYPT_KEY_HANDLE key = nullptr;
+    if (!BCRYPT_SUCCESS(BCryptImportKeyPair(BCRYPT_ECDSA_P256_ALG_HANDLE, nullptr, BCRYPT_ECCPUBLIC_BLOB, &key,
+                                            const_cast<PUCHAR>(kUpdatePublicKey), sizeof(kUpdatePublicKey), 0)))
+        return false;
+    const bool ok = BCRYPT_SUCCESS(BCryptVerifySignature(key, nullptr, digest, 32, sig, sizeof(sig), 0));
+    BCryptDestroyKey(key);
+    return ok;
 }
 
 UpdateInfo Fetch() {
@@ -193,29 +257,89 @@ UpdateInfo Fetch() {
         while (i < notes.size() && isxdigit(static_cast<unsigned char>(notes[i]))) hex += static_cast<char>(tolower(notes[i++]));
         if (hex.size() == 64) u.sha = Widen(hex);
     }
+    std::string sig;
+    const size_t q = notes.find("SIG:");
+    if (q != std::string::npos) {
+        size_t i = q + 4;
+        while (i < notes.size() && notes[i] == ' ') ++i;
+        while (i < notes.size() && (isalnum(static_cast<unsigned char>(notes[i])) || notes[i] == '+' || notes[i] == '/' ||
+                                    notes[i] == '='))
+            sig += notes[i++];
+    }
     if (u.latest.empty()) u.error = L"The release has no version number.";
-    u.available = u.error.empty() && Compare(u.latest, CANIVETE_VERSION) > 0 && !u.url.empty() &&
-                  u.url.rfind(kDownloadPrefix, 0) == 0 && !u.sha.empty();
+    const bool newer = u.error.empty() && Compare(u.latest, CANIVETE_VERSION) > 0;
+    const bool signedOk = newer && SignatureOk(u.latest, u.sha, sig);
+    if (newer && !signedOk) {
+        u.error = L"Version " + u.latest + L" isn't signed with Canivete's key, so it isn't offered.";
+        Log(L"Update %s: missing or wrong signature", u.latest.c_str());
+    }
+    u.available = newer && signedOk && !u.url.empty() && u.url.rfind(kDownloadPrefix, 0) == 0 && !u.sha.empty();
     return u;
 }
 
-// Downloads and checks the setup; empty = failed (err says why).
-std::wstring Download(const UpdateInfo& u, std::wstring& err) {
+// A new folder of our own in %TEMP% (random name), so nothing can be planted where the setup lands.
+std::wstring NewTempFolder() {
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);
-    const std::wstring path = std::wstring(tmp) + L"Canivete-Setup-" + u.latest + L".exe";
-    if (!HttpGet(u.url, false, nullptr, path, err)) return {};
-    if (_wcsicmp(Sha256(path).c_str(), u.sha.c_str()) != 0) {
-        DeleteFileW(path.c_str());
-        err = L"The downloaded file doesn't match its published fingerprint, so it wasn't run.";
-        return {};
+    for (int i = 0; i < 8; ++i) {
+        BYTE rnd[8];
+        if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, rnd, sizeof(rnd), BCRYPT_USE_SYSTEM_PREFERRED_RNG))) return {};
+        std::wstring dir = std::wstring(tmp) + L"Canivete-update-";
+        for (BYTE b : rnd) {
+            wchar_t x[3];
+            swprintf_s(x, L"%02x", b);
+            dir += x;
+        }
+        if (CreateDirectoryW(dir.c_str(), nullptr)) return dir;
     }
-    return path;
+    return {};
 }
 
 struct InstallResult {
     std::wstring path, err;
+    HANDLE lock = INVALID_HANDLE_VALUE;  // the checked setup, open so it can't be changed until it runs
+    InstallResult() = default;
+    InstallResult(const InstallResult&) = delete;
+    InstallResult& operator=(const InstallResult&) = delete;
+    ~InstallResult() { Release(); }
+    void Release() {
+        if (lock != INVALID_HANDLE_VALUE) CloseHandle(lock);
+        lock = INVALID_HANDLE_VALUE;
+    }
+    void Remove() {  // the setup and its folder
+        Release();
+        DeleteFileW(path.c_str());
+        RemoveDirectoryW(path.substr(0, path.rfind(L'\\')).c_str());
+    }
 };
+
+// Downloads and checks the setup into r (r.path empty = failed, r.err says why). The file is checked
+// through a handle that lets nobody else write, rename or delete it, and that handle stays open until
+// the setup has been started.
+void Download(const UpdateInfo& u, InstallResult& r) {
+    const std::wstring dir = NewTempFolder();
+    if (dir.empty()) {
+        r.err = L"Couldn't make a folder for the download.";
+        return;
+    }
+    const std::wstring path = dir + L"\\Canivete-Setup-" + u.latest + L".exe";
+    if (!HttpGet(u.url, false, nullptr, path, r.err)) {
+        DeleteFileW(path.c_str());
+        RemoveDirectoryW(dir.c_str());
+        return;
+    }
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                           FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (f == INVALID_HANDLE_VALUE || _wcsicmp(Sha256(f).c_str(), u.sha.c_str()) != 0) {
+        if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+        DeleteFileW(path.c_str());
+        RemoveDirectoryW(dir.c_str());
+        r.err = L"The downloaded file doesn't match its published fingerprint, so it wasn't run.";
+        return;
+    }
+    r.lock = f;
+    r.path = path;
+}
 
 }  // namespace
 
@@ -226,6 +350,7 @@ void Update_Check(bool manual) {
     if (g_checking) return;
     g_checking = true;
     g_manual = manual;
+    WriteState(L"LastAttempt", std::to_wstring(std::time(nullptr)));
     HWND w = g_mainWnd;
     std::thread([w] {
         auto* u = new UpdateInfo(Fetch());
@@ -233,10 +358,30 @@ void Update_Check(bool manual) {
     }).detach();
 }
 
+// Due 20 hours after the last check that reached GitHub, and 6 hours after any try (so a PC that is
+// offline doesn't try every hour).
+long long Update_SecondsToNext() {
+    if (!g_settings.checkUpdates) return LLONG_MAX;
+    const long long now = std::time(nullptr);
+    const long long due = std::max({_wtoi64(ReadState(L"LastCheck").c_str()) + 20 * 3600,
+                                    _wtoi64(ReadState(L"LastAttempt").c_str()) + 6 * 3600, g_retryAt});
+    return std::max(0LL, due - now);
+}
+
+bool Net_Online() {
+    Microsoft::WRL::ComPtr<INetworkListManager> nlm;
+    VARIANT_BOOL on = VARIANT_TRUE;
+    if (SUCCEEDED(CoCreateInstance(CLSID_NetworkListManager, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&nlm))))
+        nlm->get_IsConnectedToInternet(&on);
+    return on != VARIANT_FALSE;
+}
+
 void Update_Background() {
-    if (!g_settings.checkUpdates) return;
-    const long long last = _wtoi64(ReadState(L"LastCheck").c_str());
-    if (std::time(nullptr) - last < 20 * 3600) return;
+    if (g_checking || Update_SecondsToNext() > 0) return;
+    if (!Net_Online()) {  // no request at all; look again in an hour
+        g_retryAt = std::time(nullptr) + 3600;
+        return;
+    }
     Update_Check(false);
 }
 
@@ -251,7 +396,7 @@ void Update_Install() {
     const UpdateInfo u = g_info;
     std::thread([w, u] {
         auto* r = new InstallResult;
-        r->path = Download(u, r->err);
+        Download(u, *r);
         if (!PostMessageW(w, WM_APP_UPDATE, 1, reinterpret_cast<LPARAM>(r))) delete r;
     }).detach();
     Tray_Notify(L"Updating Canivete", L"Downloading version " + u.latest + L"…");
@@ -286,6 +431,7 @@ void Update_OnMessage(WPARAM wp, LPARAM lp) {
     }
     if (TestMode()) {
         Log(L"Update downloaded and checked (test copy, not installing): %s", r->path.c_str());
+        r->Remove();
         return;
     }
     Log(L"Running %s", r->path.c_str());
@@ -304,13 +450,23 @@ int Update_SelfTest() {
     Log(L"--update-test: latest %s, this %s, url %s, sha %s, available %d, error %s", u.latest.c_str(), CANIVETE_VERSION,
         u.url.c_str(), u.sha.c_str(), u.available, u.error.c_str());
     if (!u.checked || u.url.empty() || u.sha.empty()) return 1;
-    UpdateInfo any = u;
-    std::wstring err;
-    const std::wstring path = Download(any, err);
-    Log(L"--update-test: download %s %s", path.empty() ? L"FAILED" : L"ok, fingerprint matches", err.c_str());
-    if (path.empty()) return 2;
-    DeleteFileW(path.c_str());
+    InstallResult r;
+    Download(u, r);
+    Log(L"--update-test: download %s %s", r.path.empty() ? L"FAILED" : L"ok, fingerprint matches", r.err.c_str());
+    if (r.path.empty()) return 2;
+    r.Remove();
     return 0;
+}
+
+// --verify-update <version> <sha256> <base64 signature>: the signature check alone, for
+// tools/test_update_sig.ps1. 0 = valid, 1 = not.
+int Update_VerifyTest(int argc, wchar_t** argv) {
+    if (argc < 5) return 2;
+    std::string sig;
+    for (const wchar_t* p = argv[4]; *p; ++p) sig += static_cast<char>(*p & 0x7F);
+    const bool ok = SignatureOk(argv[2], argv[3], sig);
+    Log(L"--verify-update %s %s: %s", argv[2], argv[3], ok ? L"valid" : L"INVALID");
+    return ok ? 0 : 1;
 }
 
 int Update_Compare(const std::wstring& a, const std::wstring& b) { return Compare(a, b); }
