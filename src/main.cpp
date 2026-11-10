@@ -12,13 +12,15 @@ HWND g_mainWnd = nullptr;
 
 namespace {
 
-enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_COLOR, ID_OPEN_FOLDER, ID_SETTINGS, ID_EXIT, ID_RESIZE };
+enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_COLOR, ID_OPEN_FOLDER, ID_SETTINGS, ID_EXIT, ID_RESIZE, ID_RENAME };
 constexpr UINT ID_RECENT0 = 200;  // .. 209: recent colors in the tray menu
 constexpr UINT kCmdAlreadyRunning = 99;
 constexpr UINT kCmdSettings = 98;
 constexpr UINT_PTR kTimerDeferred = 10;
 constexpr UINT_PTR kTimerResize = 11;
-constexpr ULONG_PTR kCopyResize = 0x52535A31;  // WM_COPYDATA tag: file list for the resizer
+constexpr UINT_PTR kTimerRename = 12;
+constexpr ULONG_PTR kCopyResize = 0x52535A31;  // WM_COPYDATA tags: file list for the resizer
+constexpr ULONG_PTR kCopyRename = 0x524E4D31;  // ... and for the renamer
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
 UINT g_taskbarCreated = 0;
@@ -28,6 +30,7 @@ CaptureMode g_deferredMode = CaptureMode::Region;
 FILETIME g_iniTime{};
 bool g_hotkeysSuspended = false;
 std::vector<std::wstring> g_resizeQueue;  // files from Explorer, gathered for ~300 ms (one process per file)
+std::vector<std::wstring> g_renameQueue;
 
 // Windows reserves some Win+key combos (Win+C, Win+Shift+C ...) so RegisterHotKey refuses them.
 // Those are caught with a low-level keyboard hook instead, like PowerToys does.
@@ -253,6 +256,7 @@ void ShowMenu() {
     }
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_RESIZE, L"Resize images…");
+    AppendMenuW(m, MF_STRING, ID_RENAME, L"Rename files…");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_OPEN_FOLDER, L"Open screenshots folder");
     AppendMenuW(m, MF_STRING, ID_SETTINGS, L"Settings…");
@@ -296,21 +300,26 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_COPYDATA: {  // --resize from another copy: '\0'-separated paths
         const auto* cd = reinterpret_cast<const COPYDATASTRUCT*>(lp);
-        if (cd->dwData != kCopyResize) return FALSE;
+        if (cd->dwData != kCopyResize && cd->dwData != kCopyRename) return FALSE;
+        const bool rename = cd->dwData == kCopyRename;
+        std::vector<std::wstring>& queue = rename ? g_renameQueue : g_resizeQueue;
         const wchar_t* p = static_cast<const wchar_t*>(cd->lpData);
         const size_t n = cd->cbData / sizeof(wchar_t);
         for (size_t i = 0; i < n;) {
             const size_t len = wcsnlen(p + i, n - i);
-            if (len) g_resizeQueue.emplace_back(p + i, len);
+            if (len) queue.emplace_back(p + i, len);
             i += len + 1;
         }
-        SetTimer(h, kTimerResize, 300, nullptr);
+        SetTimer(h, rename ? kTimerRename : kTimerResize, 300, nullptr);
         return TRUE;
     }
     case WM_COMMAND:
         switch (LOWORD(wp)) {
         case ID_RESIZE:
             Resizer_Open({});
+            break;
+        case ID_RENAME:
+            Renamer_Open({});
             break;
         case ID_REGION:
         case ID_WINDOW:
@@ -351,11 +360,17 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             std::vector<std::wstring> files = std::move(g_resizeQueue);
             g_resizeQueue.clear();
             Resizer_Open(files);
+        } else if (wp == kTimerRename) {
+            KillTimer(h, kTimerRename);
+            std::vector<std::wstring> files = std::move(g_renameQueue);
+            g_renameQueue.clear();
+            Renamer_Open(files);
         }
         return 0;
     case WM_DESTROY:
         if (HWND w = SettingsUI_Window()) DestroyWindow(w);
         if (HWND w = Resizer_Window()) DestroyWindow(w);
+        if (HWND w = Renamer_Window()) DestroyWindow(w);
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         for (int id = 1; id <= kHotkeyCount; ++id) UnregisterHotKey(h, id);
         g_hookKeys.clear();
@@ -404,9 +419,9 @@ int RunEditor(const wchar_t* file) {
     return 0;
 }
 
-// Hands a --resize file list to the running copy. Explorer starts one copy per selected file, all
+// Hands a --resize / --rename file list to the running copy. Explorer starts one copy per selected file, all
 // at once, so the first one may still be starting: wait for its window for a few seconds.
-void SendResizeList(const std::vector<std::wstring>& files) {
+void SendFileList(ULONG_PTR tag, const std::vector<std::wstring>& files) {
     std::wstring blob;
     for (const std::wstring& f : files) blob += f;
         blob.push_back(L'\0');
@@ -415,7 +430,7 @@ void SendResizeList(const std::vector<std::wstring>& files) {
             DWORD pid = 0;
             GetWindowThreadProcessId(w, &pid);
             AllowSetForegroundWindow(pid);
-            COPYDATASTRUCT cd{kCopyResize, static_cast<DWORD>(blob.size() * sizeof(wchar_t)), blob.data()};
+            COPYDATASTRUCT cd{tag, static_cast<DWORD>(blob.size() * sizeof(wchar_t)), blob.data()};
             DWORD_PTR res = 0;
             if (SendMessageTimeoutW(w, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&cd), SMTO_ABORTIFHUNG, 5000, &res) &&
                 res)
@@ -432,15 +447,15 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     UINT cmd = 0;
-    std::vector<std::wstring> resize;
-    bool resizeCmd = false;
+    std::vector<std::wstring> list;  // --resize / --rename files
+    ULONG_PTR listTag = 0;
     if (argc >= 2) {
-        if (!_wcsicmp(argv[1], L"--resize")) {
-            resizeCmd = true;
+        if (!_wcsicmp(argv[1], L"--resize") || !_wcsicmp(argv[1], L"--rename")) {
+            listTag = !_wcsicmp(argv[1], L"--resize") ? kCopyResize : kCopyRename;
             for (int i = 2; i < argc; ++i) {
                 wchar_t full[MAX_PATH * 4];
                 const DWORD n = GetFullPathNameW(argv[i], MAX_PATH * 4, full, nullptr);
-                resize.push_back(n && n < MAX_PATH * 4 ? full : argv[i]);
+                list.push_back(n && n < MAX_PATH * 4 ? full : argv[i]);
             }
         }
         if (!_wcsicmp(argv[1], L"--grab") && argc >= 3) return RunGrabTest(argv[2]);
@@ -456,9 +471,9 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     // One copy only. A second launch passes its command to the running one.
     HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\Canivete.Running");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (resizeCmd) {
-            if (resize.empty()) resize.push_back(L"");  // still opens the window
-            SendResizeList(resize);
+        if (listTag) {
+            if (list.empty()) list.push_back(L"");  // still opens the window
+            SendFileList(listTag, list);
             return 0;
         }
         if (HWND w = FindWindowW(kMainClass, nullptr)) {
@@ -491,12 +506,12 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     Capture_Init();
     Output_Init();
     RegisterHotkeysOrWarn();
-    Resizer_RegisterShell();
+    Shell_Register();
     Log(L"Canivete %s started", CANIVETE_VERSION);
     if (cmd) PostMessageW(g_mainWnd, WM_APP_COMMAND, cmd, 0);
-    if (resizeCmd) {
-        g_resizeQueue = std::move(resize);
-        SetTimer(g_mainWnd, kTimerResize, 300, nullptr);
+    if (listTag) {
+        (listTag == kCopyResize ? g_resizeQueue : g_renameQueue) = std::move(list);
+        SetTimer(g_mainWnd, listTag == kCopyResize ? kTimerResize : kTimerRename, 300, nullptr);
     }
 
     // Message loop that also wakes when the settings folder changes (no polling).
@@ -521,6 +536,8 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
             if (dlg && IsDialogMessageW(dlg, &msg)) continue;  // Tab, Enter, Esc in the Settings window
             HWND rs = Resizer_Window();
             if (rs && IsDialogMessageW(rs, &msg)) continue;
+            HWND rn = Renamer_Window();
+            if (rn && IsDialogMessageW(rn, &msg)) continue;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }

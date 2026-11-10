@@ -14,7 +14,7 @@ Plan and research notes: [PLAN.md](PLAN.md).
 | 2 | Color picker | done |
 | 2b | Screenshot editor (shapes, text, numbers) | done |
 | 3 | Image resizer | done |
-| 4 | Renamer | – |
+| 4 | Renamer | done |
 | 5 | MP4 recording | – |
 | 6 | GIF recording | – |
 
@@ -63,10 +63,23 @@ profile) is kept when the format stays the same; phone photos are always turned 
 every CPU core: 40 photos of 24 MP take about 2 s. Choices are remembered in `[Resizer]` in
 settings.ini. With no errors the window closes and a tray notice says how many were done.
 
+Renamer: select files or folders in Explorer, right-click > Show more options > Rename with
+Canivete (or Send to > Canivete - Rename), or tray > Rename files…, or drop them on its window.
+Type what to search for and what to put instead; the list shows every new name as you type, and
+problems (a name used twice, a name that already exists, characters Windows forbids) in red.
+Options: regular expression (`$1` puts back a captured group), every match or only the first,
+match case, change the name, the extension or both, text case (lowercase, UPPERCASE, Title Case,
+Sentence case), and which items count (files, folders, everything inside the folders). Empty search
+replaces the whole name. Tokens in the new text (the Insert button lists them): `${}` a counter,
+`${padding=3}` 001, `${start=10,increment=10}`, and `$YYYY $MM $DD $hh $mm $ss` from the file's
+modified date; only matched items use up a counter number. Delete removes a row from the list.
+All renames are one Windows operation, so Ctrl+Z in Explorer undoes the whole batch.
+
 Command line: `Canivete.exe --region | --window | --full | --color | --settings` acts in the running copy.
 `Canivete.exe --edit image.png` opens any image in the editor.
 `Canivete.exe --resize a.jpg b.png folder` opens the resizer with those files (each copy hands its
 files to the running one, so Explorer's one-copy-per-file launch ends in one window).
+`Canivete.exe --rename a.txt folder` opens the renamer the same way.
 `Canivete.exe --grab out.png` (or `.jpg`) grabs all monitors to a file and exits (self-test).
 
 ## Build and install
@@ -88,4 +101,6 @@ Builds Release, installs to `%LOCALAPPDATA%\Programs\Canivete\Canivete.exe` and 
 - `src/color.cpp` — color text formats, clipboard text, recent colors
 - `src/output.cpp` — PNG/JPG via WIC, file naming, clipboard, notification toast
 - `src/editor.cpp` — screenshot editor window (GDI+ shapes and text, undo, zoom and pan)
-- `src/resizer.cpp` — image resizer window, WIC resize engine on worker threads, Explorer menu and Send to entries
+- `src/resizer.cpp` — image resizer window, WIC resize engine on worker threads
+- `src/renamer.cpp` — renamer window, live preview, regex/counter/date tokens, IFileOperation rename with undo
+- `src/shell.cpp` — Explorer right-click entries and Send to shortcuts for the resizer and renamer

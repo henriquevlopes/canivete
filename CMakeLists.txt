@@ -15,6 +15,8 @@ add_executable(Canivete WIN32
     src/capture.cpp
     src/output.cpp
     src/resizer.cpp
+    src/renamer.cpp
+    src/shell.cpp
     res/canivete.rc
     res/app.manifest
 )

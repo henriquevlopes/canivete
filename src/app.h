@@ -78,7 +78,13 @@ void Tray_Notify(const wchar_t* title, const std::wstring& text);  // balloon fr
 // ---- resizer.cpp ---------------------------------------------------------------------------
 void Resizer_Open(const std::vector<std::wstring>& files);  // opens the window, or adds to it
 HWND Resizer_Window();                                       // for IsDialogMessage, nullptr when closed
-void Resizer_RegisterShell();                                // Explorer right-click + Send to entries
+
+// ---- renamer.cpp ---------------------------------------------------------------------------
+void Renamer_Open(const std::vector<std::wstring>& paths);
+HWND Renamer_Window();
+
+// ---- shell.cpp -----------------------------------------------------------------------------
+void Shell_Register();  // Explorer right-click and Send to entries for the resizer and renamer
 
 // ---- settings_ui.cpp -----------------------------------------------------------------------
 void SettingsUI_Show();
