@@ -1194,6 +1194,7 @@ void CopyFirst(const std::wstring& file) {
     if (SUCCEEDED(hr)) hr = WICConvertBitmapSource(GUID_WICPixelFormat32bppBGR, bmp.Get(), &bgr);
     Image img;
     if (SUCCEEDED(hr)) hr = bgr->GetSize(&w, &h);
+    if (SUCCEEDED(hr) && static_cast<uint64_t>(w) * h > (1ull << 28)) hr = E_OUTOFMEMORY;  // too big to hold
     if (SUCCEEDED(hr)) {
         img.w = static_cast<int>(w);
         img.h = static_cast<int>(h);

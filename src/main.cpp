@@ -9,6 +9,8 @@
 #include <shlobj.h>
 
 #include <algorithm>
+#include <climits>
+#include <thread>
 
 HINSTANCE g_hinst = nullptr;
 HWND g_mainWnd = nullptr;
@@ -29,8 +31,7 @@ constexpr UINT_PTR kTimerDeferred = 10;
 constexpr UINT_PTR kTimerResize = 11;
 constexpr UINT_PTR kTimerRename = 12;
 constexpr UINT_PTR kTimerAction = 13;
-constexpr UINT_PTR kTimerDaily = 14;       // hourly: is the daily check due?
-constexpr UINT_PTR kTimerFirstCheck = 15;  // a few minutes after start
+constexpr UINT_PTR kTimerChecks = 14;  // one-shot: the next daily check (maintenance, Canivete update) is due
 constexpr ULONG_PTR kCopyResize = 0x52535A31;  // WM_COPYDATA tags: file list for the resizer
 constexpr ULONG_PTR kCopyRename = 0x524E4D31;  // ... and for the renamer
 constexpr ULONG_PTR kCopyAction = 0x41435431;  // ... and for a quick action (first entry = action name)
@@ -68,14 +69,17 @@ void QueueList(ULONG_PTR tag, const std::vector<std::wstring>& entries) {
 }
 
 // Windows reserves some Win+key combos (Win+C, Win+Shift+C ...) so RegisterHotKey refuses them.
-// Those are caught with a low-level keyboard hook instead, like PowerToys does.
+// Those are caught with a low-level keyboard hook instead, like PowerToys does. The hook runs on its
+// own small thread: every key press on the PC passes through it, so it must never wait for the UI
+// thread (a busy UI thread would make typing lag everywhere).
 struct HookKey {
     int id;
     Hotkey hk;
     bool down;
 };
-std::vector<HookKey> g_hookKeys;
-HHOOK g_kbHook = nullptr;
+std::vector<HookKey> g_hookKeys;  // set before the hook thread starts; only that thread uses it afterwards
+std::thread g_hookThread;
+DWORD g_hookThreadId = 0;
 
 UINT CurrentMods() {
     UINT m = 0;
@@ -116,13 +120,34 @@ LRESULT CALLBACK WinKeyHook(int code, WPARAM wp, LPARAM lp) {
     return CallNextHookEx(nullptr, code, wp, lp);
 }
 
-void UpdateKeyHook() {
-    if (!g_hookKeys.empty() && !g_kbHook) {
-        g_kbHook = SetWindowsHookExW(WH_KEYBOARD_LL, WinKeyHook, g_hinst, 0);
-    } else if (g_hookKeys.empty() && g_kbHook) {
-        UnhookWindowsHookEx(g_kbHook);
-        g_kbHook = nullptr;
-    }
+void StopKeyHook() {
+    if (!g_hookThread.joinable()) return;
+    PostThreadMessageW(g_hookThreadId, WM_QUIT, 0, 0);
+    g_hookThread.join();
+    g_hookThreadId = 0;
+}
+
+// Restarts the hook thread for these keys (none: no hook, no thread).
+void StartKeyHook(std::vector<HookKey> keys) {
+    StopKeyHook();
+    g_hookKeys = std::move(keys);
+    if (g_hookKeys.empty()) return;
+    HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g_hookThread = std::thread([ready] {
+        MSG m;
+        PeekMessageW(&m, nullptr, WM_USER, WM_USER, PM_NOREMOVE);  // the thread's message queue, for WM_QUIT
+        g_hookThreadId = GetCurrentThreadId();
+        // Tiny work per key, but Windows drops a hook that answers late: run ahead of busy threads.
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+        HHOOK hook = SetWindowsHookExW(WH_KEYBOARD_LL, WinKeyHook, g_hinst, 0);
+        SetEvent(ready);
+        if (!hook) return;
+        while (GetMessageW(&m, nullptr, 0, 0) > 0) {
+        }
+        UnhookWindowsHookEx(hook);
+    });
+    WaitForSingleObject(ready, 5000);
+    CloseHandle(ready);
 }
 
 // The tray icon: a pocket knife with no background. Its blade is light on a dark taskbar and dark on a
@@ -189,9 +214,9 @@ std::wstring RegisterHotkeys() {
     };
     std::wstring failed;
     for (const Entry& e : list) UnregisterHotKey(g_mainWnd, static_cast<int>(e.mode));
-    g_hookKeys.clear();
+    std::vector<HookKey> hookKeys;
     if (g_hotkeysSuspended || TestMode()) {
-        UpdateKeyHook();
+        StartKeyHook({});
         return failed;
     }
     for (const Entry& e : list) {
@@ -204,10 +229,10 @@ std::wstring RegisterHotkeys() {
             continue;
         }
         if (RegisterHotKey(g_mainWnd, id, hk.mods, hk.vk)) continue;
-        if (hk.mods & MOD_WIN) g_hookKeys.push_back({id, hk, false});  // reserved by Windows: use the hook
+        if (hk.mods & MOD_WIN) hookKeys.push_back({id, hk, false});  // reserved by Windows: use the hook
         else failed += std::wstring(e.name) + L": " + *e.text + L" is used by another app\n";
     }
-    UpdateKeyHook();
+    StartKeyHook(std::move(hookKeys));
     if (!failed.empty()) Log(L"Hotkey problems: %s", failed.c_str());
     return failed;
 }
@@ -223,6 +248,22 @@ FILETIME IniTime() {
     return {};
 }
 
+ULONGLONG g_startTick = 0;
+
+// One timer for the daily checks, set for the moment the next one is due (no hourly polling). The
+// checks themselves say when they are due next (after a failure or a skip they wait a few hours).
+void ScheduleChecks() {
+    long long s = std::min(Maint_SecondsToNext(), Update_SecondsToNext());
+    if (s == LLONG_MAX) {
+        KillTimer(g_mainWnd, kTimerChecks);
+        return;
+    }
+    const long long up = static_cast<long long>((GetTickCount64() - g_startTick) / 1000);
+    s = std::max(s, 15 * 60 - up);           // nothing heavy in the first 15 minutes after start
+    s = std::clamp(s, 60LL, 12 * 3600LL);    // and a look twice a day at most when nothing is due
+    SetTimer(g_mainWnd, kTimerChecks, static_cast<UINT>(s * 1000), nullptr);
+}
+
 void ReloadIfChanged() {
     const FILETIME t = IniTime();
     if (CompareFileTime(&t, &g_iniTime) == 0) return;
@@ -230,6 +271,7 @@ void ReloadIfChanged() {
     LoadSettings();
     RegisterHotkeysOrWarn();
     if (!TestMode()) Shell_Register();
+    ScheduleChecks();
     Log(L"Settings reloaded");
 }
 
@@ -254,6 +296,7 @@ std::wstring Settings_Applied() {
     g_iniTime = IniTime();  // so the file watcher doesn't reload it a second time
     Log(L"Settings saved");
     if (!TestMode()) Shell_Register();  // Explorer entries follow the feature switches
+    ScheduleChecks();
     return RegisterHotkeys();
 }
 
@@ -411,10 +454,16 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_APP_MAINT:
         Maint_OnBackground(lp);
+        ScheduleChecks();
         return 0;
     case WM_APP_UPDATE:
         Update_OnMessage(wp, lp);
+        ScheduleChecks();
         return 0;
+    case WM_POWERBROADCAST:
+        // Back from sleep: a check that came due meanwhile runs once the network is back.
+        if (wp == PBT_APMRESUMEAUTOMATIC) SetTimer(h, kTimerChecks, 2 * 60 * 1000, nullptr);
+        return TRUE;
     case WM_APP_UPLOAD:
         Upload_OnMessage(wp, lp);
         return 0;
@@ -508,10 +557,11 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_TIMER:
-        if (wp == kTimerDaily || wp == kTimerFirstCheck) {
-            if (wp == kTimerFirstCheck) KillTimer(h, kTimerFirstCheck);
+        if (wp == kTimerChecks) {
+            KillTimer(h, kTimerChecks);
             Maint_Background();
             Update_Background();
+            ScheduleChecks();
         } else if (wp == kTimerDeferred) {
             KillTimer(h, kTimerDeferred);
             Capture_Start(g_deferredMode);
@@ -534,7 +584,14 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 it->second.push_back(std::move(file));
             }
             g_actionQueue.clear();
-            for (const auto& [action, files] : groups) Resizer_Quick(action, files);
+            for (const auto& [action, files] : groups) {
+                try {
+                    Resizer_Quick(action, files);
+                } catch (const std::bad_alloc&) {  // an image too big for memory: say so instead of closing
+                    Log(L"Quick action %s: out of memory", action.c_str());
+                    Tray_Notify(L"Not enough memory", L"The image is too big for this action.");
+                }
+            }
         }
         return 0;
     case WM_DESTROY:
@@ -546,8 +603,8 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         Recorder_Shutdown();
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         for (int id = 1; id <= kHotkeyCount; ++id) UnregisterHotKey(h, id);
-        g_hookKeys.clear();
-        UpdateKeyHook();
+        StopKeyHook();
+        KillTimer(h, kTimerChecks);
         PostQuitMessage(0);
         return 0;
     }
@@ -636,6 +693,9 @@ void SendFileList(ULONG_PTR tag, const std::vector<std::wstring>& files) {
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
+    // DLLs only from System32 and Canivete's own folder, never from the current folder (Explorer
+    // starts Canivete in the folder of the clicked file) or PATH.
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_APPLICATION_DIR);
     g_hinst = hinst;
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -671,7 +731,8 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
             CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
             Shell_Unregister();
             SetAutostart(false);
-            Log(L"--uninstall: Explorer entries, shortcuts and start with Windows removed");
+            Upload_Uninstall();  // the Google sign-in (revoked at Google too) and the saved secrets
+            Log(L"--uninstall: Explorer entries, shortcuts, start with Windows and saved sign-ins removed");
             CoUninitialize();
             return 0;
         }
@@ -687,6 +748,16 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
         if (!_wcsicmp(argv[1], L"--update-test")) {  // download and check the latest release, install nothing
             LocalFree(argv);
             return Update_SelfTest();
+        }
+        if (!_wcsicmp(argv[1], L"--verify-update")) {  // version sha256 signature: the signature check alone
+            const int r = Update_VerifyTest(argc, argv);
+            LocalFree(argv);
+            return r;
+        }
+        if (!_wcsicmp(argv[1], L"--clean-walk-test") && argc >= 3 && TestMode()) {  // test copies: cleanup on a folder
+            const int r = Maint_WalkTest(argv[2]);
+            LocalFree(argv);
+            return r;
         }
         if (!_wcsicmp(argv[1], L"--grab") && argc >= 3) return RunGrabTest(argv[2]);
         if (!_wcsicmp(argv[1], L"--edit") && argc >= 3) return RunEditor(argv[2]);
@@ -798,8 +869,8 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     if (!TestMode()) Shell_Register();
     Log(L"Canivete %s started", CANIVETE_VERSION);
     if (cmd) PostMessageW(g_mainWnd, WM_APP_COMMAND, cmd, 0);
-    SetTimer(g_mainWnd, kTimerFirstCheck, 3 * 60 * 1000, nullptr);
-    SetTimer(g_mainWnd, kTimerDaily, 60 * 60 * 1000, nullptr);
+    g_startTick = GetTickCount64();
+    ScheduleChecks();
     if (gifMs > 0) Recorder_Test(gifRect, gifMs, testVideo);
     if (listTag) {
         if (list.empty()) list.push_back(L"");  // still opens the window
@@ -841,6 +912,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     }
     if (nHandles) FindCloseChangeNotification(watch);
     if (g_icon) DestroyIcon(g_icon);
+    Gdiplus_Shutdown();
     CoUninitialize();
     CloseHandle(mutex);
     return static_cast<int>(msg.wParam);

@@ -63,7 +63,6 @@ struct State {
     std::vector<Hotkey> ignore;
 } O;
 
-ULONG_PTR g_gdip = 0;
 
 bool IsModifier(UINT vk) {
     switch (vk) {
@@ -194,10 +193,7 @@ std::wstring Overlay_KeyLabel(UINT vk, UINT mods, bool allKeys) {
 }
 
 void Overlay_Begin(const RECT& area, bool allKeys, UINT dpi) {
-    if (!g_gdip) {
-        Gdiplus::GdiplusStartupInput in;
-        Gdiplus::GdiplusStartup(&g_gdip, &in, nullptr);
-    }
+    Gdiplus_Ensure();
     Overlay_End();
     std::lock_guard<std::mutex> lock(O.m);
     O.area = area;

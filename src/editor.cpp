@@ -169,7 +169,6 @@ struct Editor {
     int ImgH() const { return base.h; }
 };
 
-ULONG_PTR g_gdipToken = 0;
 int g_open = 0;  // editor windows; a standalone --edit run quits when the last one closes
 
 Editor* Get(HWND h) { return reinterpret_cast<Editor*>(GetWindowLongPtrW(h, GWLP_USERDATA)); }
@@ -210,8 +209,8 @@ G::StringFormat* TypoFormat() {
 }
 
 G::FontFamily& TextFamily() {
-    static G::FontFamily f(L"Segoe UI");
-    return f;
+    static G::FontFamily* f = new G::FontFamily(L"Segoe UI");  // never freed: no GDI+ call after GdiplusShutdown
+    return *f;
 }
 
 float LineSpacing(float em) {
@@ -2774,10 +2773,7 @@ LRESULT CALLBACK EditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 
 void Editor_Open(std::shared_ptr<CaptureResult> r, const std::wstring& path) {
     if (!r || r->img.w <= 0 || r->img.h <= 0) return;
-    if (!g_gdipToken) {
-        G::GdiplusStartupInput in;
-        G::GdiplusStartup(&g_gdipToken, &in, nullptr);
-    }
+    Gdiplus_Ensure();
     static bool registered = false;
     if (!registered) {
         WNDCLASSEXW wc{sizeof(wc)};

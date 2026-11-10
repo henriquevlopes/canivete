@@ -38,7 +38,6 @@ struct Trim {
     HFONT font = nullptr;
 };
 
-ULONG_PTR g_gdip = 0;
 
 int Px(const Trim& t, int v) { return MulDiv(v, static_cast<int>(t.dpi), 96); }
 
@@ -352,10 +351,7 @@ uint32_t Trim_SnapMs(uint32_t ms, int fps) {
 
 HWND Trim_Create(HWND parent, int id, int x, int y, int w, int h, const std::vector<TrimThumb>* thumbs,
                  uint32_t durationMs, int fps, UINT dpi) {
-    if (!g_gdip) {
-        Gdiplus::GdiplusStartupInput in;
-        Gdiplus::GdiplusStartup(&g_gdip, &in, nullptr);
-    }
+    Gdiplus_Ensure();
     static bool registered = false;
     if (!registered) {
         WNDCLASSW wc{};

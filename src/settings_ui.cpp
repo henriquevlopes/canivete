@@ -940,14 +940,13 @@ void FillColor(HDC dc, const RECT& r, COLORREF c) {
 // Smooth (antialiased) shapes through GDI+; plain GDI draws rounded corners jagged.
 Gdiplus::Color GpColor(COLORREF c) { return Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)); }
 
-struct Smooth {
+struct GdipOn {
+    GdipOn() { Gdiplus_Ensure(); }  // before the Graphics member below is built
+};
+
+struct Smooth : GdipOn {
     Gdiplus::Graphics g;
-    explicit Smooth(HDC dc) : g(dc) {
-        static ULONG_PTR token = 0;
-        if (!token) {
-            Gdiplus::GdiplusStartupInput in;
-            Gdiplus::GdiplusStartup(&token, &in, nullptr);
-        }
+    explicit Smooth(HDC dc) : GdipOn(), g(dc) {
         g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
     }

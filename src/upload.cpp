@@ -180,8 +180,14 @@ std::string JsonString(const std::string& j, const std::string& key, size_t from
         if (c == 'n') out += '\n';
         else if (c == 't') out += '\t';
         else if (c == 'u' && p + 4 < j.size()) {
-            const unsigned cp = static_cast<unsigned>(std::stoul(j.substr(p + 1, 4), nullptr, 16));
-            if (cp < 0x80) out += static_cast<char>(cp);
+            unsigned cp = 0;
+            bool hex = true;
+            for (size_t h = p + 1; h <= p + 4; ++h) {
+                const unsigned char d = static_cast<unsigned char>(j[h]);
+                if (!isxdigit(d)) hex = false;
+                cp = cp * 16 + (isdigit(d) ? d - '0' : (tolower(d) - 'a' + 10) & 15);
+            }
+            if (hex && cp < 0x80) out += static_cast<char>(cp);
             else out += '?';
             p += 4;
         } else out += c;
@@ -250,6 +256,9 @@ std::wstring Endpoint(const std::wstring& url) {
 std::mutex g_secretMx;
 
 std::wstring SecretsPath() { return AppDataDir() + L"\\secrets.ini"; }
+
+// A link without its query: a private S3 link's signature never reaches the log.
+std::wstring LogLink(const std::wstring& link) { return link.substr(0, link.find(L'?')); }
 
 DATA_BLOB Entropy() {
     static char e[] = "Canivete uploads";
@@ -823,7 +832,7 @@ Result RunJob(const Job& j) {
     res.ok = j.s.uploadService == L"s3" ? S3Upload(j, f, total, progress, res) : DriveUpload(j, f, total, progress, res);
     CloseHandle(f);
     Log(L"Upload %s to %s: %s in %llu ms%s%s", res.name.c_str(), res.service.c_str(), SizeText(res.bytes).c_str(),
-        GetTickCount64() - t0, res.ok ? L" -> " : L", failed: ", res.ok ? res.link.c_str() : res.error.c_str());
+        GetTickCount64() - t0, res.ok ? L" -> " : L", failed: ", res.ok ? LogLink(res.link).c_str() : res.error.c_str());
     return res;
 }
 
@@ -859,7 +868,7 @@ void SetClipboardText(const std::wstring& text) {
 
 void OpenUrl(const std::wstring& url) {
     if (TestMode()) {
-        Log(L"Would open %s", url.c_str());
+        Log(L"Would open %s", LogLink(url).c_str());
         return;
     }
     ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -1121,6 +1130,22 @@ void Upload_DriveConnect() {
 
 bool Upload_DriveConnecting() { return g_connecting; }
 
+// --uninstall: forget the Google sign-in (here and at Google) and the saved keys.
+void Upload_Uninstall() {
+    const std::wstring refresh = Upload_LoadSecret(L"DriveRefreshToken");
+    if (!refresh.empty()) {
+        HttpReq q;
+        q.method = L"POST";
+        q.url = Endpoint(kRevokeUrl);
+        q.headers = L"Content-Type: application/x-www-form-urlencoded\r\n";
+        q.body = Form({{"token", Utf8(refresh)}});
+        HttpResp a;
+        Http(q, a);
+        Log(L"Uninstall: Drive sign-in revoked: %lu", a.status);
+    }
+    DeleteFileW(SecretsPath().c_str());
+}
+
 void Upload_DriveDisconnect() {
     const std::wstring refresh = Upload_LoadSecret(L"DriveRefreshToken");
     Upload_SaveSecret(L"DriveRefreshToken", L"");
@@ -1153,7 +1178,7 @@ void Upload_S3Test() {
         res.service = L"Amazon S3";
         const std::string text = "Canivete connection test. You can delete this file.\n";
         res.ok = S3Upload(j, INVALID_HANDLE_VALUE, text.size(), nullptr, res, &text);
-        Log(L"S3 test: %s", res.ok ? res.link.c_str() : res.error.c_str());
+        Log(L"S3 test: %s", res.ok ? LogLink(res.link).c_str() : res.error.c_str());
         Post(kTested, reinterpret_cast<LPARAM>(new Result(res)));
     }).detach();
 }
@@ -1181,7 +1206,7 @@ void Upload_OnMessage(WPARAM wp, LPARAM lp) {
             if (!g_working) Tray_SetTip(L"");
         }
         if (r->ok) {
-            if (TestMode()) Log(L"Link (would be copied): %s", r->link.c_str());
+            if (TestMode()) Log(L"Link (would be copied): %s", LogLink(r->link).c_str());
             else SetClipboardText(r->link);
             const std::wstring link = r->link;
             Tray_NotifyAction(L"Link copied", r->name + L" is on " + r->service + L". " +

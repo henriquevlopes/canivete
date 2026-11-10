@@ -88,6 +88,8 @@ void SaveSettings(const Settings& s);
 bool ParseHotkey(const std::wstring& text, Hotkey& out);
 std::wstring HotkeyText(const Hotkey& hk);  // "Ctrl+Shift+PrintScreen", "" when none
 void Log(const wchar_t* fmt, ...);
+std::wstring LogPath();   // %APPDATA%\Canivete\logs\canivete.log
+void Log_DisableFile();  // the elevated helper copy writes nothing into the user's folder
 void SaveSettingValue(const wchar_t* section, const wchar_t* key, const std::wstring& value);
 
 // Color picker copy formats: settings key and the label shown in Settings.
@@ -152,6 +154,7 @@ void Upload_Image(const Image& img, const CaptureResult& meta);  // a picture th
 void Upload_DriveConnect();  // browser sign-in (uses the saved Client ID and secret)
 bool Upload_DriveConnecting();
 void Upload_DriveDisconnect();       // forgets the sign-in and tells Google
+void Upload_Uninstall();  // --uninstall: revokes the Google sign-in (waits for it), deletes secrets.ini
 std::wstring Upload_DriveAccount();  // the connected account, "" = not connected
 void Upload_S3Test();                // a small test file with the saved settings
 void Upload_OnMessage(WPARAM wp, LPARAM lp);
@@ -164,7 +167,9 @@ void Maint_Show(int tab = -1);  // tab: 0 Overview, 1 Updates, 2 Installed apps,
                                 // 5 Health; -1 = last one
 HWND Maint_Window();
 int Maint_AdminMain(int argc, wchar_t** argv);  // --maint-admin: the elevated copy that runs one job
-void Maint_Background(bool force = false);  // daily check (hourly timer); force: now, whatever the time
+int Maint_WalkTest(const wchar_t* dir);  // --clean-walk-test (test copies): empties dir like a cleanup place
+void Maint_Background(bool force = false);  // daily check when due; force: now, whatever the time
+long long Maint_SecondsToNext();             // until the daily check is due (0 = now, LLONG_MAX = never)
 void Maint_OnBackground(LPARAM result);      // WM_APP_MAINT
 void Maint_Refresh();                        // the Overview list again (after a Canivete update check)
 
@@ -180,9 +185,16 @@ const UpdateInfo& Update_Info();
 bool Update_Busy();
 void Update_Check(bool manual);  // manual: always says what it found
 void Update_Background();        // once a day when the setting is on
+long long Update_SecondsToNext();  // until the next background check is due (LLONG_MAX = never)
+bool Net_Online();               // Windows says there is internet (true when it can't tell)
 void Update_Install();           // asks, downloads, checks, runs the setup and exits
 void Update_OnMessage(WPARAM wp, LPARAM lp);
 int Update_SelfTest();           // --update-test: download and check the latest release, install nothing
+int Update_VerifyTest(int argc, wchar_t** argv);  // --verify-update <version> <sha256> <sig>: 0 = valid
+
+// ---- theme.cpp: GDI+ is started once for the whole process ------------------------------------
+void Gdiplus_Ensure();
+void Gdiplus_Shutdown();  // at exit, after all windows are gone
 
 // ---- 32-bit top-down DIB section with its own memory DC --------------------------------------
 struct Dib {

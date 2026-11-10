@@ -22,6 +22,7 @@ using std::min;
 #include <gdiplus.h>
 #pragma comment(lib, "gdiplus.lib")
 #include <map>
+#include <mutex>
 
 namespace {
 
@@ -160,11 +161,7 @@ int Scale(HWND h, int v) { return MulDiv(v, static_cast<int>(GetDpiForWindow(h))
 Gdiplus::Color GpColor(COLORREF c) { return Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)); }
 
 void RoundRectSmooth(HDC dc, const RECT& rc, float radius, COLORREF fill, bool outline, COLORREF line) {
-    static ULONG_PTR token = 0;
-    if (!token) {
-        Gdiplus::GdiplusStartupInput in;
-        Gdiplus::GdiplusStartup(&token, &in, nullptr);
-    }
+    Gdiplus_Ensure();
     Gdiplus::Graphics g(dc);
     g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
@@ -480,6 +477,24 @@ HBRUSH Theme_Brush(COLORREF c) {
     HBRUSH& b = g_brushes[c];
     if (!b) b = CreateSolidBrush(c);
     return b;
+}
+
+namespace {
+std::mutex g_gdipMx;
+ULONG_PTR g_gdipToken = 0;
+}  // namespace
+
+void Gdiplus_Ensure() {
+    std::lock_guard<std::mutex> lock(g_gdipMx);
+    if (g_gdipToken) return;
+    Gdiplus::GdiplusStartupInput in;
+    if (Gdiplus::GdiplusStartup(&g_gdipToken, &in, nullptr) != Gdiplus::Ok) g_gdipToken = 0;
+}
+
+void Gdiplus_Shutdown() {
+    std::lock_guard<std::mutex> lock(g_gdipMx);
+    if (g_gdipToken) Gdiplus::GdiplusShutdown(g_gdipToken);
+    g_gdipToken = 0;
 }
 
 void Theme_Init(HWND mainWnd) {

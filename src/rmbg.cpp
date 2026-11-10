@@ -319,7 +319,17 @@ bool Setup(Progress& pr, std::wstring& err) {
 // ---- ONNX Runtime ----------------------------------------------------------------------------
 class Ai {
 public:
-    ~Ai() { Unload(); }
+    // Everything goes: the tray copy doesn't keep onnxruntime and DirectML mapped after the job.
+    ~Ai() {
+        Unload();
+        if (api_ && mem_) api_->ReleaseMemoryInfo(mem_);
+        if (api_ && env_) api_->ReleaseEnv(env_);
+        mem_ = nullptr;
+        env_ = nullptr;
+        api_ = nullptr;
+        if (dll_) FreeLibrary(dll_);
+        if (dml_) FreeLibrary(dml_);
+    }
     bool Loaded() const { return sess_ != nullptr; }
     bool Gpu() const { return gpu_; }
 
@@ -329,8 +339,21 @@ public:
         const ULONGLONG t0 = GetTickCount64();
         if (!api_) {
             const std::wstring rt = RuntimeDir();
-            if (Exists(rt + L"\\DirectML.dll")) LoadLibraryExW((rt + L"\\DirectML.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-            dll_ = LoadLibraryExW((rt + L"\\onnxruntime.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+            // The files sit in a user-writable folder: check them again before loading, not only at download.
+            const DWORD how = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
+            const std::wstring dml = rt + L"\\DirectML.dll", ort = rt + L"\\onnxruntime.dll";
+            if (Exists(dml)) {
+                if (FileSha256(dml) != kDmlDllSha) {
+                    err = L"The AI runtime files were changed. Delete the \"ai\" folder in Canivete's settings folder and try again.";
+                    return false;
+                }
+                if (!dml_) dml_ = LoadLibraryExW(dml.c_str(), nullptr, how);
+            }
+            if (FileSha256(ort) != kOrtDllSha) {
+                err = L"The AI runtime files were changed. Delete the \"ai\" folder in Canivete's settings folder and try again.";
+                return false;
+            }
+            if (!dll_) dll_ = LoadLibraryExW(ort.c_str(), nullptr, how);
             using GetBase = const OrtApiBase*(ORT_API_CALL*)();
             auto base = dll_ ? reinterpret_cast<GetBase>(GetProcAddress(dll_, "OrtGetApiBase")) : nullptr;
             api_ = base ? base()->GetApi(ORT_API_VERSION) : nullptr;
@@ -420,6 +443,7 @@ private:
     }
 
     HMODULE dll_ = nullptr;
+    HMODULE dml_ = nullptr;
     const OrtApi* api_ = nullptr;
     OrtEnv* env_ = nullptr;
     OrtMemoryInfo* mem_ = nullptr;

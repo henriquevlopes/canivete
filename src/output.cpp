@@ -551,6 +551,7 @@ bool LoadImageFile(const std::wstring& path, Image& out) {
         return false;
     UINT w = 0, h = 0;
     conv->GetSize(&w, &h);
+    if (!w || !h || static_cast<uint64_t>(w) * h > (1ull << 28)) return false;  // 268 megapixels: more than memory allows
     out.w = static_cast<int>(w);
     out.h = static_cast<int>(h);
     out.px.resize(static_cast<size_t>(w) * h);
