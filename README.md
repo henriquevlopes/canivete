@@ -78,7 +78,7 @@ Everything is stored in
 Log: `%APPDATA%\Canivete\canivete.log`.
 
 Editor: tools Rectangle (R), Ellipse (E), Arrow (A), Line (L), Text (T), Number (N, counts up),
-Highlighter (H) and Pixelate (P); colors 1-8; size with `[` `]` or the mouse wheel; Shift draws
+Highlighter (H), Pixelate (P), Blur (G) and Crop (C); colors 1-8; size with `[` `]` or the mouse wheel; Shift draws
 squares, circles and 45° lines. Ctrl+wheel zooms at the mouse (Ctrl+0 fits, Ctrl+1 = 100 %, Ctrl +/-);
 hold Space and drag (or drag with the middle button) to move around. Ctrl+Z / Ctrl+Y undo/redo, Ctrl+C copies, Ctrl+S saves (over the
 capture's file). Enter or Done copies, saves and closes; Esc cancels a shape or closes (asks if there
@@ -88,6 +88,22 @@ any shape. A selected shape can be dragged (Shift = straight), resized by its ha
 markers stretch from a corner), nudged with the arrow keys (Shift = 10 px), recolored or resized
 with the color and size buttons / keys / wheel, and removed with Delete; Esc unselects. Clicking a
 text with the Text tool, or double-clicking it with any tool, retypes it. Every change is one undo step.
+
+Blur (G) works like Pixelate but smooths what's under the box instead of making blocks; the size
+button sets how strong it is, and it stays an editable shape. Crop (C): drag a box (Shift keeps the
+picture's shape), move it or pull its handles; the outside goes dark and the size shows in pixels.
+Arrow keys move the box, Ctrl+arrows resize it. Enter or a double-click inside crops, Esc cancels.
+Shapes move with the picture, and Ctrl+Z brings back the whole picture in one step. Copy, Save, Done,
+Make alpha, Remove background and Upload all use the cropped picture.
+
+Store-page frame (frame button or F) opens a side panel that puts the picture on a background, ready
+for a store page: padding, corner roundness, shadow on/off and its softness, background (white, light
+grey, dark, soft gradient, transparent, or any color with +) and shape (Original, 16:9, 1:1, 4:3). The
+preview updates as you go. While the frame is on, Copy, Save, Done and Upload give the framed
+picture (a transparent background stays transparent in PNG files; JPG and the clipboard get white
+behind it). The switch at the top turns it off; the choices are remembered. Keyboard: Tab or Up/Down
+moves between settings, Left/Right changes them (Shift = bigger steps), Space switches, Esc leaves
+the panel, F closes it.
 
 Make alpha (editor α button, or M): turns the screenshot into a square alpha for Substance Painter,
 details white on a black background. Mark exactly what you want with **Lasso** (L, drag freely) or
@@ -241,6 +257,10 @@ server (`tools\upload_mock.py`, needs Python): sign-in, resumable pieces with a 
 the Upload buttons, errors. Test copies only: `CANIVETE_UPLOAD_MOCK=http://127.0.0.1:port` sends every upload
 there, `--set-secret name value` stores a secret, `CANIVETE_GRAB_FAKE=1` makes screenshots a gradient (a hidden
 desktop has no screen).
+`tools\test_editor.ps1 [-Theme dark]` (also through `tools\hidden_test.ps1`) opens a made-up picture with
+`--edit` and checks Blur, Crop (with undo/redo) and the store-page frame, saving the results as PNGs in
+`test_out\`. Test copies only: the editor takes commands by WM_COPYDATA (`crop`, `blur`, `frame`, `bg`,
+`shape`, `saveas`, `info`..., see `TestCommands` in `src/editor.cpp`).
 `Canivete.exe --do <action> a.jpg b.png` runs a right-click menu action (`small medium large half custom
 jpg png tif bmp right left 180 fliph flipv nobg copy`).
 `Canivete.exe --grab out.png` (or `.jpg`) grabs all monitors to a file and exits (self-test).

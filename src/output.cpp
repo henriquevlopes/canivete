@@ -119,19 +119,25 @@ std::vector<BYTE> Encode(const Image& img, int quality) {
     }
     if (SUCCEEDED(hr)) hr = frame->Initialize(props.Get());
     if (SUCCEEDED(hr)) hr = frame->SetSize(img.w, img.h);
-    WICPixelFormatGUID fmt = GUID_WICPixelFormat24bppBGR;
+    const bool keepAlpha = img.alpha && !jpg;  // a transparent PNG: 32-bit with its alpha
+    const GUID want = keepAlpha ? GUID_WICPixelFormat32bppBGRA : GUID_WICPixelFormat24bppBGR;
+    WICPixelFormatGUID fmt = want;
     if (SUCCEEDED(hr)) hr = frame->SetPixelFormat(&fmt);
-    if (SUCCEEDED(hr) && fmt != GUID_WICPixelFormat24bppBGR) hr = E_FAIL;
-    if (SUCCEEDED(hr)) {
+    if (SUCCEEDED(hr) && fmt != want) hr = E_FAIL;
+    if (SUCCEEDED(hr) && keepAlpha) {
+        hr = frame->WritePixels(img.h, img.w * 4, static_cast<UINT>(img.px.size() * 4),
+                                reinterpret_cast<BYTE*>(const_cast<uint32_t*>(img.px.data())));
+    } else if (SUCCEEDED(hr)) {
         const UINT stride = (img.w * 3 + 3) & ~3u;
         std::vector<BYTE> rows(static_cast<size_t>(stride) * img.h);
         for (int y = 0; y < img.h; ++y) {
             const uint32_t* s = &img.px[static_cast<size_t>(y) * img.w];
             BYTE* d = &rows[static_cast<size_t>(y) * stride];
             for (int x = 0; x < img.w; ++x) {
-                d[x * 3 + 0] = static_cast<BYTE>(s[x]);
-                d[x * 3 + 1] = static_cast<BYTE>(s[x] >> 8);
-                d[x * 3 + 2] = static_cast<BYTE>(s[x] >> 16);
+                const uint32_t v = img.alpha ? OverWhite(s[x]) : s[x];
+                d[x * 3 + 0] = static_cast<BYTE>(v);
+                d[x * 3 + 1] = static_cast<BYTE>(v >> 8);
+                d[x * 3 + 2] = static_cast<BYTE>(v >> 16);
             }
         }
         hr = frame->WritePixels(img.h, stride, static_cast<UINT>(rows.size()), rows.data());
@@ -182,9 +188,10 @@ void SetClipboardImage(const Image& img, const std::vector<BYTE>& png) {
             const uint32_t* s = &img.px[static_cast<size_t>(img.h - 1 - y) * img.w];
             BYTE* d = rows + static_cast<size_t>(y) * stride;
             for (int x = 0; x < img.w; ++x) {
-                d[x * 3 + 0] = static_cast<BYTE>(s[x]);
-                d[x * 3 + 1] = static_cast<BYTE>(s[x] >> 8);
-                d[x * 3 + 2] = static_cast<BYTE>(s[x] >> 16);
+                const uint32_t v = img.alpha ? OverWhite(s[x]) : s[x];
+                d[x * 3 + 0] = static_cast<BYTE>(v);
+                d[x * 3 + 1] = static_cast<BYTE>(v >> 8);
+                d[x * 3 + 2] = static_cast<BYTE>(v >> 16);
             }
         }
         GlobalUnlock(g);
@@ -372,7 +379,8 @@ void ToastShow(const CaptureResult& r, const std::wstring& path, bool copied) {
     T.thumb.Free();
     Dib src;
     if (src.Create(r.img.w, r.img.h) && T.thumb.Create(tw, th)) {
-        memcpy(src.bits, r.img.px.data(), r.img.px.size() * sizeof(uint32_t));
+        if (r.img.alpha) std::transform(r.img.px.begin(), r.img.px.end(), src.bits, OverWhite);
+        else memcpy(src.bits, r.img.px.data(), r.img.px.size() * sizeof(uint32_t));
         SetStretchBltMode(T.thumb.dc, HALFTONE);
         SetBrushOrgEx(T.thumb.dc, 0, 0, nullptr);
         StretchBlt(T.thumb.dc, 0, 0, tw, th, src.dc, 0, 0, r.img.w, r.img.h, SRCCOPY);

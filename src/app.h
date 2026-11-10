@@ -230,8 +230,16 @@ struct Dib {
 // ---- capture.cpp ---------------------------------------------------------------------------
 struct Image {
     int w = 0, h = 0;
-    std::vector<uint32_t> px;  // BGRX, top-down, alpha ignored
+    std::vector<uint32_t> px;  // BGRX, top-down; alpha ignored unless `alpha`
+    bool alpha = false;        // px is BGRA, straight alpha: PNG keeps it, JPG and the clipboard DIB get white behind
 };
+
+// A pixel of an alpha image over white (for JPG and the clipboard's DIB).
+inline uint32_t OverWhite(uint32_t v) {
+    const uint32_t a = v >> 24, k = 255 - a;
+    auto ch = [&](int s) { return (((v >> s) & 255) * a + 255 * k + 127) / 255; };
+    return (ch(16) << 16) | (ch(8) << 8) | ch(0);
+}
 
 struct CaptureResult {
     Image img;
