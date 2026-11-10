@@ -12,7 +12,7 @@ if (-not $dir) { "CANIVETE_TEST is not set: run this through hidden_test.ps1"; e
 $Exe = (Resolve-Path $Exe).Path
 New-Item -ItemType Directory -Force $Out | Out-Null
 $Out = (Resolve-Path $Out).Path
-$log = Join-Path $dir "canivete.log"
+$log = Join-Path $dir "logs\canivete.log"
 $script:fails = 0
 
 Add-Type -ReferencedAssemblies System.Drawing @"

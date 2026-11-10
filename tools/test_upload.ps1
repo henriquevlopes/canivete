@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 $dir = $env:CANIVETE_TEST
 if (-not $dir) { "CANIVETE_TEST is not set: run this through hidden_test.ps1"; exit 1 }
 $Exe = (Resolve-Path $Exe).Path
-$log = Join-Path $dir "canivete.log"
+$log = Join-Path $dir "logs\canivete.log"
 $mock = "http://127.0.0.1:$Port"
 $env:CANIVETE_UPLOAD_MOCK = $mock
 $env:CANIVETE_GIF_FAKE = "1"

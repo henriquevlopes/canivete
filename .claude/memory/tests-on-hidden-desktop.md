@@ -14,6 +14,6 @@ separate single-instance mutex) and are killed afterwards. The real copy in the 
 
 **How to apply:** test scripts find windows, send them messages and capture them with PrintWindow
 exactly as before (all of that works on the hidden desktop), but launch them only through the
-runner. Read the test copy's log at `%TEMP%\CaniveteTest\canivete.log`. Only Explorer verbs
+runner. Read the test copy's log at `%TEMP%\CaniveteTest\logs\canivete.log`. Only Explorer verbs
 (`Start-Process -Verb ...`) need the real copy; avoid them unless the verb itself changed.
 In PowerShell P/Invoke, pass `[NullString]::Value`, never `$null`, for a string argument.

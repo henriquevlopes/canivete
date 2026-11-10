@@ -4,7 +4,7 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $exe = "$root\build\Release\Canivete.exe"
-$log = Join-Path $env:CANIVETE_TEST "canivete.log"
+$log = Join-Path $env:CANIVETE_TEST "logs\canivete.log"
 Add-Type @"
 using System; using System.Runtime.InteropServices;
 public static class W {

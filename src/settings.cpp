@@ -306,29 +306,48 @@ bool ParseHotkey(const std::wstring& text, Hotkey& out) {
     return true;
 }
 
+// The log lives in a subfolder, so writing it doesn't wake the settings watcher (main.cpp), which
+// watches the settings folder itself.
+std::wstring LogPath() { return AppDataDir() + L"\\logs\\canivete.log"; }
+
+namespace {
+bool g_fileLog = true;
+}
+
+void Log_DisableFile() { g_fileLog = false; }
+
 void Log(const wchar_t* fmt, ...) {
+    // Long lines are cut, never fatal (the plain _s functions end the process on overflow).
     wchar_t msg[1024];
     va_list ap;
     va_start(ap, fmt);
-    vswprintf_s(msg, fmt, ap);
+    _vsnwprintf_s(msg, _TRUNCATE, fmt, ap);
     va_end(ap);
     SYSTEMTIME t;
     GetLocalTime(&t);
     wchar_t line[1200];
-    swprintf_s(line, L"%04d-%02d-%02d %02d:%02d:%02d.%03d  %s\r\n", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute,
-               t.wSecond, t.wMilliseconds, msg);
+    _snwprintf_s(line, _TRUNCATE, L"%04d-%02d-%02d %02d:%02d:%02d.%03d  %s\r\n", t.wYear, t.wMonth, t.wDay, t.wHour,
+                 t.wMinute, t.wSecond, t.wMilliseconds, msg);
     OutputDebugStringW(line);
+    if (!g_fileLog) return;
 
-    const std::wstring path = AppDataDir() + L"\\canivete.log";
+    const std::wstring path = LogPath();
     WIN32_FILE_ATTRIBUTE_DATA fa;
-    if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fa) && fa.nFileSizeLow > 512 * 1024)
-        DeleteFileW(path.c_str());
+    if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fa)) {
+        if (fa.nFileSizeLow > 512 * 1024 || fa.nFileSizeHigh) DeleteFileW(path.c_str());
+    } else if (GetLastError() == ERROR_PATH_NOT_FOUND) {
+        CreateDirectoryW((AppDataDir() + L"\\logs").c_str(), nullptr);
+        DeleteFileW((AppDataDir() + L"\\canivete.log").c_str());  // where older versions kept it
+    }
     HANDLE f = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) return;
-    char utf8[2400];
-    int n = WideCharToMultiByte(CP_UTF8, 0, line, -1, utf8, sizeof(utf8), nullptr, nullptr);
-    DWORD written;
-    if (n > 1) WriteFile(f, utf8, n - 1, &written, nullptr);
+    const int need = WideCharToMultiByte(CP_UTF8, 0, line, -1, nullptr, 0, nullptr, nullptr);
+    if (need > 1) {
+        std::string utf8(static_cast<size_t>(need), '\0');
+        const int n = WideCharToMultiByte(CP_UTF8, 0, line, -1, utf8.data(), need, nullptr, nullptr);
+        DWORD written;
+        if (n > 1) WriteFile(f, utf8.data(), static_cast<DWORD>(n - 1), &written, nullptr);
+    }
     CloseHandle(f);
 }
