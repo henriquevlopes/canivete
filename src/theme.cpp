@@ -94,7 +94,7 @@ void MakeContrastPalette() {
     const COLORREF win = GetSysColor(COLOR_WINDOW), txt = GetSysColor(COLOR_WINDOWTEXT),
                    btn = GetSysColor(COLOR_BTNFACE), hl = GetSysColor(COLOR_HIGHLIGHT),
                    hlTxt = GetSysColor(COLOR_HIGHLIGHTTEXT), grey = GetSysColor(COLOR_GRAYTEXT);
-    p.window = p.base = p.layer = p.card = p.nav = p.footer = p.edit = p.ctlFill = p.ctlDisabled = win;
+    p.window = p.base = p.layer = p.card = p.nav = p.footer = p.edit = p.ctlFill = p.ctlDisabled = p.ctlFocus = win;
     p.text = p.text2 = p.text3 = p.grey = p.hint = p.status = p.icon = p.btnText = txt;
     p.textDis = p.iconOff = grey;
     p.red = p.critical = p.caution = p.success = p.statusOk = txt;
@@ -130,11 +130,11 @@ void MakePalette(bool dark) {
         p.layer = RGB(0x27, 0x27, 0x27);
         p.card = RGB(0x2B, 0x2B, 0x2B);
         p.cardStroke = RGB(0x1D, 0x1D, 0x1D);
-        p.ctlFill = RGB(0x2D, 0x2D, 0x2D);
-        p.ctlHover = RGB(0x32, 0x32, 0x32);
-        p.ctlPressed = RGB(0x27, 0x27, 0x27);
-        p.ctlDisabled = RGB(0x2A, 0x2A, 0x2A);
-        p.ctlStroke = RGB(0x30, 0x30, 0x30);
+        p.ctlFill = RGB(0x32, 0x32, 0x32);  // between Windows' 6 % white over the window (2D) and over a card (37)
+        p.ctlHover = RGB(0x39, 0x39, 0x39);
+        p.ctlPressed = RGB(0x2B, 0x2B, 0x2B);
+        p.ctlDisabled = RGB(0x2E, 0x2E, 0x2E);
+        p.ctlStroke = RGB(0x3A, 0x3A, 0x3A);
         p.ctlStrokeBottom = RGB(0x3A, 0x3A, 0x3A);
         p.ctlStrong = RGB(0x9A, 0x9A, 0x9A);
         p.subtleHover = RGB(0x2D, 0x2D, 0x2D);
@@ -149,6 +149,7 @@ void MakePalette(bool dark) {
         p.caution = RGB(0xFC, 0xE1, 0x00);
         p.focusOuter = RGB(0xFF, 0xFF, 0xFF);
         p.focusInner = RGB(0x00, 0x00, 0x00);
+        p.ctlFocus = RGB(0x1F, 0x1F, 0x1F);
         p.accent = a.light2;
         p.accentText = a.light3;
         p.onAccent = RGB(0, 0, 0);
@@ -178,6 +179,7 @@ void MakePalette(bool dark) {
         p.caution = RGB(0x9D, 0x5D, 0x00);
         p.focusOuter = RGB(0x1A, 0x1A, 0x1A);
         p.focusInner = RGB(0xFF, 0xFF, 0xFF);
+        p.ctlFocus = RGB(0xFF, 0xFF, 0xFF);
         p.accent = a.dark1;
         p.accentText = a.dark2;
         p.onAccent = RGB(0xFF, 0xFF, 0xFF);
@@ -241,6 +243,7 @@ void MakePalette(bool dark) {
 
 constexpr wchar_t kSwitchProp[] = L"Canivete.Switch";
 constexpr wchar_t kAccentProp[] = L"Canivete.Accent";
+constexpr wchar_t kFramedProp[] = L"Canivete.Framed";
 
 int Scale(HWND h, int v) { return MulDiv(v, static_cast<int>(GetDpiForWindow(h)), 96); }
 
@@ -406,6 +409,91 @@ LRESULT DrawButton(const NMCUSTOMDRAW& cd) {
     return CDRF_SKIPDEFAULT;
 }
 
+// ---- drop-down lists -----------------------------------------------------------------------
+
+constexpr wchar_t kHotProp[] = L"Canivete.Hot";
+
+// A drop-down list (CBS_DROPDOWNLIST) drawn as a Windows 11 combo box: a rounded control with the
+// selected text and a chevron. The list that opens stays Windows' own.
+LRESULT CALLBACK ComboSubclass(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR) {
+    switch (m) {
+    case WM_PAINT:
+    case WM_PRINTCLIENT: {
+        if (g_pal.highContrast) break;
+        PAINTSTRUCT ps{};
+        HDC out = m == WM_PAINT ? BeginPaint(h, &ps) : reinterpret_cast<HDC>(wp);
+        RECT rc;
+        GetClientRect(h, &rc);
+        HDC dc = CreateCompatibleDC(out);
+        HBITMAP bmp = CreateCompatibleBitmap(out, rc.right, rc.bottom);
+        HGDIOBJ oldBmp = SelectObject(dc, bmp);
+        SetDCBrushColor(dc, Theme_BackOf(h));
+        FillRect(dc, &rc, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+        const UINT dpi = GetDpiForWindow(h);
+        const bool enabled = IsWindowEnabled(h) != FALSE;
+        const bool dropped = SendMessageW(h, CB_GETDROPPEDSTATE, 0, 0) != 0;
+        const bool focus = GetFocus() == h && !(SendMessageW(h, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS);
+        RECT br = rc;
+        if (focus) InflateRect(&br, -Scale(h, 3), -Scale(h, 3));
+        Fluent_DrawButton(dc, br, dpi, nullptr, nullptr, false, GetPropW(h, kHotProp) != nullptr, dropped, enabled,
+                          false);
+        const LRESULT sel = SendMessageW(h, CB_GETCURSEL, 0, 0);
+        std::wstring text;
+        if (sel >= 0) {
+            const LRESULT n = SendMessageW(h, CB_GETLBTEXTLEN, sel, 0);
+            if (n > 0) {
+                text.resize(static_cast<size_t>(n) + 1);
+                SendMessageW(h, CB_GETLBTEXT, sel, reinterpret_cast<LPARAM>(text.data()));
+                text.resize(wcslen(text.c_str()));
+            }
+        }
+        HGDIOBJ oldFont = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(h, WM_GETFONT, 0, 0)));
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, enabled ? g_pal.text : g_pal.textDis);
+        RECT tr{rc.left + Scale(h, 11), rc.top, rc.right - Scale(h, 34), rc.bottom};
+        DrawTextW(dc, text.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        SelectObject(dc, oldFont);
+        RECT cr{rc.right - Scale(h, 34), rc.top, rc.right - Scale(h, 6), rc.bottom};
+        Fluent_DrawGlyph(dc, cr, 0xE70D, 12, dpi, enabled ? g_pal.text2 : g_pal.textDis);
+        if (focus) Fluent_DrawFocus(dc, rc, dpi, 7);
+        BitBlt(out, 0, 0, rc.right, rc.bottom, dc, 0, 0, SRCCOPY);
+        SelectObject(dc, oldBmp);
+        DeleteObject(bmp);
+        DeleteDC(dc);
+        if (m == WM_PAINT) EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        if (!g_pal.highContrast) return 1;
+        break;
+    case WM_MOUSEMOVE:
+        if (!GetPropW(h, kHotProp)) {
+            SetPropW(h, kHotProp, reinterpret_cast<HANDLE>(1));
+            TRACKMOUSEEVENT t{sizeof(t), TME_LEAVE, h, 0};
+            TrackMouseEvent(&t);
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        break;
+    case WM_MOUSELEAVE:
+        RemovePropW(h, kHotProp);
+        InvalidateRect(h, nullptr, FALSE);
+        break;
+    case WM_SETFOCUS:
+    case WM_KILLFOCUS:
+    case WM_ENABLE:
+    case WM_UPDATEUISTATE: {
+        const LRESULT r = DefSubclassProc(h, m, wp, lp);
+        InvalidateRect(h, nullptr, FALSE);
+        return r;
+    }
+    case WM_NCDESTROY:
+        RemovePropW(h, kHotProp);
+        RemoveWindowSubclass(h, ComboSubclass, id);
+        break;
+    }
+    return DefSubclassProc(h, m, wp, lp);
+}
+
 // ---- subclasses ----------------------------------------------------------------------------
 
 bool OwnerDrawList(HWND h) { return (GetWindowLongW(h, GWL_STYLE) & (LBS_OWNERDRAWFIXED | LBS_OWNERDRAWVARIABLE)) != 0; }
@@ -417,9 +505,13 @@ LRESULT CALLBACK TopSubclass(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR id, 
     case WM_CTLCOLORLISTBOX:
         if (!g_pal.highContrast && !(m == WM_CTLCOLORLISTBOX && OwnerDrawList(reinterpret_cast<HWND>(lp)))) {
             HDC dc = reinterpret_cast<HDC>(wp);
+            HWND c = reinterpret_cast<HWND>(lp);
+            // A text box in a Windows 11 frame gets a lighter (darker in dark mode) fill while typing.
+            const COLORREF bg = m == WM_CTLCOLOREDIT && GetPropW(c, kFramedProp) && GetFocus() == c ? g_pal.ctlFocus
+                                                                                                    : g_pal.edit;
             SetTextColor(dc, g_pal.text);
-            SetBkColor(dc, g_pal.edit);
-            return reinterpret_cast<LRESULT>(Theme_Brush(g_pal.edit));
+            SetBkColor(dc, bg);
+            return reinterpret_cast<LRESULT>(Theme_Brush(bg));
         }
         break;
     case WM_NOTIFY: {
@@ -526,6 +618,7 @@ void ThemeControl(HWND c) {
         SetTheme(c, (style & ES_MULTILINE) ? L"DarkMode_Explorer" : L"DarkMode_CFD");
     } else if (!_wcsicmp(cls, WC_COMBOBOXW)) {
         SetTheme(c, L"DarkMode_CFD");
+        if ((style & 3) == CBS_DROPDOWNLIST) SetWindowSubclass(c, ComboSubclass, 1, 0);
         COMBOBOXINFO ci{sizeof(ci)};
         if (GetComboBoxInfo(c, &ci) && ci.hwndList) SetTheme(ci.hwndList, L"DarkMode_Explorer");
     } else if (!_wcsicmp(cls, WC_LISTBOXW) || !_wcsicmp(cls, UPDOWN_CLASSW) || !_wcsicmp(cls, WC_SCROLLBARW) ||
@@ -642,6 +735,10 @@ void Theme_Update() { Evaluate(true); }
 
 void Theme_SettingsLoaded() {
     if (g_ready && g_uiThread && GetCurrentThreadId() == g_uiThread) Evaluate(true);
+}
+
+void Theme_FramedEdit(HWND edit) {
+    if (edit) SetPropW(edit, kFramedProp, reinterpret_cast<HANDLE>(1));
 }
 
 void Theme_AsSwitch(HWND checkbox) {

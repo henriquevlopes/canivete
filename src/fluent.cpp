@@ -270,7 +270,7 @@ void Fluent_DrawTextBox(HDC dc, const RECT& r, UINT dpi, bool focused, bool enab
     const Palette& p = Pal();
     const float rad = static_cast<float>(Fluent_Px(dpi, 4));
     const float one = std::max(1.0f, static_cast<float>(Fluent_Px(dpi, 1)));
-    if (fill == CLR_INVALID) fill = !enabled ? p.ctlDisabled : focused && !p.highContrast ? (p.dark ? RGB(0x1F, 0x1F, 0x1F) : RGB(255, 255, 255)) : p.ctlFill;
+    if (fill == CLR_INVALID) fill = !enabled ? p.ctlDisabled : focused ? p.ctlFocus : p.ctlFill;
     Smooth s(dc);
     FillRound(*s.g, RF(r), rad, fill, p.ctlStroke, one);
     if (!enabled) return;
@@ -279,7 +279,7 @@ void Fluent_DrawTextBox(HDC dc, const RECT& r, UINT dpi, bool focused, bool enab
     AddRound(clip, RF(r), rad);
     s.g->SetClip(&clip);
     const float h = focused ? 2 * one : one;
-    Gdiplus::SolidBrush b(Gp(focused ? p.accent : p.ctlStrokeBottom));
+    Gdiplus::SolidBrush b(Gp(focused ? p.accent : p.ctlStrong));  // Windows 11 text boxes: a strong bottom line
     s.g->FillRectangle(&b, static_cast<float>(r.left), static_cast<float>(r.bottom) - h,
                        static_cast<float>(r.right - r.left), h);
     s.g->ResetClip();
@@ -427,6 +427,15 @@ void Fluent_DrawFocus(HDC dc, const RECT& r, UINT dpi, int radius) {
     RECT in = r;
     InflateRect(&in, -static_cast<int>(two), -static_cast<int>(two));
     FillRound(*s.g, RF(in), std::max(0.0f, rad - two), CLR_INVALID, p.focusInner, one);
+}
+
+void Fluent_ComboHeight(HWND combo, int height) {
+    RECT r;
+    GetWindowRect(combo, &r);
+    const int item = static_cast<int>(SendMessageW(combo, CB_GETITEMHEIGHT, static_cast<WPARAM>(-1), 0));
+    const int edge = (r.bottom - r.top) - item;  // the frame around the selection field
+    if (item > 0 && edge >= 0 && height - edge > 0)
+        SendMessageW(combo, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1), height - edge);
 }
 
 void Fluent_DrawGlyph(HDC dc, const RECT& r, wchar_t glyph, int px, UINT dpi, COLORREF color) {

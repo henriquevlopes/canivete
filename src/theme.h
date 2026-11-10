@@ -36,6 +36,7 @@ struct Palette {
     COLORREF base, layer;                                  // window, a raised layer
     COLORREF card, cardStroke;                             // cards
     COLORREF ctlFill, ctlHover, ctlPressed, ctlDisabled;   // buttons, text boxes
+    COLORREF ctlFocus;                                     // a text box being typed in
     COLORREF ctlStroke, ctlStrokeBottom, ctlStrong;        // their outline; switch / check outline
     COLORREF subtleHover, subtlePressed;                   // list entries, toolbar buttons
     COLORREF divider;
@@ -60,5 +61,8 @@ void Theme_SettingsLoaded();    // called by LoadSettings (settings.ini may have
 // A check box marked with Theme_AsSwitch is drawn as a switch: its text on the left, the switch
 // on the right (it still is a check box: BM_GETCHECK, Space and clicks work as before).
 void Theme_AsSwitch(HWND checkbox);
+// A text box without a border of its own, inside a frame its window paints (Fluent_DrawTextBox): it
+// takes the focused fill while it has focus.
+void Theme_FramedEdit(HWND edit);
 // The color the window paints behind the control (WM_CTLCOLORSTATIC of its parent).
 COLORREF Theme_BackOf(HWND ctl);

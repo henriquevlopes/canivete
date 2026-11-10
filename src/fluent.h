@@ -78,5 +78,7 @@ void Fluent_DrawProgress(HDC dc, const RECT& r, UINT dpi, int pos, ULONGLONG pha
                          COLORREF bg = CLR_INVALID);
 // The keyboard focus ring around r (2 px outer, 1 px inner), radius in 96-DPI pixels.
 void Fluent_DrawFocus(HDC dc, const RECT& r, UINT dpi, int radius = 4);
+// Makes a drop-down list's closed box this tall (device pixels).
+void Fluent_ComboHeight(HWND combo, int height);
 // A glyph of the icon font centered in r.
 void Fluent_DrawGlyph(HDC dc, const RECT& r, wchar_t glyph, int px, UINT dpi, COLORREF color);

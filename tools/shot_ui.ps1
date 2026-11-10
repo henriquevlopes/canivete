@@ -1,10 +1,11 @@
-﻿# Grabs every Canivete window (Settings tabs, Maintenance, editor, Make alpha, Resize, Rename, the
+# Grabs every Canivete window (Settings tabs, Maintenance, editor, Make alpha, Resize, Rename, the
 # capture preview, Remove background, the recording bar and its save window) in one theme, as PNGs,
 # to look at the design. Nothing is installed, cleaned or uploaded (test copy, simulated jobs, fake
 # grabs). Run it on the hidden desktop:
 #   powershell -ExecutionPolicy Bypass -File tools\hidden_test.ps1 "powershell -ExecutionPolicy Bypass -File tools\shot_ui.ps1 -Theme dark -Out test_out\ui\after"
 param([string]$Exe = (Join-Path $PSScriptRoot "..\build\Release\Canivete.exe"),
-      [string]$Out = (Join-Path $PSScriptRoot "..\test_out\ui"), [string]$Theme = "dark", [string]$Prefix = "")
+      [string]$Out = (Join-Path $PSScriptRoot "..\test_out\ui"), [string]$Theme = "dark", [string]$Prefix = "",
+      [string]$Only = "")  # e.g. "settings,maint": only those windows
 
 $ErrorActionPreference = "Stop"
 $dir = $env:CANIVETE_TEST
@@ -53,6 +54,7 @@ function StopAll {
     Get-Process Canivete -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $Exe } | Stop-Process -Force
     Start-Sleep -Milliseconds 300
 }
+function Want($n) { return (-not $Only) -or (($Only -split ",") -contains $n) }
 function WriteIni([string]$extra = "") {
     $ini = "[General]`r`nCheckUpdates=0`r`nTheme=$Theme`r`n[Maintenance]`r`nDailyCheck=0`r`n" +
            "[Screenshot]`r`nFolder=$dir\shots`r`nOpenEditor=0`r`nShowNotification=1`r`nCopyToClipboard=1`r`n$extra"
@@ -90,94 +92,114 @@ $env:CANIVETE_RMBG_FAKE = "1"
 try {
     WriteIni
     # ---- Settings: a few tabs --------------------------------------------------------------------
-    Start-Process $Exe
-    Start-Sleep -Seconds 2
-    & $Exe --settings
-    $h = Window $null "Canivete Settings"
-    if ($h -ne [IntPtr]::Zero) {
-        $nav = [S]::GetDlgItem($h, 255)  # IDC_NAV
-        foreach ($t in @(@(0, "general"), @(1, "screenshots"), @(5, "uploads"), @(8, "maintenance"))) {
-            [void][S]::SendMessage($nav, 0x186, [IntPtr]$t[0], [IntPtr]::Zero)                  # LB_SETCURSEL
-            [void][S]::SendMessage($h, 0x111, [IntPtr](255 + (1 -shl 16)), $nav)                 # LBN_SELCHANGE
-            Start-Sleep -Milliseconds 300
-            Shot $h ("settings_" + $t[1])
-        }
-        [void][S]::PostMessage($h, 0x10, [IntPtr]::Zero, [IntPtr]::Zero)
-    } else { "MISSING  settings" }
+    if (Want "settings") {
+        Start-Process $Exe
+        Start-Sleep -Seconds 2
+        & $Exe --settings
+        $h = Window $null "Canivete Settings"
+        if ($h -ne [IntPtr]::Zero) {
+            $nav = [S]::GetDlgItem($h, 255)  # IDC_NAV
+            foreach ($t in @(@(0, "general"), @(1, "screenshots"), @(2, "color"), @(4, "video"), @(5, "uploads"), @(6, "images"), @(8, "maintenance"))) {
+                [void][S]::SendMessage($nav, 0x186, [IntPtr]$t[0], [IntPtr]::Zero)                  # LB_SETCURSEL
+                [void][S]::SendMessage($h, 0x111, [IntPtr](255 + (1 -shl 16)), $nav)                 # LBN_SELCHANGE
+                Start-Sleep -Milliseconds 300
+                Shot $h ("settings_" + $t[1])
+            }
+            [void][S]::PostMessage($h, 0x10, [IntPtr]::Zero, [IntPtr]::Zero)
+        } else { "MISSING  settings" }
+    }
 
     # ---- Maintenance -----------------------------------------------------------------------------
-    & $Exe --maintenance
-    $h = Window "CaniveteMaintenance" $null 15
-    if ($h -ne [IntPtr]::Zero) {
-        Start-Sleep -Seconds 4   # simulated checks fill the lists
-        $nav = [S]::GetDlgItem($h, 100)
-        for ($i = 0; $i -lt 6; $i++) {
-            [void][S]::SendMessage($nav, 0x186, [IntPtr]$i, [IntPtr]::Zero)
-            [void][S]::SendMessage($h, 0x111, [IntPtr](100 + (1 -shl 16)), $nav)
-            Start-Sleep -Milliseconds 400
-            Shot $h ("maint_tab$i")
+    if (Want "maint") {
+        if (-not (Get-Process Canivete -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $Exe })) {
+            Start-Process $Exe
+            Start-Sleep -Seconds 2
+        }
+        & $Exe --maintenance
+        $h = Window "CaniveteMaintenance" $null 15
+        if ($h -ne [IntPtr]::Zero) {
+            Start-Sleep -Seconds 4   # simulated checks fill the lists
+            $nav = [S]::GetDlgItem($h, 100)
+            for ($i = 0; $i -lt 6; $i++) {
+                [void][S]::SendMessage($nav, 0x186, [IntPtr]$i, [IntPtr]::Zero)
+                [void][S]::SendMessage($h, 0x111, [IntPtr](100 + (1 -shl 16)), $nav)
+                Start-Sleep -Milliseconds 400
+                Shot $h ("maint_tab$i")
+            }
         }
     }
+
     StopAll
 
     # ---- capture preview (toast) -----------------------------------------------------------------
-    Start-Process $Exe
-    Start-Sleep -Seconds 2
-    & $Exe --full
-    $h = Window "CaniveteToast" $null 10
-    Start-Sleep -Milliseconds 250
-    Shot $h "toast"
-    StopAll
+    if (Want "toast") {
+        Start-Process $Exe
+        Start-Sleep -Seconds 2
+        & $Exe --full
+        $h = Window "CaniveteToast" $null 10
+        Start-Sleep -Milliseconds 250
+        Shot $h "toast"
+        StopAll
+    }
 
     # ---- editor, Make alpha ----------------------------------------------------------------------
-    Start-Process $Exe -ArgumentList "--edit", "`"$pic`""
-    $h = Window $null "Canivete Editor" 15
-    Start-Sleep -Milliseconds 800
-    Shot $h "editor"
-    StopAll
-    Start-Process $Exe -ArgumentList "--alpha", "`"$pic`""
-    $h = Window $null "Make alpha" 15
-    Start-Sleep -Milliseconds 800
-    Shot $h "alpha"
-    StopAll
+    if (Want "editor") {
+        Start-Process $Exe -ArgumentList "--edit", "`"$pic`""
+        $h = Window $null "Canivete Editor" 15
+        Start-Sleep -Milliseconds 800
+        Shot $h "editor"
+        StopAll
+        Start-Process $Exe -ArgumentList "--alpha", "`"$pic`""
+        $h = Window $null "Make alpha" 15
+        Start-Sleep -Milliseconds 800
+        Shot $h "alpha"
+        StopAll
+    }
 
     # ---- Resize, Rename --------------------------------------------------------------------------
-    Start-Process $Exe -ArgumentList "--resize", "`"$pic`"", "`"$pic2`""
-    $h = Window "CaniveteResizer" $null 15
-    Start-Sleep -Milliseconds 800
-    Shot $h "resizer"
-    StopAll
-    Start-Process $Exe -ArgumentList "--rename", "`"$pic`"", "`"$pic2`""
-    $h = Window "CaniveteRenamer" $null 15
-    Start-Sleep -Milliseconds 800
-    Shot $h "renamer"
-    StopAll
+    if (Want "resizer") {
+        Start-Process $Exe -ArgumentList "--resize", "`"$pic`"", "`"$pic2`""
+        $h = Window "CaniveteResizer" $null 15
+        Start-Sleep -Milliseconds 800
+        Shot $h "resizer"
+        StopAll
+        Start-Process $Exe -ArgumentList "--rename", "`"$pic`"", "`"$pic2`""
+        $h = Window "CaniveteRenamer" $null 15
+        Start-Sleep -Milliseconds 800
+        Shot $h "renamer"
+        StopAll
+    }
 
     # ---- Remove background (progress window only, simulated) -------------------------------------
-    Start-Process $Exe
-    Start-Sleep -Seconds 2
-    & $Exe --do nobg "$pic"
-    $h = Window "CaniveteRemoveBackground" $null 10
-    Start-Sleep -Milliseconds 600
-    Shot $h "rmbg"
-    StopAll
+    if (Want "rmbg") {
+        Start-Process $Exe
+        Start-Sleep -Seconds 2
+        & $Exe --do nobg "$pic"
+        $h = Window "CaniveteRemoveBackground" $null 10
+        Start-Sleep -Milliseconds 600
+        Shot $h "rmbg"
+        StopAll
+    }
 
     # ---- recording bar and save window -----------------------------------------------------------
-    Start-Process $Exe -ArgumentList "--gif-test", "200", "200", "320", "200", "2500"
-    $h = Window "CaniveteGifBar" $null 10
-    Start-Sleep -Milliseconds 700
-    Shot $h "recorder_bar"
-    $s = Window "CaniveteGifSave" $null 40
-    if ($s -ne [IntPtr]::Zero) {
-        $end = (Get-Date).AddSeconds(60)
-        while ((Get-Date) -lt $end) {
-            if (@(110, 111, 112 | Where-Object { [S]::IsWindowVisible([S]::GetDlgItem($s, $_)) }).Count -eq 3) { break }
-            Start-Sleep -Milliseconds 300
+    if (Want "recorder") {
+        Start-Process $Exe -ArgumentList "--gif-test", "200", "200", "320", "200", "2500"
+        $h = Window "CaniveteGifBar" $null 10
+        Start-Sleep -Milliseconds 700
+        Shot $h "recorder_bar"
+        $s = Window "CaniveteGifSave" $null 40
+        if ($s -ne [IntPtr]::Zero) {
+            $end = (Get-Date).AddSeconds(60)
+            while ((Get-Date) -lt $end) {
+                if (@(110, 111, 112 | Where-Object { [S]::IsWindowVisible([S]::GetDlgItem($s, $_)) }).Count -eq 3) { break }
+                Start-Sleep -Milliseconds 300
+            }
+            Start-Sleep -Seconds 3
         }
-        Start-Sleep -Seconds 3
+        Shot $s "recorder_save"
+        StopAll
     }
-    Shot $s "recorder_save"
-    StopAll
+
 } finally {
     StopAll
 }

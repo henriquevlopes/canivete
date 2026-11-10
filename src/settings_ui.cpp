@@ -4,6 +4,7 @@
 // any monitor DPI. Hotkey boxes record keys through a low-level keyboard hook that is only installed
 // while one of them has focus, so Win and PrintScreen combinations can be picked too.
 #include "app.h"
+#include "fluent.h"
 #include "theme.h"
 
 #include "../res/resource.h"
@@ -14,15 +15,8 @@
 #include <shlwapi.h>
 #include <shobjidl.h>
 #include <wrl/client.h>
-#include <objidl.h>  // GDI+ needs IStream, which WIN32_LEAN_AND_MEAN leaves out
 
 #include <algorithm>
-namespace Gdiplus {
-using std::max;
-using std::min;
-}  // namespace Gdiplus
-#include <gdiplus.h>
-#pragma comment(lib, "gdiplus.lib")
 #include <bitset>
 #include <cwctype>
 
@@ -32,19 +26,22 @@ namespace {
 
 constexpr wchar_t kClass[] = L"CaniveteSettings";
 constexpr UINT WM_HK_CHANGED = WM_APP + 20;  // posted by the keyboard hook; wParam 1 = a hotkey changed
-constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
 constexpr DWORD kExStyle = WS_EX_CONTROLPARENT;
-// Layout in 96-DPI pixels.
-constexpr int kW = 684;              // client width
-constexpr int kM = 16;               // outer margin
-constexpr int kNavW = 196;           // width of the tab list panel
-constexpr int kL = kNavW + 24;       // left edge of a tab's content
-constexpr int kR = kW - 20;          // right edge of a tab's content
-constexpr int kCW = kR - kL;         // content width
-constexpr int kCX = kL + 128;        // left edge of the controls column (labels to its left)
-constexpr int kFW = kR - kCX;        // width of the controls column
-constexpr int kTop = 98;             // first row under a tab's title and description
-constexpr int kNavItem = 34;         // height of one tab in the list
+// Layout in 96-DPI pixels (Windows 11 Settings proportions).
+constexpr int kW = 820;              // client width
+constexpr int kNavW = 240;           // width of the tab list panel
+constexpr int kL = kNavW + 12;       // left edge of a tab's cards
+constexpr int kR = kW - 24;          // right edge of a tab's cards
+constexpr int kCW = kR - kL;         // card width
+constexpr int kPad = 16;             // padding inside a card
+constexpr int kCX = kL + 196;        // left edge of the controls column (labels to its left)
+constexpr int kCR = kR - kPad;       // right edge of the controls column
+constexpr int kFW = kCR - kCX;       // width of the controls column
+constexpr int kTop = 116;            // first card under a tab's title and description
+constexpr int kNavItem = 40;         // height of one tab in the list
+constexpr int kRow = 48;             // height of one row in a card
+constexpr int kCtlH = 32;            // buttons, text boxes, drop-down lists
 
 enum : int {
     IDC_HK0 = 200,    // hotkey boxes 200..207
@@ -145,7 +142,7 @@ const TabDef kTabs[] = {
 };
 constexpr int kTabCount = static_cast<int>(std::size(kTabs));
 
-enum FontKind : int { kFontNormal, kFontBold, kFontTitle };
+enum FontKind : int { kFontNormal, kFontBold, kFontTitle, kFontCaption };
 
 struct Ctl {
     HWND wnd;
@@ -154,13 +151,27 @@ struct Ctl {
     int tab;      // -1 = always shown (tab list, footer)
     bool header;  // title, description and switch: stay enabled when the feature is off
     int group;    // Uploads tab: 0 = always, 1 = Google Drive only, 2 = Amazon S3 only
+    bool card;    // sits on a card
+    bool frame;   // a text box inside a painted frame
+    bool combo;   // a drop-down list
+};
+
+struct Card {
+    int tab, group;
+    int y, h;                // 96-DPI pixels (x and width are kL..kR)
+    std::vector<int> lines;  // row separators
 };
 
 struct UI {
     HWND hwnd = nullptr, nav = nullptr;
     UINT dpi = 96;
-    HFONT font = nullptr, bold = nullptr, title = nullptr;
+    HFONT font = nullptr, bold = nullptr, title = nullptr, caption = nullptr;  // shared, never deleted
+    int lineH = 20;  // text height of font
     std::vector<Ctl> ctls;
+    std::vector<Card> cards;
+    bool inCard = false;
+    int navHot = -1;            // tab under the mouse
+    bool navHotSwitch = false;  // ... and its switch
     int buildTab = -1;
     bool buildHeader = false;
     int buildGroup = 0;
@@ -211,28 +222,60 @@ HWND Add(const wchar_t* cls, const wchar_t* text, DWORD style, int id, int x, in
          int font = kFontNormal) {
     HWND c = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0, U.hwnd,
                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hinst, nullptr);
-    U.ctls.push_back({c, x, y, w, h, font, U.buildTab, U.buildHeader, U.buildGroup});
+    U.ctls.push_back({c, x, y, w, h, font, U.buildTab, U.buildHeader, U.buildGroup, U.inCard, false, false});
     U.maxY = std::max(U.maxY, y + std::min(h, 34));  // (a combo box's height includes its drop-down list)
     return c;
 }
 
+// Cards: rows of settings on a raised surface, a thin line between rows.
+void CardBegin(int y) {
+    U.cards.push_back({U.buildTab, U.buildGroup, y, 0, {}});
+    U.inCard = true;
+}
+void RowLine(int y) { U.cards.back().lines.push_back(y); }
+int CardEnd(int y) {
+    U.cards.back().h = y - U.cards.back().y;
+    U.inCard = false;
+    U.maxY = std::max(U.maxY, y);
+    return y;
+}
+
+// Row helpers: y is the top of a card row (kRow high); controls sit centered in it.
 void Heading(const wchar_t* text, int y) {
-    Add(WC_STATICW, text, SS_LEFT | SS_NOPREFIX, IDC_STATIC, kL, y, kCW, 22, 0, kFontBold);
+    Add(WC_STATICW, text, SS_LEFT | SS_NOPREFIX, IDC_STATIC, kL + 2, y, kCW, 20, 0, kFontBold);
 }
-void Label(const wchar_t* text, int y) {
-    Add(WC_STATICW, text, SS_LEFT | SS_NOPREFIX, IDC_STATIC, kL, y + 4, kCX - kL - 8, 18);
+void Label(const wchar_t* text, int y, int x = kL + kPad) {
+    Add(WC_STATICW, text, SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDC_STATIC, x, y + 14, kCX - x - 8, 20);
 }
-void Check(int id, const wchar_t* text, int y) {
-    Add(WC_BUTTONW, text, BS_AUTOCHECKBOX | WS_TABSTOP, id, kL, y, kCW, 20);
+// A setting that is on or off: a switch at the right end of the row, its text on the left.
+HWND Switch(int id, const wchar_t* text, int y, int indent = 0) {
+    HWND c = Add(WC_BUTTONW, text, BS_AUTOCHECKBOX | WS_TABSTOP, id, kL + 12 + indent, y + 8, kCW - 24 - indent, kCtlH);
+    Theme_AsSwitch(c);
+    return c;
 }
+HWND Check(int id, const wchar_t* text, int x, int y, int w) {
+    return Add(WC_BUTTONW, text, BS_AUTOCHECKBOX | WS_TABSTOP, id, x, y + 8, w, kCtlH);
+}
+// A text box: x/w is its frame, painted by the window; the box itself sits inside it (Layout).
 HWND Edit(int id, int x, int y, int w, DWORD style = 0) {
-    return Add(WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP | style, id, x, y, w, 24, WS_EX_CLIENTEDGE);
+    HWND c = Add(WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP | style, id, x, y + 8, w, kCtlH);
+    U.ctls.back().frame = true;
+    Theme_FramedEdit(c);
+    return c;
 }
-HWND Button(int id, const wchar_t* text, int x, int y, int w, int h, DWORD style = BS_PUSHBUTTON) {
-    return Add(WC_BUTTONW, text, style | WS_TABSTOP, id, x, y, w, h);
+HWND Combo(int id, int x, int y, int w, int listH = 200) {
+    HWND c = Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, id, x, y + 8, w, listH);
+    U.ctls.back().combo = true;
+    return c;
+}
+HWND Button(int id, const wchar_t* text, int x, int y, int w, DWORD style = BS_PUSHBUTTON) {
+    return Add(WC_BUTTONW, text, style | WS_TABSTOP, id, x, y + 8, w, kCtlH);
+}
+HWND Status(int id, int x, int y, int w) {
+    return Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, id, x, y + 14, w, 20);
 }
 void Hint(const wchar_t* text, int x, int y, int w, int h) {
-    Add(WC_STATICW, text, SS_LEFT | SS_NOPREFIX, IDC_HINT, x, y, w, h);
+    Add(WC_STATICW, text, SS_LEFT | SS_NOPREFIX, IDC_HINT, x, y, w, h, 0, kFontCaption);
 }
 
 LRESULT CALLBACK HotkeyBoxProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR);
@@ -240,24 +283,26 @@ LRESULT CALLBACK NavProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_P
 
 void HotkeyRow(int i, int y) {
     Label(kHkNames[i], y);
-    HWND box = Edit(IDC_HK0 + i, kCX, y, 160, ES_READONLY);
+    HWND box = Edit(IDC_HK0 + i, kCX, y, 170, ES_READONLY);
     SetWindowSubclass(box, HotkeyBoxProc, 1, 0);
-    Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDC_HKST0 + i, kCX + 168, y + 4, kFW - 168, 18);
+    Status(IDC_HKST0 + i, kCX + 182, y, kFW - 182);
 }
-void HotkeyHint(int y) {
-    Hint(L"Click the box, then press the new keys. Backspace turns the hotkey off.", kCX, y, kFW, 34);
+// Under a card of hotkeys. Returns the y of what follows.
+int HotkeyHint(int y) {
+    Hint(L"Click a box, then press the new keys. Backspace turns the hotkey off.", kL + 2, y + 6, kCW, 18);
+    return y + 6 + 18 + 18;
 }
 
-// Title, description and (for a feature) its On switch. Returns the y of the first row.
+// Title, description and (for a feature) the "turned off" note. Returns the y of the first card.
 int BeginTab(int t) {
     U.buildTab = t;
     U.buildHeader = true;
     const TabDef& d = kTabs[t];
-    Add(WC_STATICW, d.name, SS_LEFT | SS_NOPREFIX, IDC_TITLE, kL, 16, kCW - 210, 30, 0, kFontTitle);
+    Add(WC_STATICW, d.name, SS_LEFT | SS_NOPREFIX, IDC_TITLE, kL, 18, kCW - 220, 40, 0, kFontTitle);
     if (d.feature >= 0)
         Add(WC_STATICW, L"Turned off (switch in the list)", SS_RIGHT | SS_NOPREFIX, IDC_OFFNOTE0 + d.feature,
-            kR - 200, 26, 200, 18);
-    Add(WC_STATICW, d.desc, SS_LEFT | SS_NOPREFIX, IDC_DESC, kL, 52, kCW, 36);
+            kR - 210, 32, 210, 18, 0, kFontCaption);
+    Add(WC_STATICW, d.desc, SS_LEFT | SS_NOPREFIX, IDC_DESC, kL, 62, kCW, 40);
     U.buildHeader = false;
     return kTop;
 }
@@ -266,214 +311,281 @@ void Build() {
     U.buildTab = -1;
     U.nav = Add(WC_LISTBOXW, L"",
                 LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_TABSTOP, IDC_NAV, 8, 12,
-                kNavW - 16, kTabCount * kNavItem + 4);
+                kNavW - 12, kTabCount * kNavItem + 4);
     for (const TabDef& d : kTabs) SendMessageW(U.nav, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(d.name));
     SetWindowSubclass(U.nav, NavProc, 2, 0);
 
     // General
     int y = BeginTab(0);
-    Check(IDC_SAVE, L"Save each capture to a file", y);
-    y += 30;
+    CardBegin(y);
+    Switch(IDC_SAVE, L"Save each capture to a file", y);
+    y += kRow;
+    RowLine(y);
     Label(L"Folder", y);
-    HWND folder = Edit(IDC_FOLDER, kCX, y, kFW - 90);
+    HWND folder = Edit(IDC_FOLDER, kCX, y, kFW - 104);
     SendMessageW(folder, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Windows Screenshots folder"));
     SHAutoComplete(folder, SHACF_FILESYS_DIRS);
-    Button(IDC_BROWSE, L"Browse…", kR - 84, y - 1, 84, 26);
-    y += 32;
+    Button(IDC_BROWSE, L"Browse…", kCR - 96, y, 96);
+    y += kRow;
+    RowLine(y);
     Label(L"File name", y);
-    Edit(IDC_NAME, kCX, y, kFW - 90);
-    Button(IDC_TOKENS, L"Insert ▾", kR - 84, y - 1, 84, 26);
-    y += 28;
-    Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_PATHELLIPSIS, IDC_EXAMPLE, kCX, y + 2, kFW, 18);
-    y += 28;
+    Edit(IDC_NAME, kCX, y, kFW - 104);
+    Button(IDC_TOKENS, L"Insert ▾", kCR - 96, y, 96);
+    Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_PATHELLIPSIS, IDC_EXAMPLE, kCX + 2, y + 44, kFW - 2, 18, 0,
+        kFontCaption);
+    y += kRow + 20;
+    RowLine(y);
     Label(L"Format", y);
-    HWND fmt = Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, IDC_FORMAT, kCX, y, 150, 200);
+    HWND fmt = Combo(IDC_FORMAT, kCX, y, 160);
     SendMessageW(fmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"PNG (sharpest)"));
     SendMessageW(fmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"JPG (smaller files)"));
-    Add(WC_STATICW, L"Quality", SS_RIGHT | SS_NOPREFIX, IDC_QLABEL, kCX + 156, y + 4, 52, 18);
-    HWND q = Edit(IDC_QUALITY, kCX + 214, y, 46, ES_NUMBER);
+    Add(WC_STATICW, L"Quality", SS_RIGHT | SS_NOPREFIX, IDC_QLABEL, kCX + 166, y + 14, 62, 20);
+    HWND q = Edit(IDC_QUALITY, kCX + 236, y, 64, ES_NUMBER);
     HWND spin = Add(UPDOWN_CLASSW, L"", UDS_SETBUDDYINT | UDS_ARROWKEYS | UDS_NOTHOUSANDS | UDS_HOTTRACK, IDC_QSPIN,
-                    kCX + 260, y, 18, 24);
+                    kCX + 302, y + 8, 22, kCtlH);
     SendMessageW(spin, UDM_SETBUDDY, reinterpret_cast<WPARAM>(q), 0);
     SendMessageW(spin, UDM_SETRANGE32, 1, 100);
-    y += 44;
+    y = CardEnd(y + kRow);
+    y += 24;
     Heading(L"Windows", y);
     y += 28;
+    CardBegin(y);
     Label(L"Appearance", y);
-    HWND theme = Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, IDC_THEME, kCX, y, 150, 200);
+    HWND theme = Combo(IDC_THEME, kCX, y, 160);
     for (const wchar_t* t : {L"Follow Windows", L"Light", L"Dark"})
         SendMessageW(theme, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(t));
-    y += 36;
-    Check(IDC_AUTOSTART, L"Start Canivete with Windows", y);
-    y += 26;
-    Check(IDC_CHECKUPD, L"Tell me when a new version of Canivete is out", y);
-    y += 30;
-    Button(IDC_UPDNOW, L"Check for updates now", kL, y, 190, 28);
+    y += kRow;
+    RowLine(y);
+    Switch(IDC_AUTOSTART, L"Start Canivete with Windows", y);
+    y += kRow;
+    RowLine(y);
+    Switch(IDC_CHECKUPD, L"Tell me when a new version of Canivete is out", y);
+    y += kRow;
+    RowLine(y);
+    Label(L"Updates", y);
+    Button(IDC_UPDNOW, L"Check for updates now", kCR - 190, y, 190);
+    y = CardEnd(y + kRow);
 
     // Screenshots
     y = BeginTab(1);
+    CardBegin(y);
     HotkeyRow(0, y);
-    y += 30;
+    y += kRow;
+    RowLine(y);
     HotkeyRow(2, y);
-    y += 28;
-    HotkeyHint(y);
-    y += 42;
+    y = HotkeyHint(CardEnd(y + kRow));
+    CardBegin(y);
     Label(L"Full screenshot of", y);
-    HWND full = Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, IDC_FULLMODE, kCX, y, 230, 200);
+    HWND full = Combo(IDC_FULLMODE, kCX, y, 250);
     SendMessageW(full, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"All monitors"));
     SendMessageW(full, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"The monitor under the mouse"));
-    y += 36;
-    Check(IDC_CLIP, L"Copy to the clipboard", y);
-    y += 26;
-    Check(IDC_NOTIFY, L"Show a preview after each capture (click it to edit)", y);
-    y += 26;
-    Check(IDC_EDITOR, L"Open the editor right after each capture", y);
-    y += 26;
-    Check(IDC_CURSOR, L"Include the mouse pointer", y);
-    y += 26;
-    Check(IDC_MAGNIFIER, L"Show the magnifier when selecting a region", y);
+    const std::pair<int, const wchar_t*> shotSwitches[] = {
+        {IDC_CLIP, L"Copy to the clipboard"},
+        {IDC_NOTIFY, L"Show a preview after each capture (click it to edit)"},
+        {IDC_EDITOR, L"Open the editor right after each capture"},
+        {IDC_CURSOR, L"Include the mouse pointer"},
+        {IDC_MAGNIFIER, L"Show the magnifier when selecting a region"}};
+    for (const auto& [id, text] : shotSwitches) {
+        y += kRow;
+        RowLine(y);
+        Switch(id, text, y);
+    }
+    CardEnd(y + kRow);
 
     // Color picker
     y = BeginTab(2);
+    CardBegin(y);
     HotkeyRow(3, y);
-    y += 28;
-    HotkeyHint(y);
-    y += 42;
+    y = HotkeyHint(CardEnd(y + kRow));
+    CardBegin(y);
     Label(L"Default format", y);
-    HWND cf = Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, IDC_COLORFMT, kCX, y, 260, 240);
+    HWND cf = Combo(IDC_COLORFMT, kCX, y, 260, 240);
     for (const ColorFormatDef& f : kColorFormats) SendMessageW(cf, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(f.label));
+    CardEnd(y + kRow);
 
     // GIF recording
     y = BeginTab(3);
+    CardBegin(y);
     HotkeyRow(4, y);
-    y += 30;
+    y += kRow;
+    RowLine(y);
     HotkeyRow(kHkGifPause, y);
-    y += 28;
-    HotkeyHint(y);
-    y += 42;
-    Check(IDC_GKEYS, L"Show keys and clicks in the recording", y);
-    y += 26;
-    Add(WC_BUTTONW, L"Show every key, not only shortcuts (shows what you type)", BS_AUTOCHECKBOX | WS_TABSTOP,
-        IDC_GALLKEYS, kL + 20, y, kCW - 20, 20);
+    y = HotkeyHint(CardEnd(y + kRow));
+    CardBegin(y);
+    Switch(IDC_GKEYS, L"Show keys and clicks in the recording", y);
+    y += kRow;
+    RowLine(y);
+    Switch(IDC_GALLKEYS, L"Show every key, not only shortcuts (shows what you type)", y, 28);
+    CardEnd(y + kRow);
 
     // Video recording
     y = BeginTab(4);
+    CardBegin(y);
     HotkeyRow(5, y);
-    y += 30;
+    y += kRow;
+    RowLine(y);
     HotkeyRow(kHkVideoPause, y);
-    y += 28;
-    HotkeyHint(y);
-    y += 42;
-    Check(IDC_VSOUND, L"Record the computer's sound", y);
-    y += 26;
-    Check(IDC_VMIC, L"Record the microphone", y);
-    y += 26;
-    Check(IDC_VKEYS, L"Show keys and clicks in the recording", y);
-    y += 26;
-    Add(WC_BUTTONW, L"Show every key, not only shortcuts (shows what you type)", BS_AUTOCHECKBOX | WS_TABSTOP,
-        IDC_VALLKEYS, kL + 20, y, kCW - 20, 20);
+    y = HotkeyHint(CardEnd(y + kRow));
+    CardBegin(y);
+    Switch(IDC_VSOUND, L"Record the computer's sound", y);
+    y += kRow;
+    RowLine(y);
+    Switch(IDC_VMIC, L"Record the microphone", y);
+    y += kRow;
+    RowLine(y);
+    Switch(IDC_VKEYS, L"Show keys and clicks in the recording", y);
+    y += kRow;
+    RowLine(y);
+    Switch(IDC_VALLKEYS, L"Show every key, not only shortcuts (shows what you type)", y, 28);
+    CardEnd(y + kRow);
 
     // Uploads
     y = BeginTab(kSettingsTabUploads);
+    CardBegin(y);
     Label(L"Upload to", y);
-    HWND svc = Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, IDC_UPSERVICE, kCX, y, 170, 200);
+    HWND svc = Combo(IDC_UPSERVICE, kCX, y, 150);
     SendMessageW(svc, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Google Drive"));
     SendMessageW(svc, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Amazon S3"));
-    Button(IDC_UPHELP, L"How to set it up…", kR - 140, y - 1, 140, 26);
-    y += 36;
+    Button(IDC_UPHELP, L"How to set it up…", kCR - 156, y, 156);
+    y += kRow;
+    RowLine(y);
     Label(L"Upload by itself", y);
-    Add(WC_BUTTONW, L"Screenshots", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_UPSHOTS, kCX, y + 2, 110, 20);
-    Add(WC_BUTTONW, L"GIFs", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_UPGIF, kCX + 116, y + 2, 70, 20);
-    Add(WC_BUTTONW, L"Videos", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_UPVIDEO, kCX + 192, y + 2, 90, 20);
-    y += 32;
+    Check(IDC_UPSHOTS, L"Screenshots", kCX, y, 116);
+    Check(IDC_UPGIF, L"GIFs", kCX + 124, y, 74);
+    Check(IDC_UPVIDEO, L"Videos", kCX + 206, y, 96);
+    y = CardEnd(y + kRow) + 12;
     const int y0 = y;
     U.buildGroup = 1;  // Google Drive
+    CardBegin(y);
     Label(L"Client ID", y);
     Edit(IDC_DRVID, kCX, y, kFW);
-    y += 32;
+    y += kRow;
+    RowLine(y);
     Label(L"Client secret", y);
     Edit(IDC_DRVSECRET, kCX, y, kFW, ES_PASSWORD);
-    y += 32;
+    y += kRow;
+    RowLine(y);
     Label(L"Account", y);
-    Button(IDC_DRVCONNECT, L"Connect…", kCX, y - 1, 104, 26);
-    Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDC_DRVSTATUS, kCX + 112, y + 4, kFW - 112, 18);
-    y += 34;
+    Button(IDC_DRVCONNECT, L"Connect…", kCX, y, 110);
+    Status(IDC_DRVSTATUS, kCX + 122, y, kFW - 122);
+    y += kRow;
+    RowLine(y);
     Label(L"Drive folder", y);
-    SendMessageW(Edit(IDC_DRVFOLDER, kCX, y, 200), EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"My Drive itself"));
-    y += 32;
-    Add(WC_BUTTONW, L"Anyone with the link can view", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_DRVSHARE, kCX, y, kFW, 20);
+    SendMessageW(Edit(IDC_DRVFOLDER, kCX, y, 220), EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"My Drive itself"));
+    y += kRow;
+    RowLine(y);
+    Switch(IDC_DRVSHARE, L"Anyone with the link can view", y);
+    CardEnd(y + kRow);
     y = y0;
     U.buildGroup = 2;  // Amazon S3
+    CardBegin(y);
     Label(L"Bucket", y);
-    Edit(IDC_S3BUCKET, kCX, y, 170);
-    Add(WC_STATICW, L"Region", SS_RIGHT | SS_NOPREFIX, IDC_STATIC, kCX + 172, y + 4, 52, 18);
-    SendMessageW(Edit(IDC_S3REGION, kCX + 230, y, kFW - 230), EM_SETCUEBANNER, TRUE,
+    Edit(IDC_S3BUCKET, kCX, y, 150);
+    Add(WC_STATICW, L"Region", SS_RIGHT | SS_NOPREFIX, IDC_STATIC, kCX + 154, y + 14, 58, 20);
+    SendMessageW(Edit(IDC_S3REGION, kCX + 220, y, kFW - 220), EM_SETCUEBANNER, TRUE,
                  reinterpret_cast<LPARAM>(L"eu-west-1"));
-    y += 32;
+    y += kRow;
+    RowLine(y);
     Label(L"Folder", y);
     SendMessageW(Edit(IDC_S3PREFIX, kCX, y, kFW), EM_SETCUEBANNER, TRUE,
                  reinterpret_cast<LPARAM>(L"The top of the bucket"));
-    y += 32;
+    y += kRow;
+    RowLine(y);
     Label(L"Access key ID", y);
     Edit(IDC_S3KEYID, kCX, y, kFW);
-    y += 32;
+    y += kRow;
+    RowLine(y);
     Label(L"Secret key", y);
     Edit(IDC_S3SECRET, kCX, y, kFW, ES_PASSWORD);
-    y += 32;
+    y += kRow;
+    RowLine(y);
     Label(L"Link address", y);
     SendMessageW(Edit(IDC_S3LINK, kCX, y, kFW), EM_SETCUEBANNER, TRUE,
                  reinterpret_cast<LPARAM>(L"Optional: https://files.example.com"));
-    y += 32;
-    Add(WC_BUTTONW, L"Private bucket: links work for 7 days", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_S3PRIVATE, kCX, y + 3,
-        kFW - 92, 20);
-    Button(IDC_S3TEST, L"Test", kR - 84, y, 84, 26);
-    y += 30;
-    Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDC_S3STATUS, kCX, y, kFW, 18);
+    y += kRow;
+    RowLine(y);
+    Switch(IDC_S3PRIVATE, L"Private bucket: links work for 7 days", y);
+    y += kRow;
+    RowLine(y);
+    Label(L"Connection", y);
+    Button(IDC_S3TEST, L"Test", kCX, y, 96);
+    Status(IDC_S3STATUS, kCX + 108, y, kFW - 108);
+    CardEnd(y + kRow);
     U.buildGroup = 0;
 
-    // Image tools, Renamer
+    // Image tools, Renamer, Maintenance
     y = BeginTab(kSettingsTabUploads + 1);
-    Button(IDC_OPENRESIZE, L"Open Resize images…", kL, y, 170, 28);
+    CardBegin(y);
+    Label(L"Resize images", y);
+    Button(IDC_OPENRESIZE, L"Open Resize images…", kCR - 190, y, 190);
+    CardEnd(y + kRow);
     y = BeginTab(kSettingsTabUploads + 2);
-    Button(IDC_OPENRENAME, L"Open Rename files…", kL, y, 170, 28);
+    CardBegin(y);
+    Label(L"Rename files", y);
+    Button(IDC_OPENRENAME, L"Open Rename files…", kCR - 190, y, 190);
+    CardEnd(y + kRow);
     y = BeginTab(kSettingsTabUploads + 3);
-    Button(IDC_OPENMAINT, L"Open Maintenance…", kL, y, 170, 28);
-    y += 44;
-    Check(IDC_MAINTDAILY, L"Check once a day and tell me when something needs doing", y);
+    CardBegin(y);
+    Label(L"Computer Maintenance", y, kL + kPad);
+    Button(IDC_OPENMAINT, L"Open Maintenance…", kCR - 190, y, 190);
+    y += kRow;
+    RowLine(y);
+    Switch(IDC_MAINTDAILY, L"Check once a day and tell me when something needs doing", y);
+    CardEnd(y + kRow);
 
     U.buildTab = -1;
-    U.footerY = std::max(U.maxY + 18, 12 + kTabCount * kNavItem + 16);
-    y = U.footerY + 12;
-    const int bw = 84;
-    Button(IDOK, L"OK", kW - kM - 3 * bw - 16, y, bw, 28, BS_DEFPUSHBUTTON);
-    Button(IDCANCEL, L"Cancel", kW - kM - 2 * bw - 8, y, bw, 28);
-    Button(IDC_APPLY, L"Apply", kW - kM - bw, y, bw, 28);
-    U.height = y + 28 + 12;
+    U.footerY = std::max(U.maxY + 24, 12 + kTabCount * kNavItem + 16);
+    y = U.footerY + 16;
+    const int bw = 104;
+    Button(IDOK, L"OK", kW - 24 - 3 * bw - 16, y - 8, bw, BS_DEFPUSHBUTTON);
+    Button(IDCANCEL, L"Cancel", kW - 24 - 2 * bw - 8, y - 8, bw);
+    Button(IDC_APPLY, L"Apply", kW - 24 - bw, y - 8, bw);
+    U.height = y + kCtlH + 16;
 }
 
 void MakeFonts() {
-    for (HFONT f : {U.font, U.bold, U.title})
-        if (f) DeleteObject(f);
-    NONCLIENTMETRICSW ncm{sizeof(ncm)};
-    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, U.dpi);
-    LOGFONTW lf = ncm.lfMessageFont;
-    U.font = CreateFontIndirectW(&lf);
-    const LONG h = lf.lfHeight;
-    lf.lfWeight = FW_SEMIBOLD;
-    lf.lfHeight = MulDiv(h, 112, 100);
-    U.bold = CreateFontIndirectW(&lf);
-    lf.lfHeight = MulDiv(h, 160, 100);
-    U.title = CreateFontIndirectW(&lf);
+    // Shared Windows 11 type ramp fonts (made once, never deleted).
+    U.font = Fluent_Font(kTypeBody, U.dpi);
+    U.bold = Fluent_Font(kTypeBodyStrong, U.dpi);
+    U.title = Fluent_Font(kTypeTitle, U.dpi);
+    U.caption = Fluent_Font(kTypeCaption, U.dpi);
+    HDC dc = GetDC(nullptr);
+    HGDIOBJ old = SelectObject(dc, U.font);
+    TEXTMETRICW tm{};
+    GetTextMetricsW(dc, &tm);
+    SelectObject(dc, old);
+    ReleaseDC(nullptr, dc);
+    U.lineH = tm.tmHeight;
 }
+
+// Where a framed text box sits inside its frame.
+RECT EditRect(const Ctl& c) {
+    const int x = Px(c.x) + Px(11), w = Px(c.w) - Px(22);
+    const int top = Px(c.y) + (Px(c.h) - U.lineH) / 2;
+    return {x, top, x + w, top + U.lineH};
+}
+RECT FrameRect(const Ctl& c) { return {Px(c.x), Px(c.y), Px(c.x + c.w), Px(c.y + c.h)}; }
 
 void Layout() {
     HDWP d = BeginDeferWindowPos(static_cast<int>(U.ctls.size()));
     for (const Ctl& c : U.ctls) {
-        HFONT f = c.font == kFontTitle ? U.title : c.font == kFontBold ? U.bold : U.font;
+        HFONT f = c.font == kFontTitle    ? U.title
+                  : c.font == kFontBold    ? U.bold
+                  : c.font == kFontCaption ? U.caption
+                                           : U.font;
         SendMessageW(c.wnd, WM_SETFONT, reinterpret_cast<WPARAM>(f), FALSE);
-        if (d) d = DeferWindowPos(d, c.wnd, nullptr, Px(c.x), Px(c.y), Px(c.w), Px(c.h), SWP_NOZORDER | SWP_NOACTIVATE);
+        RECT r{Px(c.x), Px(c.y), Px(c.x + c.w), Px(c.y + c.h)};
+        if (c.frame) {
+            r = EditRect(c);
+            SendMessageW(c.wnd, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+        }
+        if (d)
+            d = DeferWindowPos(d, c.wnd, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                               SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (d) EndDeferWindowPos(d);
+    for (const Ctl& c : U.ctls)
+        if (c.combo) Fluent_ComboHeight(c.wnd, Px(kCtlH));
     SendMessageW(U.nav, LB_SETITEMHEIGHT, 0, Px(kNavItem));
     InvalidateRect(U.hwnd, nullptr, TRUE);
 }
@@ -503,6 +615,7 @@ void ShowTab(int t) {
     HWND f = GetFocus();
     if (f && IsChild(U.hwnd, f) && !IsWindowVisible(f)) SetFocus(U.nav);
     ShowOffNote();
+    InvalidateRect(U.hwnd, nullptr, TRUE);  // the cards of this tab
 }
 
 // ---- hotkey boxes --------------------------------------------------------------------------
@@ -709,6 +822,7 @@ void UpdateEnable() {
     for (int id : {IDC_QLABEL, IDC_QUALITY, IDC_QSPIN}) EnableWindow(Item(id), save && JpgSelected());
     EnableWindow(Item(IDC_GALLKEYS), U.on[kFeatGif] && Checked(IDC_GKEYS));
     EnableWindow(Item(IDC_VALLKEYS), U.on[kFeatVideo] && Checked(IDC_VKEYS));
+    if (U.hwnd) InvalidateRect(U.hwnd, nullptr, TRUE);  // text box frames follow
 }
 
 void Toggle(int f) {
@@ -930,118 +1044,69 @@ void Apply() {
     DriveStatus(L"");
 }
 
-// ---- drawing the tab list and the On switches ----------------------------------------------
+// ---- drawing the tab list, the cards and the text box frames ---------------------------------
 
 void FillColor(HDC dc, const RECT& r, COLORREF c) {
     SetDCBrushColor(dc, c);
     FillRect(dc, &r, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
 }
 
-// Smooth (antialiased) shapes through GDI+; plain GDI draws rounded corners jagged.
-Gdiplus::Color GpColor(COLORREF c) { return Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)); }
+constexpr wchar_t kTabGlyphs[kTabCount] = {Glyph::Settings, Glyph::Camera, Glyph::Color,
+                                           Glyph::Slideshow, Glyph::Video, Glyph::Upload,
+                                           Glyph::Photo, Glyph::Rename, Glyph::Repair};
 
-struct GdipOn {
-    GdipOn() { Gdiplus_Ensure(); }  // before the Graphics member below is built
-};
-
-struct Smooth : GdipOn {
-    Gdiplus::Graphics g;
-    explicit Smooth(HDC dc) : GdipOn(), g(dc) {
-        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-    }
-};
-
-// A rounded rectangle; radius = h/2 or more makes a pill. Outline drawn inside the rect.
-void RoundShape(Gdiplus::Graphics& g, Gdiplus::RectF r, float radius, COLORREF fill, COLORREF line, float lineW) {
-    if (lineW > 0) {
-        const float in = lineW / 2;
-        r.X += in;
-        r.Y += in;
-        r.Width -= lineW;
-        r.Height -= lineW;
-    }
-    radius = std::min({radius, r.Width / 2, r.Height / 2});
-    const float d = radius * 2;
-    Gdiplus::GraphicsPath p;
-    p.AddArc(r.X, r.Y, d, d, 180, 90);
-    p.AddArc(r.X + r.Width - d, r.Y, d, d, 270, 90);
-    p.AddArc(r.X + r.Width - d, r.Y + r.Height - d, d, d, 0, 90);
-    p.AddArc(r.X, r.Y + r.Height - d, d, d, 90, 90);
-    p.CloseFigure();
-    Gdiplus::SolidBrush b(GpColor(fill));
-    g.FillPath(&b, &p);
-    if (lineW > 0) {
-        Gdiplus::Pen pen(GpColor(line), lineW);
-        g.DrawPath(&pen, &p);
-    }
-}
-
-Gdiplus::RectF ToRectF(const RECT& r) {
-    return Gdiplus::RectF(static_cast<float>(r.left), static_cast<float>(r.top), static_cast<float>(r.right - r.left),
-                          static_cast<float>(r.bottom - r.top));
-}
-
-void RoundFill(HDC dc, const RECT& r, int radius, COLORREF fill, COLORREF line) {
-    Smooth s(dc);
-    RoundShape(s.g, ToRectF(r), radius / 2.0f, fill, line, line == fill ? 0.0f : 1.0f);
-}
-
-// The small On switch at the right end of a tab in the list.
+// The On switch at the right end of a tab in the list.
 RECT SwitchRect(const RECT& item) {
-    const int w = Px(30), h = Px(16);
-    const int right = item.right - Px(10), top = (item.top + item.bottom - h) / 2;
-    return {right - w, top, right, top + h};
-}
-
-void DrawSwitch(HDC dc, const RECT& pill, bool on) {
-    Smooth s(dc);
-    const Gdiplus::RectF r = ToRectF(pill);
-    const float h = r.Height;
-    const float line = std::max(1.0f, Px(10) / 10.0f);
-    const Palette& p = Pal();
-    if (on) RoundShape(s.g, r, h / 2, p.accent, p.accent, 0);
-    else RoundShape(s.g, r, h / 2, p.nav, p.switchLine, line);
-    // Knob like Windows 11: a bit bigger when on.
-    const float k = on ? h - Px(8) : h - Px(9);
-    const float pad = (h - k) / 2;
-    const float kx = on ? r.X + r.Width - pad - k : r.X + pad;
-    Gdiplus::SolidBrush kb(GpColor(on ? p.onAccent : p.switchKnob));
-    s.g.FillEllipse(&kb, kx, r.Y + pad, k, k);
+    const SIZE s = Fluent_SwitchSize(U.dpi);
+    const int right = item.right - Px(16), top = (item.top + item.bottom - s.cy) / 2;
+    return {right - s.cx, top, right, top + s.cy};
 }
 
 void DrawNavItem(const DRAWITEMSTRUCT& d) {
     if (d.itemID == static_cast<UINT>(-1)) return;
     HDC dc = d.hDC;
     const Palette& p = Pal();
-    FillColor(dc, d.rcItem, p.nav);
-    RECT b = d.rcItem;
-    InflateRect(&b, -Px(2), -Px(2));
-    if (d.itemState & ODS_SELECTED) {
-        RoundFill(dc, b, Px(8), p.navSel, p.navSel);
-        RECT bar{b.left, b.top + Px(9), b.left + Px(3), b.bottom - Px(9)};
-        FillColor(dc, bar, p.accent);
-    }
-    const TabDef& t = kTabs[d.itemID];
+    const int i = static_cast<int>(d.itemID);
+    const bool focus = (d.itemState & ODS_FOCUS) && !(d.itemState & ODS_NOFOCUSRECT);
+    Fluent_DrawNavItem(dc, d.rcItem, U.dpi, (d.itemState & ODS_SELECTED) != 0, U.navHot == i && !U.navHotSwitch, focus,
+                       p.nav);
+    const TabDef& t = kTabs[i];
     const bool off = t.feature >= 0 && !U.on[t.feature];
+    RECT ir{d.rcItem.left + Px(16), d.rcItem.top, d.rcItem.left + Px(36), d.rcItem.bottom};
+    Fluent_DrawGlyph(dc, ir, kTabGlyphs[i], 16, U.dpi, off ? p.text2 : p.text);
     HGDIOBJ of = SelectObject(dc, U.font);
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, off ? p.grey : p.text);
-    RECT tr = b;
-    tr.left += Px(14);
-    tr.right -= Px(10);
+    SetTextColor(dc, off ? p.text2 : p.text);
+    RECT tr{d.rcItem.left + Px(48), d.rcItem.top, d.rcItem.right - Px(12), d.rcItem.bottom};
     if (t.feature >= 0) {
         const RECT sw = SwitchRect(d.rcItem);
-        DrawSwitch(dc, sw, !off);
-        tr.right = sw.left - Px(6);
+        Fluent_DrawSwitch(dc, sw, U.dpi, !off, U.navHot == i && U.navHotSwitch, true);
+        tr.right = sw.left - Px(8);
     }
     DrawTextW(dc, t.name, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
     SelectObject(dc, of);
-    if ((d.itemState & ODS_FOCUS) && !(d.itemState & ODS_NOFOCUSRECT)) {
-        SetTextColor(dc, p.text);
-        SetBkColor(dc, p.nav);
-        DrawFocusRect(dc, &b);
+}
+
+void InvalidateNavItem(int i) {
+    RECT r;
+    if (i >= 0 && SendMessageW(U.nav, LB_GETITEMRECT, i, reinterpret_cast<LPARAM>(&r)) != LB_ERR)
+        InvalidateRect(U.nav, &r, FALSE);
+}
+
+// Which tab and whether its switch is under the point (list client coordinates).
+int NavHit(HWND h, LPARAM lp, bool* onSwitch) {
+    *onSwitch = false;
+    const LRESULT hit = SendMessageW(h, LB_ITEMFROMPOINT, 0, lp);
+    const int i = LOWORD(hit);
+    if (HIWORD(hit) || i < 0 || i >= kTabCount) return -1;
+    if (kTabs[i].feature >= 0) {
+        RECT item;
+        SendMessageW(h, LB_GETITEMRECT, i, reinterpret_cast<LPARAM>(&item));
+        RECT sw = SwitchRect(item);
+        InflateRect(&sw, Px(6), Px(6));  // a little easier to hit
+        *onSwitch = PtInRect(&sw, POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)}) != FALSE;
     }
+    return i;
 }
 
 // Click a switch in the tab list to turn its feature on or off; Space does it for the selected tab.
@@ -1049,20 +1114,32 @@ LRESULT CALLBACK NavProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_P
     switch (m) {
     case WM_LBUTTONDOWN:
     case WM_LBUTTONDBLCLK: {
-        const LRESULT hit = SendMessageW(h, LB_ITEMFROMPOINT, 0, lp);
-        const int i = LOWORD(hit);
-        if (HIWORD(hit) || i < 0 || i >= kTabCount || kTabs[i].feature < 0) break;
-        RECT item;
-        SendMessageW(h, LB_GETITEMRECT, i, reinterpret_cast<LPARAM>(&item));
-        RECT sw = SwitchRect(item);
-        InflateRect(&sw, Px(6), Px(6));  // a little easier to hit
-        const POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-        if (!PtInRect(&sw, p)) break;
+        bool onSwitch = false;
+        const int i = NavHit(h, lp, &onSwitch);
+        if (i < 0 || !onSwitch) break;
         SetFocus(h);
         ShowTab(i);
         Toggle(kTabs[i].feature);
         return 0;
     }
+    case WM_MOUSEMOVE: {
+        bool onSwitch = false;
+        const int i = NavHit(h, lp, &onSwitch);
+        if (i != U.navHot || onSwitch != U.navHotSwitch) {
+            InvalidateNavItem(U.navHot);
+            U.navHot = i;
+            U.navHotSwitch = onSwitch;
+            InvalidateNavItem(i);
+            TRACKMOUSEEVENT t{sizeof(t), TME_LEAVE, h, 0};
+            TrackMouseEvent(&t);
+        }
+        break;
+    }
+    case WM_MOUSELEAVE:
+        InvalidateNavItem(U.navHot);
+        U.navHot = -1;
+        U.navHotSwitch = false;
+        break;
     case WM_KEYDOWN:
         if (wp == VK_SPACE) {
             if (kTabs[U.tab].feature >= 0) Toggle(kTabs[U.tab].feature);
@@ -1074,6 +1151,50 @@ LRESULT CALLBACK NavProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_P
         break;
     }
     return DefSubclassProc(h, m, wp, lp);
+}
+
+const Ctl* Find(HWND w) {
+    for (const Ctl& c : U.ctls)
+        if (c.wnd == w) return &c;
+    return nullptr;
+}
+
+bool CardShown(const Card& c) { return c.tab == U.tab && (!c.group || c.group == UploadGroup()); }
+
+// The window background: the cards of the open tab, their row lines and the text box frames.
+void PaintBack(HDC dc, const RECT& rc) {
+    const Palette& p = Pal();
+    FillColor(dc, rc, p.window);
+    const int one = std::max(1, Px(1));
+    for (const Card& c : U.cards) {
+        if (!CardShown(c)) continue;
+        const RECT r{Px(kL), Px(c.y), Px(kR), Px(c.y + c.h)};
+        Fluent_DrawCard(dc, r, U.dpi, 6);
+        for (int ly : c.lines) {
+            const RECT l{r.left + one, Px(ly), r.right - one, Px(ly) + one};
+            FillColor(dc, l, p.divider);
+        }
+    }
+    HWND focus = GetFocus();
+    for (const Ctl& c : U.ctls) {
+        if (!c.frame || !IsWindowVisible(c.wnd)) continue;
+        const bool enabled = IsWindowEnabled(c.wnd) != FALSE;
+        Fluent_DrawTextBox(dc, FrameRect(c), U.dpi, focus == c.wnd, enabled);
+    }
+    RECT f = rc;
+    f.top = Px(U.footerY);
+    FillColor(dc, f, p.footer);
+    f.bottom = f.top + one;
+    FillColor(dc, f, p.line);
+}
+
+void InvalidateFrame(HWND edit) {
+    if (const Ctl* c = Find(edit)) {
+        if (!c->frame) return;
+        const RECT r = FrameRect(*c);
+        InvalidateRect(U.hwnd, &r, TRUE);
+        InvalidateRect(edit, nullptr, TRUE);
+    }
 }
 
 void Browse() {
@@ -1154,16 +1275,27 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         HDC dc = reinterpret_cast<HDC>(wp);
         RECT rc;
         GetClientRect(h, &rc);
-        const Palette& p = Pal();
-        FillColor(dc, rc, p.window);
-        RECT nav{0, 0, Px(kNavW), Px(U.footerY)};
-        FillColor(dc, nav, p.nav);
-        RECT f = rc;
-        f.top = Px(U.footerY);
-        FillColor(dc, f, p.footer);
-        f.bottom = f.top + 1;
-        FillColor(dc, f, p.line);
+        // Drawn off screen, then copied: the antialiased cards would flicker otherwise.
+        HDC mem = CreateCompatibleDC(dc);
+        HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
+        HGDIOBJ old = SelectObject(mem, bmp);
+        PaintBack(mem, rc);
+        BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, old);
+        DeleteObject(bmp);
+        DeleteDC(mem);
         return 1;
+    }
+    case WM_LBUTTONDOWN: {  // a click in a text box frame, beside the box itself
+        const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        for (const Ctl& c : U.ctls) {
+            const RECT r = FrameRect(c);
+            if (c.frame && PtInRect(&r, pt) && IsWindowVisible(c.wnd) && IsWindowEnabled(c.wnd)) {
+                SetFocus(c.wnd);
+                break;
+            }
+        }
+        return 0;
     }
     case WM_MEASUREITEM: {
         auto* m = reinterpret_cast<MEASUREITEMSTRUCT*>(lp);
@@ -1179,15 +1311,15 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return reinterpret_cast<LRESULT>(Theme_Brush(Pal().nav));
     case WM_CTLCOLORSTATIC: {
         HDC dc = reinterpret_cast<HDC>(wp);
-        const int id = GetDlgCtrlID(reinterpret_cast<HWND>(lp));
+        HWND w = reinterpret_cast<HWND>(lp);
+        const int id = GetDlgCtrlID(w);
         const Palette& p = Pal();
-        const bool hotkeyBox = id >= IDC_HK0 && id < IDC_HK0 + kHkSlots;
-        COLORREF bg = hotkeyBox ? p.edit : p.window, fg = p.text;
-        if (hotkeyBox && U.capturing == id - IDC_HK0) {
-            bg = p.focusBg;
-        } else if (hotkeyBox && !IsWindowEnabled(reinterpret_cast<HWND>(lp))) {
-            bg = p.window;
-            fg = p.grey;
+        const Ctl* c = Find(w);
+        COLORREF bg = c && c->card ? p.card : p.window, fg = p.text;
+        if (c && c->frame) {  // a read-only (hotkey) or disabled text box: the fill of its frame
+            const bool enabled = IsWindowEnabled(w) != FALSE;
+            bg = !enabled ? p.ctlDisabled : GetFocus() == w ? p.ctlFocus : p.ctlFill;
+            if (!enabled) fg = p.textDis;
         } else if (id >= IDC_HKST0 && id < IDC_HKST0 + kHkSlots) {
             fg = U.bad[id - IDC_HKST0] ? p.red : p.grey;
         } else if (id == IDC_DRVSTATUS || id == IDC_S3STATUS) {
@@ -1201,10 +1333,13 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return reinterpret_cast<LRESULT>(Theme_Brush(bg));
     }
     case WM_CTLCOLORBTN: {  // push buttons: the corners around their rounded shape
+        const Ctl* c = Find(reinterpret_cast<HWND>(lp));
+        const Palette& p = Pal();
         RECT r;
         GetWindowRect(reinterpret_cast<HWND>(lp), &r);
         MapWindowPoints(nullptr, h, reinterpret_cast<POINT*>(&r), 2);
-        return reinterpret_cast<LRESULT>(Theme_Brush(r.top >= Px(U.footerY) ? Pal().footer : Pal().window));
+        return reinterpret_cast<LRESULT>(
+            Theme_Brush(c && c->card ? p.card : r.top >= Px(U.footerY) ? p.footer : p.window));
     }
     case WM_HK_CHANGED:
         if (U.capturing >= 0) ShowHotkey(U.capturing);
@@ -1228,6 +1363,7 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_COMMAND: {
         const int id = LOWORD(wp), code = HIWORD(wp);
+        if (code == EN_SETFOCUS || code == EN_KILLFOCUS) InvalidateFrame(reinterpret_cast<HWND>(lp));
         if (id >= IDC_HK0 && id < IDC_HK0 + kHkSlots) {
             if (code == EN_SETFOCUS) StartCapture(id - IDC_HK0);
             else if (code == EN_KILLFOCUS) StopCapture();
@@ -1338,14 +1474,12 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         Hotkeys_Suspend(false);
         U.hwnd = U.nav = nullptr;
         U.ctls.clear();
+        U.cards.clear();
+        U.inCard = false;
+        U.navHot = -1;
         U.lastFocus = nullptr;
         U.maxY = 0;
         return 0;
-    case WM_NCDESTROY:
-        for (HGDIOBJ o : {static_cast<HGDIOBJ>(U.font), static_cast<HGDIOBJ>(U.bold), static_cast<HGDIOBJ>(U.title)})
-            if (o) DeleteObject(o);
-        U.font = U.bold = U.title = nullptr;
-        break;
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
