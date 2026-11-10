@@ -43,6 +43,7 @@ extern Settings g_settings;
 extern HINSTANCE g_hinst;
 extern HWND g_mainWnd;
 
+bool TestMode();  // CANIVETE_TEST set: private test copy, see settings.cpp
 std::wstring AppDataDir();
 std::wstring SettingsPath();
 void LoadSettings();

@@ -87,8 +87,25 @@ void WriteBool(const wchar_t* sec, const wchar_t* key, bool v) { WriteStr(sec, k
 
 }  // namespace
 
+// CANIVETE_TEST=<folder>: a private test copy (own settings and log in that folder, no tray icon,
+// hotkeys or Explorer entries), so tests run on a hidden desktop next to the real one.
+const std::wstring& TestDir() {
+    static const std::wstring dir = [] {
+        wchar_t buf[MAX_PATH * 2] = {};
+        const DWORD n = GetEnvironmentVariableW(L"CANIVETE_TEST", buf, MAX_PATH * 2);
+        return n && n < MAX_PATH * 2 ? std::wstring(buf) : std::wstring();
+    }();
+    return dir;
+}
+
+bool TestMode() { return !TestDir().empty(); }
+
 std::wstring AppDataDir() {
     static std::wstring dir;
+    if (dir.empty() && TestMode()) {
+        dir = TestDir();
+        CreateDirectoryW(dir.c_str(), nullptr);
+    }
     if (dir.empty()) {
         PWSTR p = nullptr;
         if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &p))) {

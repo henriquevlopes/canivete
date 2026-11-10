@@ -105,6 +105,10 @@ void TrayAdd() {
 }
 
 void TrayBalloon(const wchar_t* title, const std::wstring& text) {
+    if (TestMode()) {
+        Log(L"Notice: %s - %s", title, text.c_str());
+        return;
+    }
     NOTIFYICONDATAW n = g_nid;
     n.uFlags = NIF_INFO;
     wcsncpy_s(n.szInfoTitle, title, _TRUNCATE);
@@ -128,7 +132,7 @@ std::wstring RegisterHotkeys() {
     std::wstring failed;
     for (const Entry& e : list) UnregisterHotKey(g_mainWnd, static_cast<int>(e.mode));
     g_hookKeys.clear();
-    if (g_hotkeysSuspended) {
+    if (g_hotkeysSuspended || TestMode()) {
         UpdateKeyHook();
         return failed;
     }
@@ -469,7 +473,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     LocalFree(argv);
 
     // One copy only. A second launch passes its command to the running one.
-    HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\Canivete.Running");
+    HANDLE mutex = CreateMutexW(nullptr, FALSE, TestMode() ? L"Local\\Canivete.Test" : L"Local\\Canivete.Running");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         if (listTag) {
             if (list.empty()) list.push_back(L"");  // still opens the window
@@ -502,11 +506,11 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     g_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     LoadIconMetric(hinst, MAKEINTRESOURCEW(IDI_APP), LIM_SMALL, &g_icon);
 
-    TrayAdd();
+    if (!TestMode()) TrayAdd();
     Capture_Init();
     Output_Init();
     RegisterHotkeysOrWarn();
-    Shell_Register();
+    if (!TestMode()) Shell_Register();
     Log(L"Canivete %s started", CANIVETE_VERSION);
     if (cmd) PostMessageW(g_mainWnd, WM_APP_COMMAND, cmd, 0);
     if (listTag) {
