@@ -93,7 +93,7 @@ options. Each feature also has an On/Off switch next to its name in the list: a 
 tray menu entries and its Explorer right-click and Send to entries (its tab is greyed out).
 Everything is stored in
 `%APPDATA%\Canivete\settings.ini`; edits to that file apply as soon as it is saved.
-Log: `%APPDATA%\Canivete\canivete.log`.
+Log: `%APPDATA%\Canivete\logs\canivete.log` (its own folder, so writing it doesn't wake the settings-file watch).
 
 Editor: tools Rectangle (R), Ellipse (E), Arrow (A), Line (L), Text (T), Number (N, counts up),
 Highlighter (H), Pixelate (P), Blur (G) and Crop (C); colors 1-8; size with `[` `]` or the mouse wheel; Shift draws
@@ -206,7 +206,14 @@ Computer maintenance: tray > Computer maintenance… (or Start menu > Computer M
   deal with it. Last results are kept in `%APPDATA%\Canivete\maintenance.ini`.
 - Daily check (Settings > Maintenance, on by default): about once a day Canivete checks for updates
   in the background and shows a notice when there are new ones (or virus protection needs a look);
-  clicking it opens the Overview. Updates already seen don't notify again.
+  clicking it opens the Overview. Updates already seen don't notify again. It waits at least 15 minutes
+  after start, and is put off (30-60 minutes) on battery, during a full-screen game or presentation,
+  or with no internet; it runs at low priority and uses Windows Update's last online result. A check
+  that didn't finish is tried again after 6 hours. One timer is set for the next check (no polling).
+- Cleanup with administrator rights: the places in your own folders (Temp, shader caches, your crash
+  dumps, Recycle Bin) are cleaned by the normal copy; only the Windows places go to the elevated copy,
+  which deletes through file handles, never follows links or junctions and keeps no log file of its own
+  (the Maintenance window logs what it reports).
 - Updates: Windows and driver updates (Windows Update), app updates (winget), and the graphics driver
   with a button to the maker's app (NVIDIA app, AMD Adrenalin, Intel). Tick what to install; apps left
   unticked stay unticked next time (`[Maintenance] SkipApps`). Install makes a restore point first
@@ -258,7 +265,9 @@ Windows user (DPAPI, `%APPDATA%\Canivete\secrets.ini`), never in settings.ini.
 Updates of Canivete itself: it checks the public `henriquevlopes/canivete-releases` GitHub releases
 (no token, about once a day, Settings > General can turn it off), shows a notice and a tray menu item
 when a newer version is out, downloads the setup, checks its SHA256 against the release notes and
-installs it silently.
+installs it silently. Only a release whose `SIG:` line (an ECDSA P-256 signature of
+`canivete-update|<version>|<sha256>`) checks out against the public key in `src/update.cpp` is
+offered: a release made with a stolen GitHub token alone is ignored.
 
 Command line: `Canivete.exe --region | --window | --full | --color | --gif | --mp4 | --settings` acts in the running copy.
 `Canivete.exe --edit image.png` opens any image in the editor; `--alpha image.png` opens Make alpha.
@@ -321,7 +330,12 @@ menu entry and an uninstaller in Windows' app list. `/TESTRUN` makes it leave th
 
 Release: bump the version in `CMakeLists.txt`, then
 `powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Notes "What changed"`. It builds the setup
-and publishes it with its SHA256 on `henriquevlopes/canivete-releases`; running copies pick it up.
+and publishes it with its SHA256 and signature on `henriquevlopes/canivete-releases`; running copies pick it up.
+Signing needs the private update key, `%APPDATA%\Canivete-release\update_key.bin` (DPAPI, this Windows
+user only; made once by `tools\make_update_key.ps1`). Keep an offline backup:
+`tools\sign_update.ps1 -ExportBackup <file>` (asks for a password); `-ImportBackup <file>` puts it back on
+a new PC. Without the key no release can be signed, and installed copies won't take unsigned ones.
+`tools\test_update_sig.ps1` checks the signature path (valid, tampered SHA, version and signature).
 
 ## Code
 
