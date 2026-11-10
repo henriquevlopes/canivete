@@ -14,7 +14,7 @@ HWND g_mainWnd = nullptr;
 
 namespace {
 
-enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_COLOR, ID_OPEN_FOLDER, ID_SETTINGS, ID_EXIT, ID_RESIZE, ID_RENAME };
+enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_COLOR, ID_GIF, ID_OPEN_FOLDER, ID_SETTINGS, ID_EXIT, ID_RESIZE, ID_RENAME };
 constexpr UINT ID_RECENT0 = 200;  // .. 209: recent colors in the tray menu
 constexpr UINT kCmdAlreadyRunning = 99;
 constexpr UINT kCmdSettings = 98;
@@ -148,6 +148,7 @@ std::wstring RegisterHotkeys() {
         {CaptureMode::Window, &g_settings.hkWindow, L"Window screenshot"},
         {CaptureMode::Full, &g_settings.hkFull, L"Full screenshot"},
         {CaptureMode::Color, &g_settings.hkColor, L"Color picker"},
+        {CaptureMode::Gif, &g_settings.hkGif, L"Record GIF"},
     };
     std::wstring failed;
     for (const Entry& e : list) UnregisterHotKey(g_mainWnd, static_cast<int>(e.mode));
@@ -242,6 +243,7 @@ void ShowMenu() {
     item(ID_REGION, L"Region screenshot", g_settings.hkRegion);
     item(ID_WINDOW, L"Window screenshot", g_settings.hkWindow);
     item(ID_FULL, L"Full screenshot", g_settings.hkFull);
+    item(ID_GIF, Recorder_Active() ? L"Stop GIF recording" : L"Record GIF", g_settings.hkGif);
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     item(ID_COLOR, L"Pick a color", g_settings.hkColor);
     // Recent colors: a swatch and the value in the copy format; clicking copies it again.
@@ -348,6 +350,11 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_WINDOW:
         case ID_FULL:
         case ID_COLOR:
+        case ID_GIF:
+            if (LOWORD(wp) == ID_GIF && Recorder_Active()) {
+                Recorder_Stop();
+                break;
+            }
             // Wait for the menu to fade out so it isn't in the screenshot.
             g_deferredMode = static_cast<CaptureMode>(LOWORD(wp) - ID_REGION + 1);
             SetTimer(h, kTimerDeferred, 250, nullptr);
@@ -404,6 +411,7 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (HWND w = SettingsUI_Window()) DestroyWindow(w);
         if (HWND w = Resizer_Window()) DestroyWindow(w);
         if (HWND w = Renamer_Window()) DestroyWindow(w);
+        Recorder_Shutdown();
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         for (int id = 1; id <= kHotkeyCount; ++id) UnregisterHotKey(h, id);
         g_hookKeys.clear();
@@ -484,6 +492,8 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     UINT cmd = 0;
     std::vector<std::wstring> list;  // --resize / --rename files, or --do's action then files
     ULONG_PTR listTag = 0;
+    RECT gifRect{};  // --gif-test area and length
+    int gifMs = 0;
     if (argc >= 2) {
         if (!_wcsicmp(argv[1], L"--resize") || !_wcsicmp(argv[1], L"--rename")) {
             listTag = !_wcsicmp(argv[1], L"--resize") ? kCopyResize : kCopyRename;
@@ -504,6 +514,19 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
         else if (!_wcsicmp(argv[1], L"--window")) cmd = static_cast<UINT>(CaptureMode::Window);
         else if (!_wcsicmp(argv[1], L"--full")) cmd = static_cast<UINT>(CaptureMode::Full);
         else if (!_wcsicmp(argv[1], L"--color")) cmd = static_cast<UINT>(CaptureMode::Color);
+        else if (!_wcsicmp(argv[1], L"--gif")) cmd = static_cast<UINT>(CaptureMode::Gif);
+        else if ((!_wcsicmp(argv[1], L"--gif-test") || !_wcsicmp(argv[1], L"--gif-bench")) && argc >= 7) {
+            gifRect = {_wtoi(argv[2]), _wtoi(argv[3]), _wtoi(argv[2]) + _wtoi(argv[4]), _wtoi(argv[3]) + _wtoi(argv[5])};
+            gifMs = _wtoi(argv[6]);
+            if (!_wcsicmp(argv[1], L"--gif-bench")) {
+                if (argc < 8) return 1;
+                const std::wstring out = argv[7];
+                LocalFree(argv);
+                LoadSettings();
+                return Recorder_Bench(gifRect, gifMs, out);
+            }
+            if (!TestMode()) return 1;  // the UI test only runs in a private test copy
+        }
         else if (!_wcsicmp(argv[1], L"--settings")) cmd = kCmdSettings;
     }
     LocalFree(argv);
@@ -549,6 +572,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     if (!TestMode()) Shell_Register();
     Log(L"Canivete %s started", CANIVETE_VERSION);
     if (cmd) PostMessageW(g_mainWnd, WM_APP_COMMAND, cmd, 0);
+    if (gifMs > 0) Recorder_Test(gifRect, gifMs);
     if (listTag) {
         if (list.empty()) list.push_back(L"");  // still opens the window
         QueueList(listTag, list);
@@ -578,6 +602,8 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
             if (rs && IsDialogMessageW(rs, &msg)) continue;
             HWND rn = Renamer_Window();
             if (rn && IsDialogMessageW(rn, &msg)) continue;
+            HWND gs = Recorder_Window();
+            if (gs && IsDialogMessageW(gs, &msg)) continue;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }

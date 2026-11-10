@@ -58,7 +58,7 @@ enum : int {
 };
 
 const wchar_t* const kHkNames[kHotkeyCount] = {L"Region screenshot", L"Window screenshot", L"Full screenshot",
-                                                L"Color picker"};
+                                                L"Color picker", L"Record GIF"};
 
 struct Ctl {
     HWND wnd;
@@ -269,6 +269,7 @@ void CheckHotkeys() {
     ParseHotkey(g_settings.hkWindow, owned[1]);
     ParseHotkey(g_settings.hkFull, owned[2]);
     ParseHotkey(g_settings.hkColor, owned[3]);
+    ParseHotkey(g_settings.hkGif, owned[4]);
     for (int i = 0; i < kHotkeyCount; ++i) {
         std::wstring st;
         bool bad = false;
@@ -443,6 +444,7 @@ void Populate() {
     ParseHotkey(s.hkWindow, U.hk[1]);
     ParseHotkey(s.hkFull, U.hk[2]);
     ParseHotkey(s.hkColor, U.hk[3]);
+    ParseHotkey(s.hkGif, U.hk[4]);
     for (int i = 0; i < kHotkeyCount; ++i) ShowHotkey(i);
     int cf = 0;
     for (int i = 0; i < static_cast<int>(std::size(kColorFormats)); ++i)
@@ -467,7 +469,7 @@ void Populate() {
 
 void Apply() {
     Settings s = g_settings;
-    std::wstring* hks[kHotkeyCount] = {&s.hkRegion, &s.hkWindow, &s.hkFull, &s.hkColor};
+    std::wstring* hks[kHotkeyCount] = {&s.hkRegion, &s.hkWindow, &s.hkFull, &s.hkColor, &s.hkGif};
     for (int i = 0; i < kHotkeyCount; ++i) *hks[i] = U.hk[i].vk ? HotkeyText(U.hk[i]) : L"None";
     s.saveToFile = Checked(IDC_SAVE);
     s.folder = Trim(GetText(IDC_FOLDER));

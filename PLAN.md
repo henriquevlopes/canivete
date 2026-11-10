@@ -97,6 +97,9 @@ Same pipeline ShareX 21 now uses by default, refined with OBS details:
   ordered/Bayer for smaller files), write only the changed rectangle of each frame, exact timings.
   Port ShareX's `AdaptiveGifQuantizer` + `GifWriter` (already does exactly this).
   Optional later: animated WebP, much smaller than GIF.
+  Built (2026-11-10): records changed 32×32 tiles at 25 fps, then makes three GIFs at once
+  (Smallest / Balanced / Smoothest) so the save window shows each real size. Own Wu + k-means
+  palette and ordered dither instead of a ShareX port.
 
 ## 3. Color picker
 

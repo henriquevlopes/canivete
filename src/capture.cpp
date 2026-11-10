@@ -21,6 +21,7 @@ struct State {
     HWND prevForeground = nullptr;
     bool active = false;
     bool picking = false;      // color picker: no dimming, no selection, click picks the pixel
+    bool forGif = false;       // the area is for a GIF recording, not a screenshot
     RECT vr{};                 // virtual desktop, screen coords
     Dib frozen, dim, back, mag;
     std::vector<RECT> windows;   // top-level windows, z-order (topmost first), screen coords
@@ -341,6 +342,12 @@ void Finish() {
         Close();
         return;
     }
+    if (S.forGif) {
+        Log(L"GIF area %dx%d at %d,%d", r.right - r.left, r.bottom - r.top, r.left, r.top);
+        Close();
+        Recorder_Start(r);
+        return;
+    }
     auto res = std::make_unique<CaptureResult>();
     res->screenRect = r;
     res->processName = S.proc;
@@ -544,6 +551,8 @@ RECT VirtualScreenRect() {
     return {x, y, x + GetSystemMetrics(SM_CXVIRTUALSCREEN), y + GetSystemMetrics(SM_CYVIRTUALSCREEN)};
 }
 
+void DrawCursorAt(HDC dc, int ox, int oy) { DrawCursor(dc, ox, oy); }
+
 bool GrabScreen(const RECT& r, Image& out, bool withCursor) {
     Dib d;
     if (!GrabInto(d, r, withCursor)) return false;
@@ -585,9 +594,15 @@ HWND WindowUnderCursor() {
 
 void Capture_Start(CaptureMode mode) {
     if (S.active) return;
+    if (mode == CaptureMode::Gif && Recorder_Active()) {  // the hotkey again stops the recording
+        Recorder_Stop();
+        return;
+    }
     HWND fg = GetForegroundWindow();
+    S.forGif = mode == CaptureMode::Gif;
     switch (mode) {
     case CaptureMode::Region:
+    case CaptureMode::Gif:
         StartRegion(fg, false);
         break;
     case CaptureMode::Color:

@@ -16,7 +16,7 @@ Plan and research notes: [PLAN.md](PLAN.md).
 | 3 | Image resizer | done |
 | 4 | Renamer | done |
 | 5 | MP4 recording | – |
-| 6 | GIF recording | – |
+| 6 | GIF recording | done |
 
 ## Use
 
@@ -26,6 +26,15 @@ Plan and research notes: [PLAN.md](PLAN.md).
 | Alt+PrtSc | The window under the mouse (the whole monitor over the desktop or taskbar) |
 | PrtSc | All monitors (or the one under the mouse, see settings) |
 | Win+C | Color picker: the screen freezes, a magnifier follows the mouse. Click, Enter or Space copies the color; Esc or right-click cancels; arrows nudge |
+| Ctrl+Shift+PrtSc | Record a GIF: pick an area like a region screenshot; press again (or Stop) to finish |
+
+GIF recording: a red border marks the area and a small bar shows the time with Stop and Cancel
+(neither shows up in the GIF). Recording runs at 25 frames a second and full size; only the parts
+that change are kept. After Stop, a "Save GIF" window offers three ready-made GIFs, each with its
+real file size: **Smallest file** (10 fps, 64 colors), **Balanced** (15 fps, 256 colors) and
+**Smoothest** (25 fps, 256 colors, smooth gradients). Click one: it goes to the screenshots folder
+and is copied as a file, ready to paste. The last choice is the default next time (Enter takes it).
+The encoder builds one palette for the whole GIF and writes only the changed part of each frame.
 
 Screenshots are saved as PNG (or JPG) to the Windows Screenshots folder and copied to the clipboard
 (as image and PNG). A small preview pops up bottom-right: click opens the editor, right-click shows
@@ -128,4 +137,6 @@ Builds Release, installs to `%LOCALAPPDATA%\Programs\Canivete\Canivete.exe` and 
 - `src/editor.cpp` — screenshot editor window (GDI+ shapes and text, undo, zoom and pan)
 - `src/resizer.cpp` — image resizer window, WIC resize engine on worker threads, right-click quick actions (convert, rotate, copy)
 - `src/renamer.cpp` — renamer window, live preview, regex/counter/date tokens, IFileOperation rename with undo
+- `src/gif.cpp` — GIF encoder: recording file, palette (exact colors or Wu + k-means), LZW, changed-area frames, presets
+- `src/recorder.cpp` — GIF recording border and bar, 25 fps capture thread, Save GIF window
 - `src/shell.cpp` — Explorer right-click Canivete submenu (image actions, Rename) and Send to shortcuts

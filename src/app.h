@@ -1,7 +1,9 @@
 // Canivete - shared declarations.
 #pragma once
 #include <windows.h>
+#include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <vector>
@@ -14,8 +16,8 @@ constexpr UINT WM_APP_TRAY = WM_APP + 1;          // tray icon callback
 constexpr UINT WM_APP_CAPTURE_DONE = WM_APP + 2;  // lParam = Output job, finished on a worker
 constexpr UINT WM_APP_COMMAND = WM_APP + 3;       // wParam = command id (from a second instance)
 
-enum class CaptureMode { Region = 1, Window = 2, Full = 3, Color = 4 };  // also the hotkey ids
-constexpr int kHotkeyCount = 4;
+enum class CaptureMode { Region = 1, Window = 2, Full = 3, Color = 4, Gif = 5 };  // also the hotkey ids
+constexpr int kHotkeyCount = 5;
 
 // ---- settings.cpp --------------------------------------------------------------------------
 struct Hotkey {
@@ -24,7 +26,7 @@ struct Hotkey {
 };
 
 struct Settings {
-    std::wstring hkRegion, hkWindow, hkFull, hkColor;
+    std::wstring hkRegion, hkWindow, hkFull, hkColor, hkGif;
     std::wstring folder;    // empty = Windows "Screenshots" folder
     std::wstring fileName;  // pattern with %tokens
     std::wstring fullScreen;  // "all" or "monitor"
@@ -37,6 +39,7 @@ struct Settings {
     bool showNotification = true;
     bool showMagnifier = true;
     bool openEditor = false;  // open the editor after each capture instead of the preview
+    std::wstring gifPreset;   // last GIF choice: a kGifPresets key
 };
 
 extern Settings g_settings;
@@ -51,6 +54,7 @@ void SaveSettings(const Settings& s);
 bool ParseHotkey(const std::wstring& text, Hotkey& out);
 std::wstring HotkeyText(const Hotkey& hk);  // "Ctrl+Shift+PrintScreen", "" when none
 void Log(const wchar_t* fmt, ...);
+void SaveSettingValue(const wchar_t* section, const wchar_t* key, const std::wstring& value);
 
 // Color picker copy formats: settings key and the label shown in Settings.
 struct ColorFormatDef {
@@ -158,6 +162,7 @@ void Capture_Start(CaptureMode mode);
 bool Capture_IsActive();
 RECT VirtualScreenRect();
 bool GrabScreen(const RECT& r, Image& out, bool withCursor);
+void DrawCursorAt(HDC dc, int ox, int oy);  // the mouse pointer, for a grab whose top-left is ox, oy
 
 // ---- output.cpp ----------------------------------------------------------------------------
 void Output_Init();
@@ -169,6 +174,7 @@ bool LoadImageFile(const std::wstring& path, Image& out);
 // Saves over `path` (format from its extension), or to a new file name when `path` is empty.
 // Returns the path written, "" on failure.
 std::wstring Output_SaveImage(const Image& img, const CaptureResult& meta, const std::wstring& path);
+std::wstring Output_NewPath(const CaptureResult& meta, const wchar_t* ext);  // free name in the screenshots folder
 void Output_EditDone(std::shared_ptr<CaptureResult> r, const std::wstring& path);  // copy, save, preview
 
 // ---- editor.cpp ----------------------------------------------------------------------------
@@ -178,3 +184,42 @@ std::vector<BYTE> EncodeJpeg(const Image& img, int quality);
 std::wstring PreviewFileName(const std::wstring& pattern);  // example name for the Settings window
 std::wstring ScreenshotsDir();
 bool WriteFileBytes(const std::wstring& path, const std::vector<BYTE>& data);
+
+// ---- gif.cpp -------------------------------------------------------------------------------
+struct GifPreset {
+    const wchar_t* key;    // in settings.ini
+    const wchar_t* title;  // on the button
+    const wchar_t* note;
+    int fps, colors, tolerance;  // tolerance: color change (0-255) still counted as "the same"
+    bool dither;
+};
+constexpr int kGifPresetCount = 3;
+extern const GifPreset kGifPresets[kGifPresetCount];
+
+// Writes a recording: each frame stores only the 32x32 tiles that changed.
+class GifWriter {
+public:
+    bool Open(const std::wstring& path, int width, int height);
+    void Frame(uint32_t timeMs, const uint32_t* px);  // width*height BGRX
+    bool Close(uint32_t timeMs);                      // the stop time
+    uint64_t Bytes() const { return bytes_; }
+    ~GifWriter();
+
+private:
+    FILE* f_ = nullptr;
+    int w_ = 0, h_ = 0;
+    uint64_t bytes_ = 0;
+    std::vector<uint32_t> prev_;
+};
+
+bool Gif_Encode(const std::wstring& recording, const GifPreset& p, const std::wstring& outPath,
+                const std::atomic<bool>& cancel, std::wstring& err);
+
+// ---- recorder.cpp --------------------------------------------------------------------------
+void Recorder_Start(const RECT& r);  // records that screen area until Recorder_Stop
+bool Recorder_Active();              // recording, or its save window is open
+void Recorder_Stop();
+void Recorder_Shutdown();  // app is closing: stop and throw away anything in progress                // stop recording (or bring the save window forward)
+HWND Recorder_Window();              // the save window, for IsDialogMessage
+void Recorder_Test(const RECT& r, int ms);  // test mode: record r for ms, then the save window
+int Recorder_Bench(const RECT& r, int ms, const std::wstring& outDir);  // headless: record + all presets

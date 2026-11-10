@@ -519,3 +519,11 @@ void Output_EditDone(std::shared_ptr<CaptureResult> r, const std::wstring& path)
     T.line1 = saved.empty() ? L"Edited image copied" : L"Edited image copied and saved";
     T.last = std::move(r);
 }
+
+std::wstring Output_NewPath(const CaptureResult& meta, const wchar_t* ext) {
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    const std::wstring base = ScreenshotsDir() + L"\\" + ExpandPattern(g_settings.fileName, meta, t);
+    SHCreateDirectoryExW(nullptr, base.substr(0, base.find_last_of(L'\\')).c_str(), nullptr);
+    return UniquePath(base, ext);
+}

@@ -19,6 +19,7 @@ const wchar_t kDefaultIni[] =
     L"RegionScreenshot=Ctrl+PrintScreen\r\n"
     L"WindowScreenshot=Alt+PrintScreen\r\n"
     L"FullScreenshot=PrintScreen\r\n"
+    L"RecordGif=Ctrl+Shift+PrintScreen\r\n"
     L"\r\n"
     L"[Screenshot]\r\n"
     L"; Folder: empty = your Windows Screenshots folder\r\n"
@@ -87,6 +88,10 @@ void WriteBool(const wchar_t* sec, const wchar_t* key, bool v) { WriteStr(sec, k
 
 }  // namespace
 
+void SaveSettingValue(const wchar_t* section, const wchar_t* key, const std::wstring& value) {
+    WriteStr(section, key, value);
+}
+
 // CANIVETE_TEST=<folder>: a private test copy (own settings and log in that folder, no tray icon,
 // hotkeys or Explorer entries), so tests run on a hidden desktop next to the real one.
 const std::wstring& TestDir() {
@@ -139,6 +144,8 @@ void LoadSettings() {
     s.hkWindow = ReadStr(L"Hotkeys", L"WindowScreenshot", L"Alt+PrintScreen");
     s.hkFull = ReadStr(L"Hotkeys", L"FullScreenshot", L"PrintScreen");
     s.hkColor = ReadStr(L"Hotkeys", L"ColorPicker", L"Win+C");
+    s.hkGif = ReadStr(L"Hotkeys", L"RecordGif", L"Ctrl+Shift+PrintScreen");
+    s.gifPreset = Lower(Trim(ReadStr(L"Gif", L"Preset", L"balanced")));
     s.colorFormat = Lower(Trim(ReadStr(L"ColorPicker", L"CopyFormat", L"gray")));
     {
         bool known = false;
@@ -169,6 +176,7 @@ void SaveSettings(const Settings& s) {
     WriteStr(L"Hotkeys", L"WindowScreenshot", s.hkWindow);
     WriteStr(L"Hotkeys", L"FullScreenshot", s.hkFull);
     WriteStr(L"Hotkeys", L"ColorPicker", s.hkColor);
+    WriteStr(L"Hotkeys", L"RecordGif", s.hkGif);
     WriteStr(L"ColorPicker", L"CopyFormat", s.colorFormat);
     WriteStr(L"Screenshot", L"Folder", s.folder);
     WriteStr(L"Screenshot", L"FileName", s.fileName);
