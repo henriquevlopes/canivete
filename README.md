@@ -74,13 +74,15 @@ with the color and size buttons / keys / wheel, and removed with Delete; Esc uns
 text with the Text tool, or double-clicking it with any tool, retypes it. Every change is one undo step.
 
 Make alpha (editor α button, or M): turns the screenshot into a square alpha for Substance Painter,
-details white on a black background. Drag on the picture to draw a mask around exactly what you
-want (several masks add up; outside goes dark); click a detail's color to pick it (up to 8), right-click
-the background color. With no clicks it guesses from the most common color. Buttons: Less / More
-detail (or the wheel, + / -), Sharper / Softer (`[` `]`), Invert (I), Size (auto picks 512-4096 from
-the detail size; the choice is remembered), Start over (Backspace), Copy (Ctrl+C), Save (Enter or
-Ctrl+S: `<capture name> alpha.png` in the screenshots folder, also copied). Ctrl+Z undoes the last
-pick or mask, Esc closes.
+details white on a black background. Mark exactly what you want with **Lasso** (L, drag freely) or
+**Rectangle** (R, drag a box); several areas add up and outside goes dark. Click a detail's color to pick
+it (up to 8), right-click the background color; with no clicks it guesses from the most common color.
+The **Levels** bar under the result works like Photoshop's: the histogram shows how "detail-like" each
+pixel is; drag the black, mid and white handles to choose where black ends, where white starts and how
+the grays in between bend (red curve). Double-click it to reset. Shortcuts: wheel or + / - = more / less
+detail, `[` `]` = sharper / softer. Buttons: Invert (I), Size (auto picks 512-4096 from the detail size;
+remembered), Start over (Backspace), Copy (Ctrl+C), Save (Enter or Ctrl+S: `<capture name> alpha.png`
+in the screenshots folder, also copied). Ctrl+Z undoes the last pick or area, Esc closes.
 
 Right-click menu: select files or folders in Explorer, right-click > Show more options > Canivete.
 On images:

@@ -1,7 +1,7 @@
 // Make alpha: turns a picture into a square black-and-white alpha (detail white, background black), for
-// Substance Painter stamps and the like. Drag around the part you want (a freehand mask; several areas add up),
-// click the detail color, right-click the background. The detail is cropped, centred on a black square with a small margin and
-// scaled to a power-of-two size.
+// Substance Painter stamps and the like. Drag around the part you want (lasso or rectangle; several areas add up),
+// click the detail color, right-click the background, fine-tune with the Levels bar. The detail is cropped,
+// centred on a black square with a small margin and scaled to a power-of-two size.
 //
 // Colors are compared mostly by hue: brightness counts less, so light and shadow across one painted surface
 // stay "background" while a differently colored detail on it stands out.
@@ -46,12 +46,22 @@ struct Params {
     std::vector<uint32_t> detail;  // picked detail colors
     bool hasSurface = false;       // background picked by hand (else: the most common color)
     uint32_t surface = 0;
-    int level = 0;  // -6..6: less .. more detail
-    int soft = 2;   // 0..5: edge softness
+    // Levels on the detail score (0 = background, 1 = detail, 0.5 = the natural split): below `black` is
+    // black, above `white` is white, `gamma` bends the part between (> 1 brighter).
+    float black = 0.425f, white = 0.575f, gamma = 1.f;
     bool invert = false;
 };
 
-constexpr int kMinLevel = -6, kMaxLevel = 6, kMaxSoft = 5, kMaxPicks = 8;
+constexpr int kMaxPicks = 8, kHistBins = 64;
+
+// How much each pixel of the area looks like detail. Slow part; levels and invert only redo Finish.
+struct Score {
+    RECT box{};
+    int bw = 0, bh = 0;
+    std::vector<float> s;      // bw x bh, 0..1
+    std::vector<uint8_t> in;   // inside the mask
+    float hist[kHistBins]{};   // of s inside the mask, 0..1 (log scale)
+};
 
 struct Mask {
     int side = 0;  // square, before scaling
@@ -172,8 +182,8 @@ float Otsu(const std::vector<float>& d, float mx) {
     return (bi + 1) / 256.f * mx;
 }
 
-// Drops tiny specks (noise, dust) and keeps soft edge pixels only next to real detail.
-void DropSpecks(std::vector<float>& m, int w, int h) {
+// Drops tiny specks (noise, dust) and, when `cleanSoft`, keeps soft edge pixels only next to real detail.
+void DropSpecks(std::vector<float>& m, int w, int h, bool cleanSoft) {
     const size_t minSize = static_cast<size_t>(std::max(8, w * h / 5000));
     std::vector<uint8_t> state(m.size(), 0);  // 1 kept, 2 dropped
     std::vector<int> stack, comp;
@@ -200,6 +210,7 @@ void DropSpecks(std::vector<float>& m, int w, int h) {
                 m[j] = 0;
             }
     }
+    if (!cleanSoft) return;
     for (int y = 0; y < h; ++y)
         for (int x = 0; x < w; ++x) {
             float& v = m[static_cast<size_t>(y) * w + x];
@@ -215,52 +226,70 @@ void DropSpecks(std::vector<float>& m, int w, int h) {
         }
 }
 
-Mask Compute(const Image& img, const Params& p, uint32_t* surfaceUsed) {
+Score MakeScore(const Image& img, const Params& p, uint32_t* surfaceUsed) {
+    Score sc;
     const RECT b = ClampBox(img, p.box);
     const int bw = b.right - b.left, bh = b.bottom - b.top;
+    sc.box = b;
+    sc.bw = bw;
+    sc.bh = bh;
     std::vector<Feat> fd;
     for (uint32_t c : p.detail) fd.push_back(ToFeat(c));
     const uint32_t surf = p.hasSurface ? p.surface : MostCommon(img, b, p.area, fd);
     if (surfaceUsed) *surfaceUsed = surf;
     const Feat fs = ToFeat(surf);
-    auto inside = [&](int x, int y) { return p.area.empty() || p.area[static_cast<size_t>(b.top + y) * img.w + b.left + x]; };
+    sc.in.resize(static_cast<size_t>(bw) * bh);
+    for (int y = 0; y < bh; ++y)
+        for (int x = 0; x < bw; ++x)
+            sc.in[static_cast<size_t>(y) * bw + x] = p.area.empty() || p.area[static_cast<size_t>(b.top + y) * img.w + b.left + x];
 
-    std::vector<float> m(static_cast<size_t>(bw) * bh);
-    const float ramp = 0.03f + p.soft * 0.06f;
-    if (fd.empty()) {  // nothing picked: everything that differs enough from the background
-        std::vector<float> d(m.size()), in;
+    std::vector<float>& s = sc.s;
+    s.resize(sc.in.size());
+    if (fd.empty()) {  // nothing picked: how far from the background, 0.5 = the best split (Otsu)
+        std::vector<float> in;
         float mx = 1e-6f;
         for (int y = 0; y < bh; ++y)
             for (int x = 0; x < bw; ++x) {
-                const float v = Dist(ToFeat(img.px[static_cast<size_t>(b.top + y) * img.w + b.left + x]), fs);
-                d[static_cast<size_t>(y) * bw + x] = v;
-                if (!inside(x, y)) continue;
-                in.push_back(v);
-                mx = std::max(mx, v);
+                const size_t i = static_cast<size_t>(y) * bw + x;
+                s[i] = Dist(ToFeat(img.px[static_cast<size_t>(b.top + y) * img.w + b.left + x]), fs);
+                if (!sc.in[i]) continue;
+                in.push_back(s[i]);
+                mx = std::max(mx, s[i]);
             }
         if (in.empty()) in.push_back(0);
-        const float t = std::max(0.04f, Otsu(in, mx)) * std::pow(1.3f, -static_cast<float>(p.level));
-        for (size_t i = 0; i < d.size(); ++i) m[i] = std::clamp((d[i] / t - 1) / (2 * ramp) + 0.5f, 0.f, 1.f);
-    } else {  // closer to a picked detail color than to the background
-        const float bnd = 0.5f - p.level * 0.06f;
+        const float t = std::max(0.04f, Otsu(in, mx));
+        for (float& v : s) v = std::clamp(v / (2 * t), 0.f, 1.f);
+    } else {  // closer to a picked detail color (1) than to the background (0)
         for (int y = 0; y < bh; ++y)
             for (int x = 0; x < bw; ++x) {
                 const Feat f = ToFeat(img.px[static_cast<size_t>(b.top + y) * img.w + b.left + x]);
                 const float ds = Dist(f, fs);
                 float dd = 1e9f;
                 for (const Feat& c : fd) dd = std::min(dd, Dist(f, c));
-                const float r = ds / (ds + dd + 1e-6f);
-                m[static_cast<size_t>(y) * bw + x] = std::clamp((r - bnd) / ramp + 0.5f, 0.f, 1.f);
+                s[static_cast<size_t>(y) * bw + x] = ds / (ds + dd + 1e-6f);
             }
     }
-    for (int y = 0; y < bh; ++y)
-        for (int x = 0; x < bw; ++x)
-            if (!inside(x, y)) m[static_cast<size_t>(y) * bw + x] = 0;
-    DropSpecks(m, bw, bh);
+    uint32_t count[kHistBins] = {}, top = 1;
+    for (size_t i = 0; i < s.size(); ++i)
+        if (sc.in[i]) top = std::max(top, ++count[std::min(kHistBins - 1, static_cast<int>(s[i] * kHistBins))]);
+    for (int i = 0; i < kHistBins; ++i) sc.hist[i] = std::log1p(static_cast<float>(count[i])) / std::log1p(static_cast<float>(top));
+    return sc;
+}
+
+float Levels(float s, const Params& p) {
+    float v = std::clamp((s - p.black) / std::max(1e-3f, p.white - p.black), 0.f, 1.f);
+    if (p.gamma != 1.f) v = std::pow(v, 1 / p.gamma);
+    return v;
+}
+
+Mask Finish(const Score& sc, const Params& p) {
+    const int bw = sc.bw, bh = sc.bh;
+    std::vector<float> m(sc.s.size());
+    for (size_t i = 0; i < m.size(); ++i) m[i] = sc.in[i] ? Levels(sc.s[i], p) : 0.f;
+    DropSpecks(m, bw, bh, p.white - p.black < 0.35f);  // a wide levels range wants its soft grays kept
     if (p.invert)  // only inside the mask: outside stays black
-        for (int y = 0; y < bh; ++y)
-            for (int x = 0; x < bw; ++x)
-                if (inside(x, y)) m[static_cast<size_t>(y) * bw + x] = 1 - m[static_cast<size_t>(y) * bw + x];
+        for (size_t i = 0; i < m.size(); ++i)
+            if (sc.in[i]) m[i] = 1 - m[i];
 
     // crop to the detail (plus its soft edge), centre it on a black square with a margin
     int x0 = bw, y0 = bh, x1 = -1, y1 = -1;
@@ -291,6 +320,8 @@ Mask Compute(const Image& img, const Params& p, uint32_t* surfaceUsed) {
         std::copy_n(&m[static_cast<size_t>(y0 + y) * bw + x0], cw, &out.v[static_cast<size_t>(oy + y) * out.side + ox]);
     return out;
 }
+
+Mask Compute(const Image& img, const Params& p, uint32_t* surfaceUsed) { return Finish(MakeScore(img, p, surfaceUsed), p); }
 
 const int kSizes[] = {0, 512, 1024, 2048, 4096};  // 0 = automatic
 constexpr int kSizeCount = static_cast<int>(std::size(kSizes));
@@ -354,8 +385,11 @@ Image Scale(const Mask& m, int n) {
 constexpr wchar_t kClass[] = L"CaniveteAlpha";
 constexpr COLORREF kAccent = RGB(232, 44, 56);
 constexpr int kHintH = 34, kBarH = 52, kGap = 12;
+// Levels block under the result: histogram, gradient strip, handles; then its text line and the background swatch.
+constexpr int kHistH = 44, kStripH = 6, kHandleH = 12, kUnderRes = 8 + kHistH + kStripH + kHandleH + 22 + 26 + 8;
 
-enum BtnId { B_LESS, B_MORE, B_SHARP, B_SOFT, B_INVERT, B_SIZE, B_RESET, B_COPY, B_SAVE, B_COUNT };
+enum BtnId { B_LASSO, B_RECT, B_INVERT, B_SIZE, B_RESET, B_COPY, B_SAVE, B_COUNT };
+enum Tool { T_LASSO, T_RECT };
 
 struct Btn {
     BtnId id;
@@ -369,7 +403,11 @@ struct Win {
     CaptureResult meta;
     Dib src, prev, back, shade;
     Params p;
+    Score score;
     Mask mask;
+    int tool = T_LASSO;
+    RECT levR{};      // histogram + strip + handles
+    int levDrag = -1; // handle being dragged: 0 black, 1 mid, 2 white
     uint32_t surfaceUsed = 0;
     std::vector<POINT> detailPts;  // image pixels, for the markers
     POINT surfacePt{-1, -1};
@@ -409,13 +447,18 @@ std::wstring SizeLabel(const Win& w) {
     return kSizes[w.sizeIdx] ? L"Size: " + std::to_wstring(n) : L"Size: auto (" + std::to_wstring(n) + L")";
 }
 
-void Recompute(Win& w) {
-    w.mask = Compute(w.img, w.p, &w.surfaceUsed);
+void Refine(Win& w) {  // levels / invert changed: the score stays
+    w.mask = Finish(w.score, w.p);
     const int s = w.mask.side;
     if (w.prev.w != s) w.prev.Create(s, s);
     if (w.prev.bits)
         for (size_t i = 0; i < w.mask.v.size(); ++i)
             w.prev.bits[i] = static_cast<uint32_t>(std::lround(w.mask.v[i] * 255)) * 0x010101u;
+}
+
+void Recompute(Win& w) {
+    w.score = MakeScore(w.img, w.p, &w.surfaceUsed);
+    Refine(w);
 }
 
 void RebuildArea(Win& w) {
@@ -452,8 +495,9 @@ void Layout(Win& w) {
     RECT rc;
     GetClientRect(w.hwnd, &rc);
     const int m = w.Px(kGap), top = w.Px(kHintH), bot = rc.bottom - w.Px(kBarH);
-    const int midH = std::max(1, bot - top - 2 * m - w.Px(30)), res = std::max(1, std::min(midH, (static_cast<int>(rc.right) - 3 * m) / 2));
+    const int midH = std::max(1, bot - top - 2 * m - w.Px(kUnderRes)), res = std::max(1, std::min(midH, (static_cast<int>(rc.right) - 3 * m) / 2));
     w.resArea = {rc.right - m - res, top + m, rc.right - m, top + m + res};
+    w.levR = {w.resArea.left, w.resArea.bottom + w.Px(8), w.resArea.right, w.resArea.bottom + w.Px(8 + kHistH + kStripH + kHandleH)};
     w.srcArea = {m, top + m, w.resArea.left - m, bot - m};
     const int aw = std::max<int>(1, w.srcArea.right - w.srcArea.left), ah = std::max<int>(1, w.srcArea.bottom - w.srcArea.top);
     w.zoom = std::min({4.f, static_cast<float>(aw) / w.img.w, static_cast<float>(ah) / w.img.h});
@@ -476,10 +520,8 @@ void Layout(Win& w) {
         w.btns.push_back({id, std::move(label), {x, by, x + bw, by + bh}});
         x += bw + w.Px(gapAfter);
     };
-    add(B_LESS, L"Less detail", 4);
-    add(B_MORE, L"More detail", 14);
-    add(B_SHARP, L"Sharper", 4);
-    add(B_SOFT, L"Softer", 14);
+    add(B_LASSO, L"Lasso", 4);
+    add(B_RECT, L"Rectangle", 14);
     add(B_INVERT, L"Invert", 14);
     add(B_SIZE, SizeLabel(w), 14);
     add(B_RESET, L"Start over", 14);
@@ -498,7 +540,7 @@ int MinWidth(Win& w) {
     if (w.btns.empty()) return w.Px(900);
     int sum = 0;
     for (const Btn& b : w.btns) sum += b.r.right - b.r.left;
-    return sum + w.Px(4 + 14 + 4 + 14 + 14 + 14 + 14 + 6 + 2 * kGap + 30);
+    return sum + w.Px(4 + 14 + 14 + 14 + 14 + 6 + 2 * kGap + 30);
 }
 
 void Fill(HDC dc, const RECT& r, COLORREF c) {
@@ -514,14 +556,100 @@ POINT ToImg(const Win& w, int x, int y) {
     return {static_cast<LONG>(std::floor((x - w.org.x) / w.zoom)), static_cast<LONG>(std::floor((y - w.org.y) / w.zoom))};
 }
 
-bool Enabled(const Win& w, BtnId id) {
-    switch (id) {
-    case B_LESS: return w.p.level > kMinLevel;
-    case B_MORE: return w.p.level < kMaxLevel;
-    case B_SHARP: return w.p.soft > 0;
-    case B_SOFT: return w.p.soft < kMaxSoft;
-    default: return true;
+// ---- levels bar ----
+
+int LevX(const Win& w, float v) { return w.levR.left + static_cast<int>(std::lround(v * (w.levR.right - w.levR.left))); }
+
+float MidPos(const Params& p) { return p.black + (p.white - p.black) * std::pow(0.5f, p.gamma); }
+
+void PaintLevels(Win& w, HDC b) {
+    const RECT L = w.levR;
+    const int W = L.right - L.left;
+    if (W < 20) return;
+    const RECT hr{L.left, L.top, L.right, L.top + w.Px(kHistH)};
+    Fill(b, hr, RGB(22, 22, 22));
+    for (int i = 0; i < kHistBins; ++i) {
+        const int x0 = L.left + i * W / kHistBins, x1 = L.left + (i + 1) * W / kHistBins;
+        const int h = static_cast<int>(std::lround(w.score.hist[i] * (hr.bottom - hr.top - w.Px(4))));
+        if (h > 0) Fill(b, {x0, hr.bottom - h, std::max(x0 + 1, x1 - 1), hr.bottom}, RGB(105, 105, 105));
     }
+    // the curve: what each score turns into
+    std::vector<POINT> curve;
+    for (int x = 0; x <= W; x += 2)
+        curve.push_back({L.left + x, hr.bottom - 1 - static_cast<LONG>(std::lround(Levels(static_cast<float>(x) / W, w.p) *
+                                                                                   (hr.bottom - hr.top - 3)))});
+    HPEN pen = CreatePen(PS_SOLID, std::max(1, w.Px(2)), kAccent);
+    HGDIOBJ oldPen = SelectObject(b, pen);
+    Polyline(b, curve.data(), static_cast<int>(curve.size()));
+    SelectObject(b, oldPen);
+    DeleteObject(pen);
+    // black-to-white strip
+    const int sy = hr.bottom, sb = sy + w.Px(kStripH);
+    TRIVERTEX tv[2] = {{L.left, sy, 0, 0, 0, 0}, {L.right, sb, 0xFF00, 0xFF00, 0xFF00, 0}};
+    GRADIENT_RECT gr{0, 1};
+    GradientFill(b, tv, 2, &gr, 1, GRADIENT_FILL_RECT_H);
+    // handles
+    const float pos[3] = {w.p.black, MidPos(w.p), w.p.white};
+    const COLORREF fill[3] = {RGB(0, 0, 0), RGB(128, 128, 128), RGB(255, 255, 255)};
+    HPEN edge = CreatePen(PS_SOLID, 1, RGB(170, 170, 170));
+    oldPen = SelectObject(b, edge);
+    HGDIOBJ oldBrush = SelectObject(b, GetStockObject(DC_BRUSH));
+    for (int i = 0; i < 3; ++i) {
+        const int x = LevX(w, pos[i]), hw = w.Px(6);
+        const POINT tri[3] = {{x, sb}, {x - hw, sb + w.Px(kHandleH) - 1}, {x + hw, sb + w.Px(kHandleH) - 1}};
+        SetDCBrushColor(b, fill[i]);
+        Polygon(b, tri, 3);
+    }
+    SelectObject(b, oldBrush);
+    SelectObject(b, oldPen);
+    DeleteObject(edge);
+    wchar_t t[160];
+    swprintf_s(t, L"Levels   black %.2f   mid %.2f   white %.2f      double-click resets", w.p.black, w.p.gamma, w.p.white);
+    RECT tr{L.left, L.bottom + w.Px(2), L.right, L.bottom + w.Px(22)};
+    SetTextColor(b, RGB(150, 150, 150));
+    DrawTextW(b, t, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+}
+
+bool InLevels(const Win& w, POINT p) {
+    RECT r = w.levR;
+    InflateRect(&r, w.Px(8), w.Px(2));
+    return PtInRect(&r, p) != 0;
+}
+
+// Picks the handle under (or nearest to) x.
+int LevHandleAt(const Win& w, int x) {
+    const float pos[3] = {w.p.black, MidPos(w.p), w.p.white};
+    int best = 0;
+    for (int i = 1; i < 3; ++i)
+        if (std::abs(LevX(w, pos[i]) - x) < std::abs(LevX(w, pos[best]) - x)) best = i;
+    // black and white sitting on each other: drag the one that makes room
+    if (best != 1 && LevX(w, w.p.white) - LevX(w, w.p.black) < w.Px(4)) best = x < LevX(w, w.p.black) ? 0 : 2;
+    return best;
+}
+
+void SetLevel(Win& w, int which, int x) {
+    const float v = std::clamp(static_cast<float>(x - w.levR.left) / std::max<LONG>(1, w.levR.right - w.levR.left), 0.f, 1.f);
+    if (which == 0) w.p.black = std::min(v, w.p.white - 0.01f);
+    else if (which == 2) w.p.white = std::max(v, w.p.black + 0.01f);
+    else {
+        const float t = std::clamp((v - w.p.black) / (w.p.white - w.p.black), 0.02f, 0.98f);
+        w.p.gamma = std::log(t) / std::log(0.5f);
+    }
+}
+
+// More / less detail: slide both ends (negative = more detail).
+void ShiftLevels(Win& w, float d) {
+    d = std::clamp(d, -w.p.black, 1 - w.p.white);
+    w.p.black += d;
+    w.p.white += d;
+}
+
+// Sharper (< 1) / softer (> 1) edges: narrow or widen the range around its middle.
+void SpreadLevels(Win& w, float f) {
+    const float c = (w.p.black + w.p.white) / 2;
+    const float half = std::clamp((w.p.white - w.p.black) / 2 * f, 0.005f, 0.5f);
+    w.p.black = std::clamp(c - half, 0.f, 0.99f);
+    w.p.white = std::clamp(c + half, w.p.black + 0.01f, 1.f);
 }
 
 // A closed outline in client coords: dark under a dotted white line.
@@ -566,14 +694,14 @@ void Paint(Win& w, HDC hdc) {
 
     // hint
     Fill(b, {0, 0, rc.right, w.Px(kHintH)}, RGB(28, 28, 28));
+    const wchar_t* drag = w.tool == T_RECT ? L"Drag a box around the part you want" : L"Drag around the part you want";
     std::wstring hint;
     if (w.p.detail.empty())
-        hint = L"Drag around the part you want (more drags add more areas). Click the detail color, right-click the "
-               L"background. Ctrl+Z undoes.";
+        hint = std::wstring(drag) + L" (more add up). Click the detail color, right-click the background. Ctrl+Z undoes.";
     else
         hint = std::to_wstring(w.p.detail.size()) +
                (w.p.detail.size() == 1 ? L" detail color picked." : L" detail colors picked.") +
-               L"  Click to add more, right-click the background, drag around the part you want.  Ctrl+Z undoes.";
+               L"  Click to add more, right-click the background. " + drag + L".  Ctrl+Z undoes.";
     HGDIOBJ oldFont = SelectObject(b, w.ui);
     SetTextColor(b, RGB(200, 200, 200));
     RECT hr{w.Px(kGap), 0, rc.right - w.Px(kGap), w.Px(kHintH)};
@@ -591,7 +719,12 @@ void Paint(Win& w, HDC hdc) {
         for (POINT p : poly) sp.push_back(ToScreen(w, p.x + 0.5f, p.y + 0.5f));
         Outline(b, sp, true);
     }
-    if (w.dragging) Outline(b, w.path, false);
+    if (w.dragging && w.tool == T_RECT) {
+        const POINT a = w.downPt, c = w.curPt;
+        Outline(b, {a, {c.x, a.y}, c, {a.x, c.y}}, true);
+    } else if (w.dragging) {
+        Outline(b, w.path, false);
+    }
     for (POINT p : w.detailPts) Marker(w, b, p, true);
     if (w.surfacePt.x >= 0) Marker(w, b, w.surfacePt, false);
 
@@ -610,9 +743,10 @@ void Paint(Win& w, HDC hdc) {
         FrameRect(b, &fr, br);
         DeleteObject(br);
     }
-    // the background color in use, under the result
+    PaintLevels(w, b);
+    // the background color in use, under the levels
     {
-        const int sw = w.Px(14), y = w.resArea.bottom + w.Px(10);
+        const int sw = w.Px(14), y = w.levR.bottom + w.Px(30);
         const uint32_t s = w.surfaceUsed;
         Fill(b, {w.resArea.left, y, w.resArea.left + sw, y + sw}, RGB((s >> 16) & 255, (s >> 8) & 255, s & 255));
         RECT tr{w.resArea.left + sw + w.Px(8), y - w.Px(4), w.resArea.right, y + sw + w.Px(4)};
@@ -627,14 +761,16 @@ void Paint(Win& w, HDC hdc) {
     SelectObject(b, GetStockObject(DC_BRUSH));
     for (int i = 0; i < static_cast<int>(w.btns.size()); ++i) {
         const Btn& bt = w.btns[i];
-        const bool en = Enabled(w, bt.id), hov = i == w.hover && en;
+        const bool hov = i == w.hover;
+        const bool on = (bt.id == B_INVERT && w.p.invert) || (bt.id == B_LASSO && w.tool == T_LASSO) ||
+                        (bt.id == B_RECT && w.tool == T_RECT);
         COLORREF c = hov ? RGB(66, 66, 66) : RGB(50, 50, 50);
         if (bt.id == B_SAVE) c = hov ? RGB(245, 70, 80) : kAccent;
-        else if (bt.id == B_INVERT && w.p.invert) c = hov ? RGB(96, 96, 96) : RGB(84, 84, 84);
+        else if (on) c = hov ? RGB(96, 96, 96) : RGB(84, 84, 84);
         SetDCBrushColor(b, c);
         RoundRect(b, bt.r.left, bt.r.top, bt.r.right + 1, bt.r.bottom + 1, w.Px(8), w.Px(8));
         SelectObject(b, bt.id == B_SAVE ? w.bold : w.ui);
-        SetTextColor(b, en ? RGB(235, 235, 235) : RGB(110, 110, 110));
+        SetTextColor(b, RGB(235, 235, 235));
         RECT tr = bt.r;
         DrawTextW(b, bt.label.c_str(), -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
@@ -644,18 +780,35 @@ void Paint(Win& w, HDC hdc) {
 
 void Redraw(Win& w) { InvalidateRect(w.hwnd, nullptr, FALSE); }
 
-void Changed(Win& w) {
-    Recompute(w);
+void Shown(Win& w) {
     for (Btn& b : w.btns)
         if (b.id == B_SIZE) b.label = SizeLabel(w);
     Redraw(w);
 }
 
-void LoadSizeChoice(Win& w) {
+void Changed(Win& w) {  // picks or mask changed
+    Recompute(w);
+    Shown(w);
+}
+
+void LevelsChanged(Win& w) {  // only levels / invert
+    Refine(w);
+    Shown(w);
+}
+
+void LoadChoices(Win& w) {
     wchar_t buf[16] = {};
     GetPrivateProfileStringW(L"Alpha", L"Size", L"auto", buf, 16, SettingsPath().c_str());
     for (int i = 1; i < kSizeCount; ++i)
         if (_wtoi(buf) == kSizes[i]) w.sizeIdx = i;
+    GetPrivateProfileStringW(L"Alpha", L"Tool", L"lasso", buf, 16, SettingsPath().c_str());
+    w.tool = _wcsicmp(buf, L"rectangle") ? T_LASSO : T_RECT;
+}
+
+void SetTool(Win& w, int t) {
+    w.tool = t;
+    SaveSettingValue(L"Alpha", L"Tool", t == T_RECT ? L"rectangle" : L"lasso");
+    Redraw(w);
 }
 
 Image Final(const Win& w) { return Scale(w.mask, OutputSize(w.mask, w.sizeIdx)); }
@@ -680,14 +833,17 @@ void SaveNow(Win& w) {
 }
 
 void Press(Win& w, BtnId id) {
-    if (!Enabled(w, id)) return;
     switch (id) {
-    case B_LESS: --w.p.level; break;
-    case B_MORE: ++w.p.level; break;
-    case B_SHARP: --w.p.soft; break;
-    case B_SOFT: ++w.p.soft; break;
-    case B_INVERT: w.p.invert = !w.p.invert; break;
-    case B_SIZE: w.sizeIdx = (w.sizeIdx + 1) % kSizeCount; break;
+    case B_LASSO: SetTool(w, T_LASSO); return;
+    case B_RECT: SetTool(w, T_RECT); return;
+    case B_INVERT:
+        w.p.invert = !w.p.invert;
+        LevelsChanged(w);
+        return;
+    case B_SIZE:
+        w.sizeIdx = (w.sizeIdx + 1) % kSizeCount;
+        Shown(w);
+        return;
     case B_RESET: {
         const int keep = w.sizeIdx;
         w.p = Params{};
@@ -721,12 +877,22 @@ void OnLeftUp(Win& w) {
     ReleaseCapture();
     if (w.dragging) {
         w.dragging = false;
-        std::vector<POINT> poly;
-        for (POINT c : w.path) {
+        auto toImg = [&](POINT c) {
             POINT q = ToImg(w, c.x, c.y);
             q.x = std::clamp<LONG>(q.x, 0, w.img.w - 1);
             q.y = std::clamp<LONG>(q.y, 0, w.img.h - 1);
-            if (poly.empty() || q.x != poly.back().x || q.y != poly.back().y) poly.push_back(q);
+            return q;
+        };
+        std::vector<POINT> poly;
+        if (w.tool == T_RECT) {
+            const POINT a = toImg(w.downPt), c = toImg(w.curPt);
+            const LONG x0 = std::min(a.x, c.x), x1 = std::max(a.x, c.x), y0 = std::min(a.y, c.y), y1 = std::max(a.y, c.y) + 1;
+            if (x1 > x0 && y1 - y0 > 1) poly = {{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}};
+        } else {
+            for (POINT c : w.path) {
+                const POINT q = toImg(c);
+                if (poly.empty() || q.x != poly.back().x || q.y != poly.back().y) poly.push_back(q);
+            }
         }
         w.path.clear();
         if (poly.size() >= 3) {
@@ -770,18 +936,27 @@ void OnKey(Win& w, UINT vk) {
     else if (vk == VK_ESCAPE) DestroyWindow(w.hwnd);
     else if (vk == VK_BACK || vk == VK_DELETE) Press(w, B_RESET);
     else if (vk == 'I') Press(w, B_INVERT);
-    else if (vk == VK_OEM_PLUS || vk == VK_ADD) Press(w, B_MORE);
-    else if (vk == VK_OEM_MINUS || vk == VK_SUBTRACT) Press(w, B_LESS);
-    else if (vk == VK_OEM_4) Press(w, B_SHARP);
-    else if (vk == VK_OEM_6) Press(w, B_SOFT);
+    else if (vk == 'L') SetTool(w, T_LASSO);
+    else if (vk == 'R') SetTool(w, T_RECT);
+    else if (vk == VK_OEM_PLUS || vk == VK_ADD) {
+        ShiftLevels(w, -0.03f);
+        LevelsChanged(w);
+    } else if (vk == VK_OEM_MINUS || vk == VK_SUBTRACT) {
+        ShiftLevels(w, 0.03f);
+        LevelsChanged(w);
+    } else if (vk == VK_OEM_4) {
+        SpreadLevels(w, 1 / 1.4f);
+        LevelsChanged(w);
+    } else if (vk == VK_OEM_6) {
+        SpreadLevels(w, 1.4f);
+        LevelsChanged(w);
+    }
 }
 
 const wchar_t* Tip(BtnId id) {
     switch (id) {
-    case B_LESS: return L"Less detail  (- or wheel down)";
-    case B_MORE: return L"More detail  (+ or wheel up)";
-    case B_SHARP: return L"Sharper edges  ([)";
-    case B_SOFT: return L"Softer edges  (])";
+    case B_LASSO: return L"Lasso: drag freely around the part you want  (L)";
+    case B_RECT: return L"Rectangle: drag a box around the part you want  (R)";
     case B_INVERT: return L"Swap white and black  (I)";
     case B_SIZE: return L"Output size; auto = the smallest power of two that keeps every pixel";
     case B_RESET: return L"Forget the picks and the mask  (Backspace)";
@@ -827,7 +1002,7 @@ LRESULT CALLBACK Proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         Redraw(w);
         return 0;
     case WM_GETMINMAXINFO: {
-        RECT r{0, 0, MinWidth(w), w.Px(kHintH + kBarH + 260)};
+        RECT r{0, 0, MinWidth(w), w.Px(kHintH + kBarH + kUnderRes + 200)};
         AdjustWindowRectExForDpi(&r, WS_OVERLAPPEDWINDOW, FALSE, 0, w.dpi);
         reinterpret_cast<MINMAXINFO*>(lp)->ptMinTrackSize = {r.right - r.left, r.bottom - r.top};
         return 0;
@@ -848,16 +1023,34 @@ LRESULT CALLBACK Proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             ScreenToClient(h, &p);
             const wchar_t* cur = IDC_ARROW;
             if (BtnAt(w, p.x, p.y) >= 0) cur = IDC_HAND;
+            else if (w.levDrag >= 0 || InLevels(w, p)) cur = IDC_SIZEWE;
             else if (w.down || InPicture(w, ToImg(w, p.x, p.y))) cur = IDC_CROSS;
             SetCursor(LoadCursorW(nullptr, cur));
             return TRUE;
         }
         break;
+    case WM_LBUTTONDBLCLK:
+        if (InLevels(w, POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)})) {  // reset levels
+            const Params d;
+            w.p.black = d.black;
+            w.p.white = d.white;
+            w.p.gamma = d.gamma;
+            LevelsChanged(w);
+            return 0;
+        }
+        [[fallthrough]];  // elsewhere a double-click is two clicks
     case WM_LBUTTONDOWN: {
         const int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
         const int bi = BtnAt(w, x, y);
         if (bi >= 0) {
             Press(w, w.btns[bi].id);
+            return 0;
+        }
+        if (InLevels(w, POINT{x, y})) {
+            w.levDrag = LevHandleAt(w, x);
+            SetCapture(h);
+            SetLevel(w, w.levDrag, x);
+            LevelsChanged(w);
             return 0;
         }
         if (!PtInRect(&w.srcArea, POINT{x, y})) return 0;
@@ -870,6 +1063,11 @@ LRESULT CALLBACK Proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSEMOVE: {
         const int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+        if (w.levDrag >= 0) {
+            SetLevel(w, w.levDrag, x);
+            LevelsChanged(w);
+            return 0;
+        }
         if (w.down) {
             w.curPt = {x, y};
             if (!w.dragging && (std::abs(x - w.downPt.x) > w.Px(4) || std::abs(y - w.downPt.y) > w.Px(4))) w.dragging = true;
@@ -895,9 +1093,15 @@ LRESULT CALLBACK Proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_LBUTTONUP:
+        if (w.levDrag >= 0) {
+            w.levDrag = -1;
+            ReleaseCapture();
+            return 0;
+        }
         OnLeftUp(w);
         return 0;
     case WM_CAPTURECHANGED:
+        w.levDrag = -1;
         if (w.down) {
             w.down = w.dragging = false;
             Redraw(w);
@@ -913,8 +1117,9 @@ LRESULT CALLBACK Proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         Changed(w);
         return 0;
     }
-    case WM_MOUSEWHEEL:
-        Press(w, GET_WHEEL_DELTA_WPARAM(wp) > 0 ? B_MORE : B_LESS);
+    case WM_MOUSEWHEEL:  // up = more detail
+        ShiftLevels(w, GET_WHEEL_DELTA_WPARAM(wp) > 0 ? -0.03f : 0.03f);
+        LevelsChanged(w);
         return 0;
     case WM_KEYDOWN:
         OnKey(w, static_cast<UINT>(wp));
@@ -947,6 +1152,7 @@ void Alpha_Open(const Image& img, const CaptureResult& meta) {
     static bool registered = false;
     if (!registered) {
         WNDCLASSEXW wc{sizeof(wc)};
+        wc.style = CS_DBLCLKS;
         wc.lpfnWndProc = Proc;
         wc.hInstance = g_hinst;
         wc.lpszClassName = kClass;
@@ -965,7 +1171,7 @@ void Alpha_Open(const Image& img, const CaptureResult& meta) {
         return;
     }
     memcpy(w->src.bits, img.px.data(), static_cast<size_t>(img.w) * img.h * 4);
-    LoadSizeChoice(*w);
+    LoadChoices(*w);
     Recompute(*w);
 
     POINT cur;
