@@ -116,6 +116,24 @@ void UpdateKeyHook() {
     }
 }
 
+// The tray icon: a pocket knife with no background. Its blade is light on a dark taskbar and dark on a
+// light one (made by tools/make_icons.py).
+bool TaskbarIsLight() {
+    DWORD v = 0, n = sizeof(v);
+    return RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                        L"SystemUsesLightTheme", RRF_RT_REG_DWORD, nullptr, &v, &n) == ERROR_SUCCESS &&
+           v != 0;
+}
+
+void LoadTrayIcon() {
+    HICON ic = nullptr;
+    LoadIconMetric(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(TaskbarIsLight() ? IDI_TRAY_LIGHT : IDI_TRAY_DARK),
+                   LIM_SMALL, &ic);
+    if (!ic) return;
+    if (g_icon) DestroyIcon(g_icon);
+    g_icon = ic;
+}
+
 void TrayAdd() {
     g_nid = {};
     g_nid.cbSize = sizeof(g_nid);
@@ -341,6 +359,17 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     switch (msg) {
+    case WM_SETTINGCHANGE:  // the taskbar went light or dark, or the screen scale changed
+    case WM_DPICHANGED:
+        if (msg == WM_DPICHANGED || (lp && lstrcmpiW(reinterpret_cast<const wchar_t*>(lp), L"ImmersiveColorSet") == 0)) {
+            LoadTrayIcon();
+            if (!TestMode()) {
+                g_nid.uFlags = NIF_ICON;
+                g_nid.hIcon = g_icon;
+                Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+            }
+        }
+        break;
     case WM_HOTKEY:
         if (wp >= 1 && wp <= kHotkeyCount) Capture_Start(static_cast<CaptureMode>(wp));
         return 0;
@@ -714,7 +743,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     g_mainWnd = CreateWindowExW(WS_EX_TOOLWINDOW, kMainClass, kAppName, WS_POPUP, 0, 0, 0, 0, nullptr, nullptr,
                                 hinst, nullptr);
     g_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
-    LoadIconMetric(hinst, MAKEINTRESOURCEW(IDI_APP), LIM_SMALL, &g_icon);
+    LoadTrayIcon();
 
     if (!TestMode()) TrayAdd();
     Capture_Init();
