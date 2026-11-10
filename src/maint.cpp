@@ -17,6 +17,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <climits>
 namespace Gdiplus {
 using std::max;
 using std::min;
@@ -157,6 +158,7 @@ struct BgResult {
     SecurityInfo sec;
 };
 bool g_bgBusy = false;
+long long g_bgRetryAt = 0;  // the daily check was put off (battery, game, offline): not before this
 struct Progress {
     std::wstring key, text;
 };
@@ -1055,6 +1057,9 @@ std::wstring RunningText() {
 std::wstring ResultText(LPARAM code) {
     if (code == kDeclined) {
         J.outcome = 2;
+        if (J.task == L"clean" && (J.freed || !J.ok.empty()))  // the user's own folders were cleaned before the prompt
+            return L"Freed " + SizeText(J.freed) +
+                   L" in your own folders. The Windows places weren't cleaned: Windows didn't get permission.";
         return L"Not started: Windows didn't get permission to make changes.";
     }
     if (code == kNoStart) {
@@ -1187,7 +1192,7 @@ bool BeginJob(int t, const std::wstring& task, bool admin) {
     J.task = task;
     J.cancellable = task == L"install" || task == L"clean" || task == L"repair";
     J.wasFront = GetForegroundWindow() == U.hwnd;
-    J.text = J.admin ? L"Waiting for permission (the Windows prompt)…" : L"Starting…";
+    J.text = J.admin && task != L"clean" ? L"Waiting for permission (the Windows prompt)…" : L"Starting…";
     if (!U.cancel) U.cancel = CreateEventW(nullptr, TRUE, FALSE, CancelEventName(GetCurrentProcessId()).c_str());
     else ResetEvent(U.cancel);
     SetCancelEvent(U.cancel);
@@ -1211,44 +1216,74 @@ void ClosePanel() {
     InvalidateRect(U.nav, nullptr, FALSE);
 }
 
+// Starts the elevated copy for a job and waits for it (call on a worker thread): its exit code, or
+// kDeclined / kNoStart. Test copies with simulated jobs start it without the prompt.
+LPARAM RunElevated(HWND w, const std::wstring& task, const std::vector<std::wstring>& args, bool fake) {
+    std::wstring params = L"--maint-admin " + std::to_wstring(reinterpret_cast<UINT_PTR>(w)) + L" " + task;
+    for (const auto& a : args) params += L" " + QuoteArg(a);
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    SHELLEXECUTEINFOW sei{sizeof(sei)};
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+    sei.hwnd = w;
+    sei.lpVerb = fake ? L"open" : L"runas";
+    sei.lpFile = exe;
+    sei.lpParameters = params.c_str();
+    sei.nShow = SW_HIDE;
+    LPARAM code;
+    if (!ShellExecuteExW(&sei)) {
+        code = GetLastError() == ERROR_CANCELLED ? kDeclined : kNoStart;
+    } else {
+        DWORD c = 1;
+        if (sei.hProcess) {
+            WaitForSingleObject(sei.hProcess, INFINITE);
+            GetExitCodeProcess(sei.hProcess, &c);
+            CloseHandle(sei.hProcess);
+        }
+        code = static_cast<LPARAM>(c);
+    }
+    CoUninitialize();
+    return code;
+}
+
 // Runs a job: here on a worker thread, or in an elevated copy when it needs administrator rights.
 // The window stays as it is meanwhile: nothing here waits for the job.
 bool StartTask(int t, const std::wstring& task, const std::vector<std::wstring>& args, bool admin) {
     if (!BeginJob(t, task, admin)) return false;
     HWND w = U.hwnd;
     const WPARAM tag = Tag(t);
-    if (J.admin) {
-        std::wstring params = L"--maint-admin " + std::to_wstring(reinterpret_cast<UINT_PTR>(w)) + L" " + task;
-        for (const auto& a : args) params += L" " + QuoteArg(a);
-        SetStatus(t, L"Waiting for permission (the Windows prompt)…");
-        // Test copies with simulated jobs start the helper copy without the prompt.
-        const bool fake = FakeMode();
-        std::thread([w, tag, params, fake] {
-            CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-            wchar_t exe[MAX_PATH];
-            GetModuleFileNameW(nullptr, exe, MAX_PATH);
-            SHELLEXECUTEINFOW sei{sizeof(sei)};
-            sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
-            sei.hwnd = w;
-            sei.lpVerb = fake ? L"open" : L"runas";
-            sei.lpFile = exe;
-            sei.lpParameters = params.c_str();
-            sei.nShow = SW_HIDE;
-            LPARAM code;
-            if (!ShellExecuteExW(&sei)) {
-                code = GetLastError() == ERROR_CANCELLED ? kDeclined : kNoStart;
-            } else {
-                DWORD c = 1;
-                if (sei.hProcess) {
-                    WaitForSingleObject(sei.hProcess, INFINITE);
-                    GetExitCodeProcess(sei.hProcess, &c);
-                    CloseHandle(sei.hProcess);
+    const bool fake = FakeMode();
+    if (J.admin && task == L"clean") {
+        // The places in the user's own folders are cleaned here, without administrator rights; only the
+        // Windows places go to the elevated copy, which never touches the user's folders.
+        std::thread([w, tag, args, fake] {
+            ULONGLONG freed = 0;
+            std::vector<std::wstring> more;
+            std::vector<std::wstring> mine = args;
+            mine.push_back(L"scope:user");
+            const int userCode = RunTask(L"clean", mine, [&](const std::wstring& k, const std::wstring& s) {
+                if (k == L"part") {  // a place half done here: the elevated copy adds to its row
+                    more.push_back(L"pre:" + s);
+                    return;
                 }
-                code = static_cast<LPARAM>(c);
+                if (k == L"freed") freed = _wcstoui64(s.c_str(), nullptr, 10);
+                PostOrDelete(w, WM_M_PROGRESS, tag, new Progress{k, s});
+            });
+            LPARAM code = userCode;
+            if (!CancelRequested()) {
+                PostOrDelete(w, WM_M_PROGRESS, tag, new Progress{L"status", L"Waiting for permission (the Windows prompt)…"});
+                std::vector<std::wstring> rest = args;
+                rest.push_back(L"freed:" + std::to_wstring(freed));
+                rest.insert(rest.end(), more.begin(), more.end());
+                code = RunElevated(w, L"clean", rest, fake);
+                if (code == 0) code = userCode;
             }
-            CoUninitialize();
             PostMessageW(w, WM_M_DONE, tag, code);
         }).detach();
+    } else if (J.admin) {
+        SetStatus(t, L"Waiting for permission (the Windows prompt)…");
+        std::thread([w, tag, task, args, fake] { PostMessageW(w, WM_M_DONE, tag, RunElevated(w, task, args, fake)); }).detach();
     } else {
         LockFront();
         std::thread([w, tag, task, args] {
@@ -1395,11 +1430,7 @@ void AddRound(Gdiplus::GraphicsPath& p, Gdiplus::RectF r, float radius) {
 }
 
 void PaintBar(HWND h, HDC dc) {
-    static ULONG_PTR token = 0;
-    if (!token) {
-        Gdiplus::GdiplusStartupInput in;
-        Gdiplus::GdiplusStartup(&token, &in, nullptr);
-    }
+    Gdiplus_Ensure();
     RECT rc;
     GetClientRect(h, &rc);
     if (rc.right <= 0 || rc.bottom <= 0) return;
@@ -1889,7 +1920,12 @@ LRESULT CALLBACK MaintProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         const std::wstring s(static_cast<const wchar_t*>(cd->lpData),
                              wcsnlen(static_cast<const wchar_t*>(cd->lpData), cd->cbData / sizeof(wchar_t)));
         const size_t tab = s.find(L'\t');
-        if (tab != std::wstring::npos) OnProgress(J.tab, s.substr(0, tab), s.substr(tab + 1));
+        if (tab != std::wstring::npos) {
+            const std::wstring key = s.substr(0, tab), text = s.substr(tab + 1);
+            // The elevated copy keeps no log of its own: its lines go in this copy's log.
+            if (key != L"pct" && key != L"step" && key != L"freed") Log(L"Maintenance (elevated): %s %s", key.c_str(), text.c_str());
+            OnProgress(J.tab, key, text);
+        }
         InvalidateRect(U.nav, nullptr, FALSE);
         return TRUE;
     }
@@ -2013,17 +2049,49 @@ void Maint_Show(int tab) {
 
 void Maint_Refresh() { FillOverview(); }
 
+long long Maint_SecondsToNext() {
+    if (!FeatureOn(kFeatMaint) || !g_settings.maintDaily) return LLONG_MAX;
+    // 20 hours after the last check, 6 after a try that didn't finish, and not while put off.
+    const long long due = std::max({CacheNum(L"LastCheck", 0) + 20 * 3600, CacheNum(L"LastAttempt", 0) + 6 * 3600, g_bgRetryAt});
+    return std::max(0LL, due - Now());
+}
+
+namespace {
+// Why the daily check should wait (empty: go): on battery, a full-screen game or presentation,
+// do-not-disturb, or no internet. A forced check ("Check again") ignores all of this.
+const wchar_t* PutOffReason() {
+    SYSTEM_POWER_STATUS ps{};
+    if (GetSystemPowerStatus(&ps) && (ps.ACLineStatus == 0 || (ps.SystemStatusFlag & 1))) return L"on battery";
+    QUERY_USER_NOTIFICATION_STATE q{};
+    if (SUCCEEDED(SHQueryUserNotificationState(&q)) &&
+        (q == QUNS_BUSY || q == QUNS_RUNNING_D3D_FULL_SCREEN || q == QUNS_PRESENTATION_MODE || q == QUNS_APP))
+        return L"busy (full screen or presenting)";
+    if (!Net_Online()) return L"offline";
+    return nullptr;
+}
+}  // namespace
+
 void Maint_Background(bool force) {
     if (g_bgBusy || !FeatureOn(kFeatMaint)) return;
-    if (!force && (!g_settings.maintDaily || Now() - CacheNum(L"LastCheck", 0) < 20 * 3600)) return;
+    if (!force && Maint_SecondsToNext() > 0) return;
     if (U.hwnd && U.busy[kUpdates]) return;  // the window is checking right now
+    if (!force) {
+        if (const wchar_t* why = PutOffReason()) {
+            g_bgRetryAt = Now() + 30 * 60 + (GetTickCount64() / 1000) % (30 * 60);  // 30 to 60 minutes
+            Log(L"Maintenance: daily check put off (%s)", why);
+            return;
+        }
+    }
+    g_bgRetryAt = 0;
+    CacheSet(L"LastAttempt", std::to_wstring(Now()));
     g_bgBusy = true;
     Log(L"Maintenance: daily check started");
     HWND w = g_mainWnd;
     std::thread([w] {
+        SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);  // low CPU, disk and memory priority
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         auto* r = new BgResult;
-        r->up = ScanUpdates([](const std::wstring&, const std::wstring&) {});
+        r->up = ScanUpdates([](const std::wstring&, const std::wstring&) {}, true);
         r->sec = ReadSecurity();
         CoUninitialize();
         if (!PostMessageW(w, WM_APP_MAINT, 0, reinterpret_cast<LPARAM>(r))) delete r;

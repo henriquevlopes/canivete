@@ -48,7 +48,9 @@ struct UpdateScan {
     std::wstring wuError, appError;  // why a source could not be checked
     std::vector<GpuInfo> gpus;
 };
-UpdateScan ScanUpdates(const Sink& progress);  // takes a minute or more: call on a worker thread
+// Takes a minute or more: call on a worker thread. background: the daily check (winget at low
+// priority, Windows Update's last online result instead of a new online search).
+UpdateScan ScanUpdates(const Sink& progress, bool background = false);
 std::vector<GpuInfo> ScanGpus();
 
 // ---- cleanup

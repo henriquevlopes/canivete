@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <cwctype>
 #include <future>
+#include <mutex>
+#include <thread>
 #include <set>
 
 #include <initguid.h>
@@ -326,9 +328,11 @@ struct ProcResult {
 };
 
 // Runs a console program hidden, with its output in a pipe. Waits for the program itself, not for
-// the pipe to close: installers it starts may keep a copy of the pipe open long after.
+// the pipe to close: installers it starts may keep a copy of the pipe open long after. A helper
+// thread blocks on the pipe (no polling); lines still reach onLine on the calling thread.
+// flags: extra CreateProcess flags (BELOW_NORMAL_PRIORITY_CLASS for the background check).
 ProcResult Run(const std::wstring& exe, const std::wstring& args, DWORD timeoutMs,
-               const LineReader::OnLine& onLine = {}) {
+               const LineReader::OnLine& onLine = {}, DWORD flags = 0) {
     ProcResult r;
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
     HANDLE rd = nullptr, wr = nullptr;
@@ -345,8 +349,8 @@ ProcResult Run(const std::wstring& exe, const std::wstring& args, DWORD timeoutM
     si.hStdOutput = si.hStdError = wr;
     PROCESS_INFORMATION pi{};
     std::wstring cmd = QuoteArg(exe) + L" " + args;
-    r.started = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
-                               nullptr, nullptr, &si, &pi) != 0;
+    r.started = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE,
+                               CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | flags, nullptr, nullptr, &si, &pi) != 0;
     if (!r.started) r.error = GetLastError();
     CloseHandle(wr);
     if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
@@ -355,32 +359,68 @@ ProcResult Run(const std::wstring& exe, const std::wstring& args, DWORD timeoutM
         return r;
     }
     LineReader lr(onLine);
-    const ULONGLONG t0 = GetTickCount64();
-    char buf[8192];
-    for (;;) {
-        DWORD avail = 0;
-        bool any = false;
-        while (PeekNamedPipe(rd, nullptr, 0, nullptr, &avail, nullptr) && avail) {
-            DWORD got = 0;
-            if (!ReadFile(rd, buf, std::min<DWORD>(avail, sizeof(buf)), &got, nullptr) || !got) break;
-            lr.Feed(buf, got);
-            any = true;
-        }
-        if (WaitForSingleObject(pi.hProcess, any ? 0 : 60) == WAIT_OBJECT_0) {
-            while (PeekNamedPipe(rd, nullptr, 0, nullptr, &avail, nullptr) && avail) {
-                DWORD got = 0;
-                if (!ReadFile(rd, buf, std::min<DWORD>(avail, sizeof(buf)), &got, nullptr) || !got) break;
-                lr.Feed(buf, got);
+    std::mutex mx;
+    std::string got;  // read by the helper thread, not yet given to lr
+    bool eof = false;
+    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    std::thread reader([&] {
+        char buf[8192];
+        for (;;) {
+            DWORD n = 0;
+            if (!ReadFile(rd, buf, sizeof(buf), &n, nullptr) || !n) break;
+            {
+                std::lock_guard<std::mutex> lock(mx);
+                got.append(buf, n);
             }
-            break;
+            SetEvent(ev);
         }
-        if (timeoutMs && GetTickCount64() - t0 > timeoutMs) {
-            TerminateProcess(pi.hProcess, 1);
-            r.timedOut = true;
-            WaitForSingleObject(pi.hProcess, 5000);
-            break;
+        {
+            std::lock_guard<std::mutex> lock(mx);
+            eof = true;
         }
+        SetEvent(ev);
+    });
+    auto drain = [&] {  // true once the pipe is closed and everything was given to lr
+        std::string s;
+        bool end;
+        {
+            std::lock_guard<std::mutex> lock(mx);
+            s.swap(got);
+            end = eof;
+        }
+        if (!s.empty()) lr.Feed(s.data(), s.size());
+        return end;
+    };
+    const ULONGLONG t0 = GetTickCount64();
+    const HANDLE waits[2] = {ev, pi.hProcess};
+    for (;;) {
+        DWORD wait = INFINITE;
+        if (timeoutMs) {
+            const ULONGLONG used = GetTickCount64() - t0;
+            if (used >= timeoutMs) {
+                TerminateProcess(pi.hProcess, 1);
+                r.timedOut = true;
+                WaitForSingleObject(pi.hProcess, 5000);
+                break;
+            }
+            wait = static_cast<DWORD>(timeoutMs - used);
+        }
+        const DWORD w = WaitForMultipleObjects(2, waits, FALSE, wait);
+        drain();
+        if (w == WAIT_OBJECT_0 + 1 || w == WAIT_FAILED) break;
     }
+    // The program has ended: take what is left in the pipe, until it closes or stays quiet for 100 ms
+    // (a program it started may hold the pipe open), then stop the helper thread.
+    while (!drain() && WaitForSingleObject(ev, 100) == WAIT_OBJECT_0) {
+    }
+    const HANDLE th = reader.native_handle();
+    while (WaitForSingleObject(th, 0) == WAIT_TIMEOUT) {
+        CancelSynchronousIo(th);
+        WaitForSingleObject(th, 20);
+    }
+    reader.join();
+    drain();
+    CloseHandle(ev);
     lr.Finish();
     GetExitCodeProcess(pi.hProcess, &r.code);
     CloseHandle(pi.hProcess);
@@ -429,13 +469,15 @@ std::wstring WuError(HRESULT hr) {
     return Fmt(L"Windows Update error 0x%08X.", static_cast<unsigned>(hr));
 }
 
-HRESULT WuSearch(ComPtr<IUpdateSession>& session, ComPtr<IUpdateCollection>& found) {
+// online false: Windows' own last online result (no download, no server round trip).
+HRESULT WuSearch(ComPtr<IUpdateSession>& session, ComPtr<IUpdateCollection>& found, bool online = true) {
     HRESULT hr = CoCreateInstance(CLSID_UpdateSession, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&session));
     if (FAILED(hr)) return hr;
     Bstr app(L"Canivete");
     session->put_ClientApplicationID(app.b);
     ComPtr<IUpdateSearcher> searcher;
     if (FAILED(hr = session->CreateUpdateSearcher(&searcher))) return hr;
+    if (!online) searcher->put_Online(VARIANT_FALSE);
     ComPtr<ISearchResult> result;
     Bstr q(L"IsInstalled=0 and IsHidden=0");
     if (FAILED(hr = searcher->Search(q.b, &result))) return hr;
@@ -449,11 +491,11 @@ std::wstring UpdateId(IUpdate* u) {
     return s.str();
 }
 
-void ScanWindowsUpdate(UpdateScan& out) {
+void ScanWindowsUpdate(UpdateScan& out, bool online = true) {
     ComInit com;
     ComPtr<IUpdateSession> session;
     ComPtr<IUpdateCollection> coll;
-    const HRESULT hr = WuSearch(session, coll);
+    const HRESULT hr = WuSearch(session, coll, online);
     if (FAILED(hr)) {
         out.wuError = WuError(hr);
         return;
@@ -740,7 +782,8 @@ bool ParseWinget(const std::wstring& out, std::vector<UpdateItem>& items) {
     return true;
 }
 
-void ScanApps(UpdateScan& out) {
+void ScanApps(UpdateScan& out, bool background = false) {
+    if (background) SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
     const std::wstring exe = WingetExe();
     if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
         out.appError = L"winget (Windows' app installer) isn't installed, so apps weren't checked.";
@@ -748,7 +791,8 @@ void ScanApps(UpdateScan& out) {
     }
     // winget often answers nothing when another copy is busy: try three times.
     for (int t = 0; t < 3; ++t) {
-        const ProcResult r = Run(exe, L"upgrade --accept-source-agreements --disable-interactivity", 300000);
+        const ProcResult r = Run(exe, L"upgrade --accept-source-agreements --disable-interactivity", 300000, {},
+                                 background ? BELOW_NORMAL_PRIORITY_CLASS : 0);
         if (!r.started) {
             out.appError = Fmt(L"Couldn't start winget (error %lu).", r.error);
             return;
@@ -857,7 +901,15 @@ struct Target {
     const wchar_t* pattern;  // file name pattern
     int days;                // only files older than this (0 = all)
     bool recursive;
+    bool machine = false;    // a system place (Windows, ProgramData), not one in the user's own profile
 };
+
+// Which copy cleans what. Places in the user's profile are cleaned by the normal copy only; the
+// elevated copy (--maint-admin) only cleans system places, so a link the user planted in their own
+// folders can't make it delete anything else.
+enum class Scope { All, User, Machine };
+bool g_adminHelper = false;  // this is the elevated copy: Machine, whatever it was asked
+constexpr int kUserPart = 1, kMachinePart = 2;
 
 struct CleanDef {
     const wchar_t* key;
@@ -888,20 +940,20 @@ std::vector<Target> Targets(const std::wstring& key) {
         while (!d.empty() && d.back() == L'\\') d.pop_back();
         return {{d, L"*", 7, true}};
     }
-    if (key == L"wintemp") return {{Expand(L"%SystemRoot%\\Temp"), L"*", 7, true}};
-    if (key == L"wudownload") return {{Expand(L"%SystemRoot%\\SoftwareDistribution\\Download"), L"*", 7, true}};
+    if (key == L"wintemp") return {{Expand(L"%SystemRoot%\\Temp"), L"*", 7, true, true}};
+    if (key == L"wudownload") return {{Expand(L"%SystemRoot%\\SoftwareDistribution\\Download"), L"*", 7, true, true}};
     if (key == L"delivery")
         return {{Expand(L"%SystemRoot%\\ServiceProfiles\\NetworkService\\AppData\\Local\\Microsoft\\Windows\\"
                         L"DeliveryOptimization\\Cache"),
-                 L"*", 0, true}};
+                 L"*", 0, true, true}};
     if (key == L"crash")
         return {{Expand(L"%LOCALAPPDATA%\\CrashDumps"), L"*", 7, true},
                 {Expand(L"%LOCALAPPDATA%\\Microsoft\\Windows\\WER"), L"*", 7, true},
-                {Expand(L"%ProgramData%\\Microsoft\\Windows\\WER\\ReportArchive"), L"*", 7, true},
-                {Expand(L"%ProgramData%\\Microsoft\\Windows\\WER\\ReportQueue"), L"*", 7, true},
-                {Expand(L"%SystemRoot%\\Minidump"), L"*", 7, true},
-                {Expand(L"%SystemRoot%\\LiveKernelReports"), L"*.dmp", 7, true},
-                {Expand(L"%SystemRoot%"), L"MEMORY.DMP", 7, false}};
+                {Expand(L"%ProgramData%\\Microsoft\\Windows\\WER\\ReportArchive"), L"*", 7, true, true},
+                {Expand(L"%ProgramData%\\Microsoft\\Windows\\WER\\ReportQueue"), L"*", 7, true, true},
+                {Expand(L"%SystemRoot%\\Minidump"), L"*", 7, true, true},
+                {Expand(L"%SystemRoot%\\LiveKernelReports"), L"*.dmp", 7, true, true},
+                {Expand(L"%SystemRoot%"), L"MEMORY.DMP", 7, false, true}};
     if (key == L"shader")
         return {{Expand(L"%LOCALAPPDATA%\\D3DSCache"), L"*", 0, true},
                 {Expand(L"%LOCALAPPDATA%\\NVIDIA\\DXCache"), L"*", 0, true},
@@ -909,6 +961,14 @@ std::vector<Target> Targets(const std::wstring& key) {
                 {Expand(L"%LOCALAPPDATA%\\AMD\\DxCache"), L"*", 0, true},
                 {Expand(L"%LOCALAPPDATA%\\AMD\\GLCache"), L"*", 0, true}};
     return {};
+}
+
+// kUserPart / kMachinePart: where a cleanup place's folders are.
+int Parts(const std::wstring& key) {
+    if (key == L"crash") return kUserPart | kMachinePart;
+    for (const CleanDef& d : kClean)
+        if (key == d.key) return d.admin ? kMachinePart : kUserPart;
+    return 0;
 }
 
 struct WalkStats {
@@ -921,69 +981,160 @@ struct WalkStats {
 
 ULONGLONG FileTime64(const FILETIME& f) { return (static_cast<ULONGLONG>(f.dwHighDateTime) << 32) | f.dwLowDateTime; }
 
-// Measures (del = false) or deletes the matching files. Never follows links or junctions, never
-// deletes the folder it starts from, skips files in use.
-void Walk(const std::wstring& dir, const Target& t, ULONGLONG cutoff, bool del, bool top, WalkStats& s) {
-    WIN32_FIND_DATAW fd;
-    HANDLE f = FindFirstFileExW((dir + L"\\*").c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr,
-                                FIND_FIRST_EX_LARGE_FETCH);
-    if (f == INVALID_HANDLE_VALUE) {
-        const DWORD e = GetLastError();
-        if (top && e == ERROR_ACCESS_DENIED) s.denied = true;
-        return;
+// The real path of an open file or folder (\\?\C:\...), empty if unknown.
+std::wstring FinalPath(HANDLE h) {
+    std::wstring s(MAX_PATH, L'\0');
+    DWORD n = GetFinalPathNameByHandleW(h, s.data(), static_cast<DWORD>(s.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (n >= s.size()) {
+        s.resize(n + 1);
+        n = GetFinalPathNameByHandleW(h, s.data(), static_cast<DWORD>(s.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
     }
-    do {
-        const std::wstring name = fd.cFileName;
-        if (name == L"." || name == L"..") continue;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+    if (!n || n >= s.size()) return {};
+    s.resize(n);
+    return s;
+}
+
+// Opens a file or folder without following a link or junction at its end. Refused (closed,
+// INVALID_HANDLE_VALUE) when it is one, is not the kind expected, or doesn't really sit right inside
+// `parent` (a real path from FinalPath): what gets deleted is what was looked at.
+HANDLE OpenNoLink(const std::wstring& path, DWORD access, DWORD share, bool dir, const std::wstring& parent) {
+    HANDLE h = CreateFileW(path.c_str(), access | FILE_READ_ATTRIBUTES | SYNCHRONIZE, share, nullptr, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return h;
+    FILE_ATTRIBUTE_TAG_INFO tag{};
+    bool ok = GetFileInformationByHandleEx(h, FileAttributeTagInfo, &tag, sizeof(tag)) &&
+              !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && ((tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) == dir;
+    if (ok && !parent.empty()) {
+        const std::wstring real = FinalPath(h);
+        ok = real.size() > parent.size() + 1 && _wcsnicmp(real.c_str(), parent.c_str(), parent.size()) == 0 &&
+             real[parent.size()] == L'\\' && real.find(L'\\', parent.size() + 1) == std::wstring::npos;
+    }
+    if (!ok) {
+        CloseHandle(h);
+        SetLastError(ERROR_ACCESS_DENIED);
+        return INVALID_HANDLE_VALUE;
+    }
+    return h;
+}
+
+// Deletes the file or (empty) folder open as h (opened with DELETE).
+bool DeleteByHandle(HANDLE h, DWORD attrs) {
+    FILE_DISPOSITION_INFO_EX ex{FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS |
+                                FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE};
+    if (SetFileInformationByHandle(h, FileDispositionInfoEx, &ex, sizeof(ex))) return true;
+    if (attrs & FILE_ATTRIBUTE_READONLY) {  // file systems without the flags above (FAT): clear it first
+        FILE_BASIC_INFO b{};
+        b.FileAttributes = (attrs & ~FILE_ATTRIBUTE_READONLY) ? (attrs & ~FILE_ATTRIBUTE_READONLY) : FILE_ATTRIBUTE_NORMAL;
+        SetFileInformationByHandle(h, FileBasicInfo, &b, sizeof(b));
+    }
+    FILE_DISPOSITION_INFO d{TRUE};
+    return SetFileInformationByHandle(h, FileDispositionInfo, &d, sizeof(d)) != 0;
+}
+
+// Measures (del = false) or deletes the matching files in the folder open as dir (real path
+// dirPath). Works through handles: never follows links or junctions, checks each file is really in
+// this folder before deleting it, and keeps every folder on the way open (no rename or swap meanwhile).
+// Never deletes the folder it starts from; skips files in use.
+void Walk(HANDLE dir, const std::wstring& dirPath, const Target& t, ULONGLONG cutoff, bool del, bool top, WalkStats& s) {
+    struct Entry {
+        std::wstring name;
+        DWORD attrs;
+        ULONGLONG age, size;
+    };
+    std::vector<Entry> entries;
+    std::vector<ULONGLONG> buf(8192);  // 64 KB, 8-byte aligned
+    FILE_INFO_BY_HANDLE_CLASS cls = FileFullDirectoryRestartInfo;
+    while (GetFileInformationByHandleEx(dir, cls, buf.data(), static_cast<DWORD>(buf.size() * sizeof(ULONGLONG)))) {
+        cls = FileFullDirectoryInfo;
+        for (auto* e = reinterpret_cast<const FILE_FULL_DIR_INFO*>(buf.data());;) {
+            std::wstring name(e->FileName, e->FileNameLength / sizeof(wchar_t));
+            if (name != L"." && name != L"..")
+                entries.push_back({std::move(name), e->FileAttributes,
+                                   static_cast<ULONGLONG>(std::max(e->LastWriteTime.QuadPart, e->CreationTime.QuadPart)),
+                                   static_cast<ULONGLONG>(e->EndOfFile.QuadPart)});
+            if (!e->NextEntryOffset) break;
+            e = reinterpret_cast<const FILE_FULL_DIR_INFO*>(reinterpret_cast<const BYTE*>(e) + e->NextEntryOffset);
+        }
+    }
+    for (const Entry& en : entries) {
+        if (en.attrs & FILE_ATTRIBUTE_REPARSE_POINT) continue;
         // Claude Code's working folders in Temp stay.
-        if (top && t.days && _wcsnicmp(name.c_str(), L"claude", 6) == 0) continue;
-        const std::wstring path = dir + L"\\" + name;
-        const ULONGLONG age = std::max(FileTime64(fd.ftLastWriteTime), FileTime64(fd.ftCreationTime));
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        if (top && t.days && _wcsnicmp(en.name.c_str(), L"claude", 6) == 0) continue;
+        const std::wstring path = dirPath + L"\\" + en.name;
+        if (en.attrs & FILE_ATTRIBUTE_DIRECTORY) {
             if (!t.recursive) continue;
-            Walk(path, t, cutoff, del, false, s);
-            if (del && wcscmp(t.pattern, L"*") == 0 && (!t.days || age < cutoff)) RemoveDirectoryW(path.c_str());
+            bool rm = del && wcscmp(t.pattern, L"*") == 0 && (!t.days || en.age < cutoff);
+            HANDLE sub = OpenNoLink(path, FILE_LIST_DIRECTORY | (rm ? DELETE : 0), FILE_SHARE_READ | FILE_SHARE_WRITE, true, dirPath);
+            if (sub == INVALID_HANDLE_VALUE && rm) {
+                rm = false;
+                sub = OpenNoLink(path, FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE, true, dirPath);
+            }
+            if (sub == INVALID_HANDLE_VALUE) continue;
+            const std::wstring subPath = FinalPath(sub);
+            if (!subPath.empty()) Walk(sub, subPath, t, cutoff, del, false, s);
+            if (rm) DeleteByHandle(sub, en.attrs);  // only works once it is empty
+            CloseHandle(sub);
             continue;
         }
-        if (!PathMatchSpecW(name.c_str(), t.pattern)) continue;
-        if (t.days && age >= cutoff) continue;
-        const ULONGLONG size = (static_cast<ULONGLONG>(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
+        if (!PathMatchSpecW(en.name.c_str(), t.pattern)) continue;
+        if (t.days && en.age >= cutoff) continue;
         if (!del) {
-            s.bytes += size;
+            s.bytes += en.size;
             ++s.files;
             continue;
         }
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_READONLY)
-            SetFileAttributesW(path.c_str(), fd.dwFileAttributes & ~FILE_ATTRIBUTE_READONLY);
-        if (DeleteFileW(path.c_str())) {
-            s.bytes += size;
+        HANDLE f = OpenNoLink(path, DELETE | FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              false, dirPath);
+        const bool gone = f != INVALID_HANDLE_VALUE && DeleteByHandle(f, en.attrs);
+        if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+        if (gone) {
+            s.bytes += en.size;
             if (++s.files % 64 == 0 && s.tick) (*s.tick)(s.bytes);
         } else {
             ++s.kept;
         }
-    } while (FindNextFileW(f, &fd));
-    FindClose(f);
+    }
 }
 
-WalkStats WalkAll(const std::wstring& key, bool del, const std::function<void(ULONGLONG)>* tick = nullptr) {
+WalkStats WalkAll(const std::wstring& key, bool del, const std::function<void(ULONGLONG)>* tick = nullptr,
+                  Scope scope = Scope::All) {
     WalkStats s;
     s.tick = tick;
     FILETIME now;
     GetSystemTimeAsFileTime(&now);
+    const bool elevated = IsElevated();
     for (const Target& t : Targets(key)) {
-        if (GetFileAttributesW(t.dir.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        if ((scope == Scope::User && t.machine) || (scope == Scope::Machine && !t.machine)) continue;
+        // The place itself: no link or junction, and (with administrator rights) really where it should be.
+        HANDLE root = OpenNoLink(t.dir, FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE, true, L"");
+        if (root == INVALID_HANDLE_VALUE) {
             if (GetLastError() == ERROR_ACCESS_DENIED) s.denied = true;
             continue;
         }
-        const ULONGLONG cutoff = FileTime64(now) - static_cast<ULONGLONG>(t.days) * 24ULL * 3600ULL * 10000000ULL;
-        Walk(t.dir, t, cutoff, del, true, s);
+        std::wstring real = FinalPath(root);
+        if (elevated && !real.empty()) {
+            wchar_t lp[MAX_PATH * 2];
+            const DWORD n = GetLongPathNameW(t.dir.c_str(), lp, static_cast<DWORD>(std::size(lp)));
+            const std::wstring want = L"\\\\?\\" + (n && n < std::size(lp) ? std::wstring(lp, n) : t.dir);
+            if (_wcsicmp(real.c_str(), want.c_str()) != 0) {
+                Log(L"Cleanup: %s leads somewhere else (%s), skipped", t.dir.c_str(), real.c_str());
+                real.clear();
+            }
+        }
+        if (!real.empty()) {
+            const ULONGLONG cutoff = FileTime64(now) - static_cast<ULONGLONG>(t.days) * 24ULL * 3600ULL * 10000000ULL;
+            Walk(root, real, t, cutoff, del, true, s);
+        }
+        CloseHandle(root);
     }
     return s;
 }
 
 // freed: bytes freed by the whole job so far (this place's are added). part(f): f = 0..1 of this place.
-int Clean(const std::wstring& key, Report& rep, ULONGLONG& freed, const std::function<void(double)>& part) {
+// scope: which of its folders (see Scope). already: what the other copy freed here before (its row
+// shows the sum). finish: report how it ended (false: the elevated copy does the rest of it).
+int Clean(const std::wstring& key, Scope scope, Report& rep, ULONGLONG& freed, const std::function<void(double)>& part,
+          ULONGLONG already = 0, bool finish = true) {
     const Sink& sink = rep.Out();
     const bool admin = IsElevated();
     if (key == L"recycle") {
@@ -1031,14 +1182,14 @@ int Clean(const std::wstring& key, Report& rep, ULONGLONG& freed, const std::fun
         s.bytes = before.bytes > after.bytes ? before.bytes - after.bytes : 0;
         s.denied = before.denied && after.denied;
     } else {
-        s = WalkAll(key, true, &tick);
+        s = WalkAll(key, true, &tick, scope);
     }
     freed = base + s.bytes;
-    std::wstring t = L"Freed " + SizeText(s.bytes);
+    std::wstring t = L"Freed " + SizeText(s.bytes + already);
     if (s.kept) t += Fmt(L" (%llu files in use were kept)", s.kept);
     if (s.denied && !admin) t += L" (only what it was allowed to)";
     sink(key, t);
-    rep.End(key, L"ok");
+    if (finish) rep.End(key, L"ok");
     return 0;
 }
 
@@ -1279,6 +1430,76 @@ ULONGLONG FakeSize(const std::wstring& key) {
 }
 
 // Same messages as the real jobs, with pauses instead of work. An app whose id has "Fail" in it fails.
+// A cleanup job. args: the places' keys, plus "scope:user" (the normal copy's share when the job also
+// needs the elevated copy), "freed:<bytes>" (what that share freed: the total goes on from there) and
+// "pre:<key>=<bytes>" (what it freed in a place whose system part is still to do). The places go in a
+// fixed order (the user's own, the mixed ones, the system ones), so both copies number the steps alike
+// and the bar only moves forward. fake: simulated (test copies).
+int CleanJob(const std::vector<std::wstring>& args, Report& rep, bool fake) {
+    const Sink& sink = rep.Out();
+    Scope scope = Scope::All;
+    ULONGLONG freed = 0;
+    std::vector<std::pair<std::wstring, ULONGLONG>> pre;
+    std::vector<std::wstring> keys;
+    for (const auto& a : args) {
+        if (a == L"scope:user") scope = Scope::User;
+        else if (a.rfind(L"freed:", 0) == 0) freed = _wcstoui64(a.c_str() + 6, nullptr, 10);
+        else if (a.rfind(L"pre:", 0) == 0 && a.find(L'=') != std::wstring::npos)
+            pre.emplace_back(a.substr(4, a.find(L'=') - 4), _wcstoui64(a.c_str() + a.find(L'=') + 1, nullptr, 10));
+        else if (Parts(a) && std::find(keys.begin(), keys.end(), a) == keys.end()) keys.push_back(a);
+    }
+    if (g_adminHelper) scope = Scope::Machine;  // never the user's own folders, whatever it was asked
+    auto rank = [](const std::wstring& k) { const int p = Parts(k); return p == kUserPart ? 0 : p == kMachinePart ? 2 : 1; };
+    std::stable_sort(keys.begin(), keys.end(), [&](const std::wstring& a, const std::wstring& b) { return rank(a) < rank(b); });
+    const int want = scope == Scope::User ? kUserPart : scope == Scope::Machine ? kMachinePart : kUserPart | kMachinePart;
+    const int n = static_cast<int>(keys.size());
+    int failed = 0;
+    for (int i = 0; i < n; ++i) {
+        const std::wstring& k = keys[static_cast<size_t>(i)];
+        const int parts = Parts(k);
+        if (!(parts & want)) continue;
+        const bool split = parts == (kUserPart | kMachinePart) && scope != Scope::All;
+        const double lo = split && scope == Scope::Machine ? 0.5 : 0, span = split ? 0.5 : 1;
+        const bool finish = !(split && scope == Scope::User);
+        if (CancelRequested()) {
+            sink(k, L"Not cleaned (stopped)");
+            rep.End(k, L"skip");
+            continue;
+        }
+        ULONGLONG already = 0;
+        for (const auto& [pk, b] : pre)
+            if (pk == k) already = b;
+        rep.Step(i + 1, n, k, L"Cleaning");
+        rep.Pct((i + lo) / n);
+        const auto part = [&](double f) { rep.Pct((i + lo + span * f) / n); };
+        const ULONGLONG before = freed;
+        if (fake) {
+            sink(k, L"Cleaning…");
+            const ULONGLONG size = static_cast<ULONGLONG>(static_cast<double>(FakeSize(k)) * span);
+            for (int t = 1; t <= 8; ++t) {
+                Sleep(180);
+                const double f = t / 8.0;
+                rep.Freed(before + static_cast<ULONGLONG>(static_cast<double>(size) * f));
+                part(f);
+                if (k == L"winsxs") {
+                    sink(k, L"Cleaning… " + PctText(f));
+                    rep.Step(i + 1, n, k, L"Cleaning " + PctText(f), false);
+                }
+            }
+            freed = before + size;
+            sink(k, k == L"winsxs" ? std::wstring(L"Done (test copy: nothing deleted)")
+                                   : L"Freed " + SizeText(size + already) + L" (test copy: nothing deleted)");
+            if (finish) rep.End(k, L"ok");
+        } else {
+            failed += Clean(k, scope, rep, freed, part, already, finish) != 0;
+        }
+        rep.Freed(freed, true);
+        if (!finish) sink(L"part", k + L"=" + std::to_wstring(freed - before));
+    }
+    if (scope != Scope::User) rep.Pct(1);
+    return failed;
+}
+
 int FakeTask(const std::wstring& task, const std::vector<std::wstring>& args, const Sink& sink) {
     Report rep(sink);
     int failed = 0;
@@ -1332,31 +1553,7 @@ int FakeTask(const std::wstring& task, const std::vector<std::wstring>& args, co
             }
         }
     } else if (task == L"clean") {
-        const int n = static_cast<int>(args.size());
-        ULONGLONG freed = 0;
-        for (int i = 0; i < n; ++i) {
-            const std::wstring& k = args[static_cast<size_t>(i)];
-            if (CancelRequested()) {
-                sink(k, L"Not cleaned (stopped)");
-                rep.End(k, L"skip");
-                continue;
-            }
-            rep.Step(i + 1, n, k, L"Cleaning");
-            sink(k, L"Cleaning…");
-            const ULONGLONG size = FakeSize(k), base = freed;
-            ticks(8, 180, [&](double f) {
-                rep.Freed(base + static_cast<ULONGLONG>(static_cast<double>(size) * f));
-                rep.Pct((i + f) / n);
-                if (k == L"winsxs") {
-                    sink(k, L"Cleaning… " + PctText(f));
-                    rep.Step(i + 1, n, k, L"Cleaning " + PctText(f), false);
-                }
-            });
-            freed = base + size;
-            rep.Freed(freed, true);
-            sink(k, k == L"winsxs" ? L"Done (test copy: nothing deleted)" : L"Freed " + SizeText(size) + L" (test copy: nothing deleted)");
-            rep.End(k, L"ok");
-        }
+        failed += CleanJob(args, rep, true);
     } else if (task == L"startup") {
         const int n = static_cast<int>(args.size());
         for (int i = 0; i < n; ++i) {
@@ -1511,7 +1708,7 @@ std::vector<GpuInfo> ScanGpus() {
     return v;
 }
 
-UpdateScan ScanUpdates(const Sink& progress) {
+UpdateScan ScanUpdates(const Sink& progress, bool background) {
     UpdateScan wu, apps;
     progress(L"status", L"Checking Windows Update and apps… (Windows Update can take a few minutes)");
     if (FakeMode()) {
@@ -1535,8 +1732,11 @@ UpdateScan ScanUpdates(const Sink& progress) {
         f.gpus = ScanGpus();
         return f;
     }
-    auto a = std::async(std::launch::async, [&] { ScanApps(apps); });
-    ScanWindowsUpdate(wu);
+    auto a = std::async(std::launch::async, [&] {
+        ScanApps(apps, background);
+        if (background) SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);  // pool threads are reused
+    });
+    ScanWindowsUpdate(wu, !background);
     a.wait();
     UpdateScan out;
     out.wuError = wu.wuError;
@@ -1657,25 +1857,7 @@ int RunTask(const std::wstring& task, const std::vector<std::wstring>& args, con
         }
         if (RebootPending()) sink(L"reboot", L"");
     } else if (task == L"clean") {
-        std::vector<std::wstring> keys;
-        for (const auto& a : args)
-            for (const CleanDef& d : kClean)
-                if (a == d.key) keys.push_back(a);
-        const int n = static_cast<int>(keys.size());
-        ULONGLONG freed = 0;
-        for (int i = 0; i < n; ++i) {
-            const std::wstring& k = keys[static_cast<size_t>(i)];
-            if (CancelRequested()) {
-                sink(k, L"Not cleaned (stopped)");
-                rep.End(k, L"skip");
-                continue;
-            }
-            rep.Step(i + 1, n, k, L"Cleaning");
-            rep.Pct(static_cast<double>(i) / n);
-            failed += Clean(k, rep, freed, [&](double f) { rep.Pct((i + f) / n); }) != 0;
-            rep.Freed(freed, true);
-        }
-        rep.Pct(1);
+        failed += CleanJob(args, rep, false);
     } else if (task == L"startup") {
         const int n = static_cast<int>(args.size());
         for (int i = 0; i < n; ++i) {
@@ -1724,6 +1906,23 @@ int RunTask(const std::wstring& task, const std::vector<std::wstring>& args, con
 
 }  // namespace maint
 
+// --clean-walk-test <folder> (test copies only): deletes everything in the folder the way a cleanup
+// does, so a test can check links and junctions inside are left alone. Logs what it did.
+int Maint_WalkTest(const wchar_t* dir) {
+    using namespace maint;
+    Target t{dir, L"*", 0, true};
+    WalkStats s;
+    HANDLE root = OpenNoLink(dir, FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE, true, L"");
+    if (root == INVALID_HANDLE_VALUE) {
+        Log(L"clean-walk-test: %s refused or missing", dir);
+        return 2;
+    }
+    Walk(root, FinalPath(root), t, 0, true, true, s);
+    CloseHandle(root);
+    Log(L"clean-walk-test: %llu files, %llu bytes deleted, %llu kept", s.files, s.bytes, s.kept);
+    return 0;
+}
+
 // --maint-admin <window> <task> [args…]: the elevated copy. Reports to the Maintenance window.
 int Maint_AdminMain(int argc, wchar_t** argv) {
     if (argc < 4) return 2;
@@ -1731,6 +1930,10 @@ int Maint_AdminMain(int argc, wchar_t** argv) {
     wchar_t cls[64] = L"";
     // Only for a job the Maintenance window asked for.
     if (!IsWindow(w) || !GetClassNameW(w, cls, 64) || wcscmp(cls, maint::kWindowClass)) return 3;
+    // No log file from here: the Maintenance window logs what this copy reports. The elevated copy
+    // writing into the user's own folder could be pointed elsewhere by a link.
+    Log_DisableFile();
+    maint::g_adminHelper = true;
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     CoInitializeSecurity(nullptr, -1, nullptr, nullptr, RPC_C_AUTHN_LEVEL_PKT_PRIVACY, RPC_C_IMP_LEVEL_IMPERSONATE,
                          nullptr, EOAC_DYNAMIC_CLOAKING, nullptr);
