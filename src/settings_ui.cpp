@@ -12,8 +12,15 @@
 #include <shlwapi.h>
 #include <shobjidl.h>
 #include <wrl/client.h>
+#include <objidl.h>  // GDI+ needs IStream, which WIN32_LEAN_AND_MEAN leaves out
 
 #include <algorithm>
+namespace Gdiplus {
+using std::max;
+using std::min;
+}  // namespace Gdiplus
+#include <gdiplus.h>
+#pragma comment(lib, "gdiplus.lib")
 #include <bitset>
 #include <cwctype>
 
@@ -670,14 +677,55 @@ void FillColor(HDC dc, const RECT& r, COLORREF c) {
     FillRect(dc, &r, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
 }
 
+// Smooth (antialiased) shapes through GDI+; plain GDI draws rounded corners jagged.
+Gdiplus::Color GpColor(COLORREF c) { return Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)); }
+
+struct Smooth {
+    Gdiplus::Graphics g;
+    explicit Smooth(HDC dc) : g(dc) {
+        static ULONG_PTR token = 0;
+        if (!token) {
+            Gdiplus::GdiplusStartupInput in;
+            Gdiplus::GdiplusStartup(&token, &in, nullptr);
+        }
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    }
+};
+
+// A rounded rectangle; radius = h/2 or more makes a pill. Outline drawn inside the rect.
+void RoundShape(Gdiplus::Graphics& g, Gdiplus::RectF r, float radius, COLORREF fill, COLORREF line, float lineW) {
+    if (lineW > 0) {
+        const float in = lineW / 2;
+        r.X += in;
+        r.Y += in;
+        r.Width -= lineW;
+        r.Height -= lineW;
+    }
+    radius = std::min({radius, r.Width / 2, r.Height / 2});
+    const float d = radius * 2;
+    Gdiplus::GraphicsPath p;
+    p.AddArc(r.X, r.Y, d, d, 180, 90);
+    p.AddArc(r.X + r.Width - d, r.Y, d, d, 270, 90);
+    p.AddArc(r.X + r.Width - d, r.Y + r.Height - d, d, d, 0, 90);
+    p.AddArc(r.X, r.Y + r.Height - d, d, d, 90, 90);
+    p.CloseFigure();
+    Gdiplus::SolidBrush b(GpColor(fill));
+    g.FillPath(&b, &p);
+    if (lineW > 0) {
+        Gdiplus::Pen pen(GpColor(line), lineW);
+        g.DrawPath(&pen, &p);
+    }
+}
+
+Gdiplus::RectF ToRectF(const RECT& r) {
+    return Gdiplus::RectF(static_cast<float>(r.left), static_cast<float>(r.top), static_cast<float>(r.right - r.left),
+                          static_cast<float>(r.bottom - r.top));
+}
+
 void RoundFill(HDC dc, const RECT& r, int radius, COLORREF fill, COLORREF line) {
-    SetDCBrushColor(dc, fill);
-    SetDCPenColor(dc, line);
-    HGDIOBJ ob = SelectObject(dc, GetStockObject(DC_BRUSH));
-    HGDIOBJ op = SelectObject(dc, GetStockObject(DC_PEN));
-    RoundRect(dc, r.left, r.top, r.right, r.bottom, radius, radius);
-    SelectObject(dc, ob);
-    SelectObject(dc, op);
+    Smooth s(dc);
+    RoundShape(s.g, ToRectF(r), radius / 2.0f, fill, line, line == fill ? 0.0f : 1.0f);
 }
 
 // The small On switch at the right end of a tab in the list.
@@ -688,19 +736,18 @@ RECT SwitchRect(const RECT& item) {
 }
 
 void DrawSwitch(HDC dc, const RECT& pill, bool on) {
-    const int h = pill.bottom - pill.top;
-    if (on) RoundFill(dc, pill, h, kAccent, kAccent);
-    else RoundFill(dc, pill, h, kNavBg, RGB(110, 110, 110));
-    const int k = h - Px(6);
-    const int kx = on ? pill.right - Px(3) - k : pill.left + Px(3);
-    const COLORREF kc = on ? RGB(255, 255, 255) : RGB(90, 90, 90);
-    SetDCBrushColor(dc, kc);
-    SetDCPenColor(dc, kc);
-    HGDIOBJ ob = SelectObject(dc, GetStockObject(DC_BRUSH));
-    HGDIOBJ op = SelectObject(dc, GetStockObject(DC_PEN));
-    Ellipse(dc, kx, pill.top + Px(3), kx + k, pill.top + Px(3) + k);
-    SelectObject(dc, ob);
-    SelectObject(dc, op);
+    Smooth s(dc);
+    const Gdiplus::RectF r = ToRectF(pill);
+    const float h = r.Height;
+    const float line = std::max(1.0f, Px(10) / 10.0f);
+    if (on) RoundShape(s.g, r, h / 2, kAccent, kAccent, 0);
+    else RoundShape(s.g, r, h / 2, kNavBg, RGB(110, 110, 110), line);
+    // Knob like Windows 11: a bit bigger when on.
+    const float k = on ? h - Px(8) : h - Px(9);
+    const float pad = (h - k) / 2;
+    const float kx = on ? r.X + r.Width - pad - k : r.X + pad;
+    Gdiplus::SolidBrush kb(GpColor(on ? RGB(255, 255, 255) : RGB(90, 90, 90)));
+    s.g.FillEllipse(&kb, kx, r.Y + pad, k, k);
 }
 
 void DrawNavItem(const DRAWITEMSTRUCT& d) {
