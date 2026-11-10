@@ -9,6 +9,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 add_executable(Canivete WIN32
     src/main.cpp
     src/settings.cpp
+    src/settings_ui.cpp
     src/capture.cpp
     src/output.cpp
     res/canivete.rc

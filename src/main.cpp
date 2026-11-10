@@ -14,6 +14,7 @@ namespace {
 
 enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_OPEN_FOLDER, ID_SETTINGS, ID_AUTOSTART, ID_EXIT };
 constexpr UINT kCmdAlreadyRunning = 99;
+constexpr UINT kCmdSettings = 98;
 constexpr UINT_PTR kTimerDeferred = 10;
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
@@ -22,6 +23,7 @@ NOTIFYICONDATAW g_nid{};
 HICON g_icon = nullptr;
 CaptureMode g_deferredMode = CaptureMode::Region;
 FILETIME g_iniTime{};
+bool g_hotkeysSuspended = false;
 
 void TrayAdd() {
     g_nid = {};
@@ -46,7 +48,8 @@ void TrayBalloon(const wchar_t* title, const std::wstring& text) {
     Shell_NotifyIconW(NIM_MODIFY, &n);
 }
 
-void RegisterHotkeys() {
+// Registers the three hotkeys. Returns what went wrong, one line per hotkey ("" = all fine).
+std::wstring RegisterHotkeys() {
     struct Entry {
         CaptureMode mode;
         const std::wstring* text;
@@ -57,9 +60,10 @@ void RegisterHotkeys() {
         {CaptureMode::Full, &g_settings.hkFull, L"Full screenshot"},
     };
     std::wstring failed;
+    for (const Entry& e : list) UnregisterHotKey(g_mainWnd, static_cast<int>(e.mode));
+    if (g_hotkeysSuspended) return failed;
     for (const Entry& e : list) {
         const int id = static_cast<int>(e.mode);
-        UnregisterHotKey(g_mainWnd, id);
         Hotkey hk;
         if (!ParseHotkey(*e.text, hk)) {
             if (!e.text->empty() && _wcsicmp(e.text->c_str(), L"none") != 0)
@@ -69,10 +73,43 @@ void RegisterHotkeys() {
         if (!RegisterHotKey(g_mainWnd, id, hk.mods, hk.vk))
             failed += std::wstring(e.name) + L": " + *e.text + L" is used by another app\n";
     }
-    if (!failed.empty()) {
-        Log(L"Hotkey problems: %s", failed.c_str());
-        TrayBalloon(L"Some Canivete hotkeys don't work", failed);
-    }
+    if (!failed.empty()) Log(L"Hotkey problems: %s", failed.c_str());
+    return failed;
+}
+
+void RegisterHotkeysOrWarn() {
+    const std::wstring failed = RegisterHotkeys();
+    if (!failed.empty()) TrayBalloon(L"Some Canivete hotkeys don't work", failed);
+}
+
+FILETIME IniTime() {
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (GetFileAttributesExW(SettingsPath().c_str(), GetFileExInfoStandard, &fa)) return fa.ftLastWriteTime;
+    return {};
+}
+
+void ReloadIfChanged() {
+    const FILETIME t = IniTime();
+    if (CompareFileTime(&t, &g_iniTime) == 0) return;
+    g_iniTime = t;
+    LoadSettings();
+    RegisterHotkeysOrWarn();
+    Log(L"Settings reloaded");
+}
+
+}  // namespace
+
+std::wstring Settings_Applied() {
+    LoadSettings();
+    g_iniTime = IniTime();  // so the file watcher doesn't reload it a second time
+    Log(L"Settings saved");
+    return RegisterHotkeys();
+}
+
+void Hotkeys_Suspend(bool suspend) {
+    if (g_hotkeysSuspended == suspend) return;
+    g_hotkeysSuspended = suspend;
+    RegisterHotkeys();
 }
 
 bool AutostartEnabled() {
@@ -95,26 +132,13 @@ void SetAutostart(bool on) {
     RegCloseKey(k);
 }
 
-FILETIME IniTime() {
-    WIN32_FILE_ATTRIBUTE_DATA fa;
-    if (GetFileAttributesExW(SettingsPath().c_str(), GetFileExInfoStandard, &fa)) return fa.ftLastWriteTime;
-    return {};
-}
-
-void ReloadIfChanged() {
-    const FILETIME t = IniTime();
-    if (CompareFileTime(&t, &g_iniTime) == 0) return;
-    g_iniTime = t;
-    LoadSettings();
-    RegisterHotkeys();
-    Log(L"Settings reloaded");
-}
+namespace {
 
 void ShowMenu() {
     HMENU m = CreatePopupMenu();
     auto item = [&](UINT id, const wchar_t* text, const std::wstring& hk) {
         std::wstring s = text;
-        if (!hk.empty()) s += L"\t" + hk;
+        if (!hk.empty() && _wcsicmp(hk.c_str(), L"none") != 0) s += L"\t" + hk;
         AppendMenuW(m, MF_STRING, id, s.c_str());
     };
     item(ID_REGION, L"Region screenshot", g_settings.hkRegion);
@@ -156,6 +180,8 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_APP_COMMAND:
         if (wp >= 1 && wp <= 3) Capture_Start(static_cast<CaptureMode>(wp));
+        else if (wp == kCmdSettings)
+            SettingsUI_Show();
         else if (wp == kCmdAlreadyRunning)
             TrayBalloon(L"Canivete is already running", L"Right-click the red knife icon in the tray.");
         return 0;
@@ -175,8 +201,7 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         }
         case ID_SETTINGS:
-            ShellExecuteW(nullptr, L"open", L"notepad.exe", (L"\"" + SettingsPath() + L"\"").c_str(), nullptr,
-                          SW_SHOWNORMAL);
+            SettingsUI_Show();
             break;
         case ID_AUTOSTART:
             SetAutostart(!AutostartEnabled());
@@ -193,6 +218,7 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_DESTROY:
+        if (HWND w = SettingsUI_Window()) DestroyWindow(w);
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         for (int id = 1; id <= 3; ++id) UnregisterHotKey(h, id);
         PostQuitMessage(0);
@@ -208,11 +234,14 @@ int RunGrabTest(const wchar_t* outPath) {
     const ULONGLONG t0 = GetTickCount64();
     if (!GrabScreen(VirtualScreenRect(), img, false)) return 2;
     const ULONGLONG t1 = GetTickCount64();
-    const std::vector<BYTE> png = EncodePng(img);
+    const size_t n = wcslen(outPath);
+    const bool jpg = n > 4 && (!_wcsicmp(outPath + n - 4, L".jpg") || !_wcsicmp(outPath + n - 5, L".jpeg"));
+    const std::vector<BYTE> data = jpg ? EncodeJpeg(img, 90) : EncodePng(img);
     const ULONGLONG t2 = GetTickCount64();
     DeleteFileW(outPath);
-    if (png.empty() || !WriteFileBytes(outPath, png)) return 3;
-    Log(L"--grab test: %dx%d grab %llu ms, png %llu ms, %zu KB", img.w, img.h, t1 - t0, t2 - t1, png.size() / 1024);
+    if (data.empty() || !WriteFileBytes(outPath, data)) return 3;
+    Log(L"--grab test: %dx%d grab %llu ms, %s %llu ms, %zu KB", img.w, img.h, t1 - t0, jpg ? L"jpg" : L"png", t2 - t1,
+        data.size() / 1024);
     return 0;
 }
 
@@ -228,6 +257,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
         if (!_wcsicmp(argv[1], L"--region")) cmd = static_cast<UINT>(CaptureMode::Region);
         else if (!_wcsicmp(argv[1], L"--window")) cmd = static_cast<UINT>(CaptureMode::Window);
         else if (!_wcsicmp(argv[1], L"--full")) cmd = static_cast<UINT>(CaptureMode::Full);
+        else if (!_wcsicmp(argv[1], L"--settings")) cmd = kCmdSettings;
     }
     LocalFree(argv);
 
@@ -244,6 +274,8 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     }
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_STANDARD_CLASSES | ICC_UPDOWN_CLASS};
+    InitCommonControlsEx(&icc);
     LoadSettings();
     g_iniTime = IniTime();
 
@@ -261,7 +293,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     TrayAdd();
     Capture_Init();
     Output_Init();
-    RegisterHotkeys();
+    RegisterHotkeysOrWarn();
     Log(L"Canivete %s started", CANIVETE_VERSION);
     if (cmd) PostMessageW(g_mainWnd, WM_APP_COMMAND, cmd, 0);
 
@@ -283,6 +315,8 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
                 running = false;
                 break;
             }
+            HWND dlg = SettingsUI_Window();
+            if (dlg && IsDialogMessageW(dlg, &msg)) continue;  // Tab, Enter, Esc in the Settings window
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }

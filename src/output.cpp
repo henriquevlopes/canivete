@@ -1,4 +1,4 @@
-// What happens after a capture: PNG encode (WIC) + save on a worker thread, then clipboard and a
+// What happens after a capture: PNG/JPG encode (WIC) + save on a worker thread, then clipboard and a
 // small "saved" notification with a thumbnail on the main thread.
 #include "app.h"
 
@@ -19,8 +19,8 @@ namespace {
 
 struct Job {
     std::unique_ptr<CaptureResult> r;
-    std::vector<BYTE> png;
-    std::wstring path;  // empty if not saved
+    std::vector<BYTE> png;  // for the clipboard (empty when not copying)
+    std::wstring path;      // empty if not saved
 };
 
 // ---- file names ----------------------------------------------------------------------------
@@ -85,11 +85,71 @@ std::wstring ExpandPattern(const std::wstring& pat, const CaptureResult& r, cons
     return clean.empty() ? L"Screenshot" : clean;
 }
 
-std::wstring UniquePngPath(const std::wstring& base) {
-    std::wstring p = base + L".png";
+std::wstring UniquePath(const std::wstring& base, const std::wstring& ext) {
+    std::wstring p = base + ext;
     for (int i = 2; GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES && i < 1000; ++i)
-        p = base + L" (" + std::to_wstring(i) + L").png";
+        p = base + L" (" + std::to_wstring(i) + L")" + ext;
     return p;
+}
+
+// One WIC encoder for both formats. quality < 0 = PNG, otherwise JPG quality 1..100.
+std::vector<BYTE> Encode(const Image& img, int quality) {
+    const bool jpg = quality >= 0;
+    std::vector<BYTE> out;
+    ComPtr<IWICImagingFactory> f;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&f)))) return out;
+    ComPtr<IStream> st;
+    st.Attach(SHCreateMemStream(nullptr, 0));
+    ComPtr<IWICBitmapEncoder> enc;
+    ComPtr<IWICBitmapFrameEncode> frame;
+    ComPtr<IPropertyBag2> props;
+    HRESULT hr =
+        st ? f->CreateEncoder(jpg ? GUID_ContainerFormatJpeg : GUID_ContainerFormatPng, nullptr, &enc) : E_OUTOFMEMORY;
+    if (SUCCEEDED(hr)) hr = enc->Initialize(st.Get(), WICBitmapEncoderNoCache);
+    if (SUCCEEDED(hr)) hr = enc->CreateNewFrame(&frame, &props);
+    if (SUCCEEDED(hr) && jpg) {
+        PROPBAG2 opt{};
+        opt.pstrName = const_cast<LPOLESTR>(L"ImageQuality");
+        VARIANT v;
+        VariantInit(&v);
+        v.vt = VT_R4;
+        v.fltVal = std::clamp(quality, 1, 100) / 100.0f;
+        props->Write(1, &opt, &v);
+    }
+    if (SUCCEEDED(hr)) hr = frame->Initialize(props.Get());
+    if (SUCCEEDED(hr)) hr = frame->SetSize(img.w, img.h);
+    WICPixelFormatGUID fmt = GUID_WICPixelFormat24bppBGR;
+    if (SUCCEEDED(hr)) hr = frame->SetPixelFormat(&fmt);
+    if (SUCCEEDED(hr) && fmt != GUID_WICPixelFormat24bppBGR) hr = E_FAIL;
+    if (SUCCEEDED(hr)) {
+        const UINT stride = (img.w * 3 + 3) & ~3u;
+        std::vector<BYTE> rows(static_cast<size_t>(stride) * img.h);
+        for (int y = 0; y < img.h; ++y) {
+            const uint32_t* s = &img.px[static_cast<size_t>(y) * img.w];
+            BYTE* d = &rows[static_cast<size_t>(y) * stride];
+            for (int x = 0; x < img.w; ++x) {
+                d[x * 3 + 0] = static_cast<BYTE>(s[x]);
+                d[x * 3 + 1] = static_cast<BYTE>(s[x] >> 8);
+                d[x * 3 + 2] = static_cast<BYTE>(s[x] >> 16);
+            }
+        }
+        hr = frame->WritePixels(img.h, stride, static_cast<UINT>(rows.size()), rows.data());
+    }
+    if (SUCCEEDED(hr)) hr = frame->Commit();
+    if (SUCCEEDED(hr)) hr = enc->Commit();
+    if (SUCCEEDED(hr)) {
+        STATSTG stat{};
+        st->Stat(&stat, STATFLAG_NONAME);
+        out.resize(static_cast<size_t>(stat.cbSize.QuadPart));
+        LARGE_INTEGER zero{};
+        st->Seek(zero, STREAM_SEEK_SET, nullptr);
+        ULONG read = 0;
+        st->Read(out.data(), static_cast<ULONG>(out.size()), &read);
+        out.resize(read);
+    } else {
+        Log(L"%s encode failed 0x%08X", jpg ? L"JPG" : L"PNG", hr);
+    }
+    return out;
 }
 
 // ---- clipboard -----------------------------------------------------------------------------
@@ -282,53 +342,21 @@ void ToastShow(const CaptureResult& r, const std::wstring& path, bool copied) {
 
 // ---- public --------------------------------------------------------------------------------
 
-std::vector<BYTE> EncodePng(const Image& img) {
-    std::vector<BYTE> out;
-    ComPtr<IWICImagingFactory> f;
-    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&f)))) return out;
-    ComPtr<IStream> st;
-    st.Attach(SHCreateMemStream(nullptr, 0));
-    ComPtr<IWICBitmapEncoder> enc;
-    ComPtr<IWICBitmapFrameEncode> frame;
-    ComPtr<IPropertyBag2> props;
-    HRESULT hr = st ? f->CreateEncoder(GUID_ContainerFormatPng, nullptr, &enc) : E_OUTOFMEMORY;
-    if (SUCCEEDED(hr)) hr = enc->Initialize(st.Get(), WICBitmapEncoderNoCache);
-    if (SUCCEEDED(hr)) hr = enc->CreateNewFrame(&frame, &props);
-    if (SUCCEEDED(hr)) hr = frame->Initialize(props.Get());
-    if (SUCCEEDED(hr)) hr = frame->SetSize(img.w, img.h);
-    WICPixelFormatGUID fmt = GUID_WICPixelFormat24bppBGR;
-    if (SUCCEEDED(hr)) hr = frame->SetPixelFormat(&fmt);
-    if (SUCCEEDED(hr) && fmt != GUID_WICPixelFormat24bppBGR) hr = E_FAIL;
-    if (SUCCEEDED(hr)) {
-        const UINT stride = (img.w * 3 + 3) & ~3u;
-        std::vector<BYTE> rows(static_cast<size_t>(stride) * img.h);
-        for (int y = 0; y < img.h; ++y) {
-            const uint32_t* s = &img.px[static_cast<size_t>(y) * img.w];
-            BYTE* d = &rows[static_cast<size_t>(y) * stride];
-            for (int x = 0; x < img.w; ++x) {
-                d[x * 3 + 0] = static_cast<BYTE>(s[x]);
-                d[x * 3 + 1] = static_cast<BYTE>(s[x] >> 8);
-                d[x * 3 + 2] = static_cast<BYTE>(s[x] >> 16);
-            }
-        }
-        hr = frame->WritePixels(img.h, stride, static_cast<UINT>(rows.size()), rows.data());
-    }
-    if (SUCCEEDED(hr)) hr = frame->Commit();
-    if (SUCCEEDED(hr)) hr = enc->Commit();
-    if (SUCCEEDED(hr)) {
-        STATSTG stat{};
-        st->Stat(&stat, STATFLAG_NONAME);
-        out.resize(static_cast<size_t>(stat.cbSize.QuadPart));
-        LARGE_INTEGER zero{};
-        st->Seek(zero, STREAM_SEEK_SET, nullptr);
-        ULONG read = 0;
-        st->Read(out.data(), static_cast<ULONG>(out.size()), &read);
-        out.resize(read);
-    } else {
-        Log(L"PNG encode failed 0x%08X", hr);
-    }
-    return out;
+std::vector<BYTE> EncodePng(const Image& img) { return Encode(img, -1); }
+
+std::vector<BYTE> EncodeJpeg(const Image& img, int quality) { return Encode(img, quality); }
+
+std::wstring PreviewFileName(const std::wstring& pattern) {
+    CaptureResult r;
+    r.img.w = 1920;
+    r.img.h = 1080;
+    r.processName = L"firefox";
+    r.windowTitle = L"Canivete - GitHub";
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    return ExpandPattern(pattern, r, t);
 }
+
 
 std::wstring ScreenshotsDir() {
     if (!g_settings.folder.empty()) {
@@ -377,18 +405,22 @@ void Output_Process(std::unique_ptr<CaptureResult> r) {
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         auto job = std::make_unique<Job>();
         const ULONGLONG t0 = GetTickCount64();
-        job->png = EncodePng(r->img);
-        if (s.saveToFile && !job->png.empty()) {
+        const bool jpg = s.format == L"jpg";
+        if (s.copyToClipboard || (s.saveToFile && !jpg)) job->png = EncodePng(r->img);
+        if (s.saveToFile) {
+            const std::vector<BYTE> jpgData = jpg ? EncodeJpeg(r->img, s.jpegQuality) : std::vector<BYTE>();
+            const std::vector<BYTE>& data = jpg ? jpgData : job->png;
             const std::wstring dir = ScreenshotsDir();
             const std::wstring base = dir + L"\\" + ExpandPattern(s.fileName, *r, t);
             const std::wstring folder = base.substr(0, base.find_last_of(L'\\'));
             SHCreateDirectoryExW(nullptr, folder.c_str(), nullptr);
-            const std::wstring path = UniquePngPath(base);
-            if (WriteFileBytes(path, job->png)) job->path = path;
+            const std::wstring path = UniquePath(base, jpg ? L".jpg" : L".png");
+            if (data.empty()) Log(L"Nothing to save, encode failed");
+            else if (WriteFileBytes(path, data)) job->path = path;
             else Log(L"Could not write %s (error %lu)", path.c_str(), GetLastError());
         }
-        Log(L"Encoded %dx%d in %llu ms, %zu KB -> %s", r->img.w, r->img.h, GetTickCount64() - t0,
-            job->png.size() / 1024, job->path.empty() ? L"(not saved)" : job->path.c_str());
+        Log(L"Encoded %dx%d in %llu ms -> %s", r->img.w, r->img.h, GetTickCount64() - t0,
+            job->path.empty() ? L"(not saved)" : job->path.c_str());
         job->r = std::move(r);
         if (!PostMessageW(g_mainWnd, WM_APP_CAPTURE_DONE, 0, reinterpret_cast<LPARAM>(job.get()))) {
             CoUninitialize();

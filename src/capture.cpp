@@ -207,9 +207,11 @@ RECT ComputeLayout() {
     RECT d = L.sel;
     InflateRect(&d, 4, 4);
     UnionRect(&d, &d, &L.label);
-    RECT m = L.mag;
-    InflateRect(&m, 3, 3);
-    UnionRect(&d, &d, &m);
+    if (g_settings.showMagnifier) {
+        RECT m = L.mag;
+        InflateRect(&m, 3, 3);
+        UnionRect(&d, &d, &m);
+    }
     return d;
 }
 
@@ -270,7 +272,7 @@ void Paint(HDC hdc, const RECT& rc) {
         RECT lr = L.label;
         DrawTextW(b, L.labelText.c_str(), -1, &lr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
-    DrawMagnifier(b);
+    if (g_settings.showMagnifier) DrawMagnifier(b);
     BitBlt(hdc, x, y, w, h, b, x, y, SRCCOPY);
 }
 

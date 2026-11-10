@@ -56,6 +56,35 @@ std::wstring Lower(std::wstring s) {
     return s;
 }
 
+// Named keys, both ways (text <-> virtual key). Letters, digits and F1-F24 are handled in code.
+struct KeyName {
+    UINT vk;
+    const wchar_t* name;
+};
+const KeyName kKeys[] = {
+    {VK_SNAPSHOT, L"PrintScreen"}, {VK_SPACE, L"Space"},   {VK_PAUSE, L"Pause"},
+    {VK_INSERT, L"Insert"},        {VK_DELETE, L"Delete"}, {VK_HOME, L"Home"},
+    {VK_END, L"End"},              {VK_PRIOR, L"PageUp"},  {VK_NEXT, L"PageDown"},
+    {VK_SCROLL, L"ScrollLock"},    {VK_LEFT, L"Left"},     {VK_RIGHT, L"Right"},
+    {VK_UP, L"Up"},                {VK_DOWN, L"Down"},     {VK_RETURN, L"Enter"},
+    {VK_NUMPAD0, L"Num0"},         {VK_NUMPAD1, L"Num1"},  {VK_NUMPAD2, L"Num2"},
+    {VK_NUMPAD3, L"Num3"},         {VK_NUMPAD4, L"Num4"},  {VK_NUMPAD5, L"Num5"},
+    {VK_NUMPAD6, L"Num6"},         {VK_NUMPAD7, L"Num7"},  {VK_NUMPAD8, L"Num8"},
+    {VK_NUMPAD9, L"Num9"},
+};
+
+const KeyName* FindKey(const std::wstring& lowerName) {
+    for (const KeyName& k : kKeys)
+        if (Lower(k.name) == lowerName) return &k;
+    return nullptr;
+}
+
+void WriteStr(const wchar_t* sec, const wchar_t* key, const std::wstring& v) {
+    WritePrivateProfileStringW(sec, key, v.c_str(), SettingsPath().c_str());
+}
+
+void WriteBool(const wchar_t* sec, const wchar_t* key, bool v) { WriteStr(sec, key, v ? L"1" : L"0"); }
+
 }  // namespace
 
 std::wstring AppDataDir() {
@@ -100,7 +129,44 @@ void LoadSettings() {
     s.includeCursor = ReadBool(L"Screenshot", L"IncludeCursor", false);
     s.fullScreen = Lower(Trim(ReadStr(L"Screenshot", L"FullScreen", L"all")));
     s.showNotification = ReadBool(L"Screenshot", L"ShowNotification", true);
+    s.showMagnifier = ReadBool(L"Screenshot", L"ShowMagnifier", true);
+    s.format = Lower(Trim(ReadStr(L"Screenshot", L"Format", L"png")));
+    if (s.format == L"jpeg") s.format = L"jpg";
+    if (s.format != L"jpg") s.format = L"png";
+    s.jpegQuality = GetPrivateProfileIntW(L"Screenshot", L"JpegQuality", 90, path.c_str());
+    s.jpegQuality = s.jpegQuality < 1 ? 1 : s.jpegQuality > 100 ? 100 : s.jpegQuality;
     g_settings = s;
+}
+
+void SaveSettings(const Settings& s) {
+    LoadSettings();  // makes sure the file exists (with its comments) before writing keys into it
+    WriteStr(L"Hotkeys", L"RegionScreenshot", s.hkRegion);
+    WriteStr(L"Hotkeys", L"WindowScreenshot", s.hkWindow);
+    WriteStr(L"Hotkeys", L"FullScreenshot", s.hkFull);
+    WriteStr(L"Screenshot", L"Folder", s.folder);
+    WriteStr(L"Screenshot", L"FileName", s.fileName);
+    WriteStr(L"Screenshot", L"Format", s.format);
+    WriteStr(L"Screenshot", L"JpegQuality", std::to_wstring(s.jpegQuality));
+    WriteBool(L"Screenshot", L"SaveToFile", s.saveToFile);
+    WriteBool(L"Screenshot", L"CopyToClipboard", s.copyToClipboard);
+    WriteBool(L"Screenshot", L"IncludeCursor", s.includeCursor);
+    WriteStr(L"Screenshot", L"FullScreen", s.fullScreen);
+    WriteBool(L"Screenshot", L"ShowNotification", s.showNotification);
+    WriteBool(L"Screenshot", L"ShowMagnifier", s.showMagnifier);
+}
+
+std::wstring HotkeyText(const Hotkey& hk) {
+    if (!hk.vk) return L"";
+    std::wstring t;
+    if (hk.mods & MOD_CONTROL) t += L"Ctrl+";
+    if (hk.mods & MOD_ALT) t += L"Alt+";
+    if (hk.mods & MOD_SHIFT) t += L"Shift+";
+    if (hk.mods & MOD_WIN) t += L"Win+";
+    for (const KeyName& k : kKeys)
+        if (k.vk == hk.vk) return t + k.name;
+    if (hk.vk >= VK_F1 && hk.vk <= VK_F24) return t + L"F" + std::to_wstring(hk.vk - VK_F1 + 1);
+    if ((hk.vk >= L'A' && hk.vk <= L'Z') || (hk.vk >= L'0' && hk.vk <= L'9')) return t + static_cast<wchar_t>(hk.vk);
+    return L"";  // a key we have no name for
 }
 
 bool ParseHotkey(const std::wstring& text, Hotkey& out) {
@@ -117,16 +183,8 @@ bool ParseHotkey(const std::wstring& text, Hotkey& out) {
         else if (part == L"alt") out.mods |= MOD_ALT;
         else if (part == L"shift") out.mods |= MOD_SHIFT;
         else if (part == L"win" || part == L"windows") out.mods |= MOD_WIN;
-        else if (part == L"printscreen" || part == L"prtsc" || part == L"print") out.vk = VK_SNAPSHOT;
-        else if (part == L"space") out.vk = VK_SPACE;
-        else if (part == L"pause") out.vk = VK_PAUSE;
-        else if (part == L"insert") out.vk = VK_INSERT;
-        else if (part == L"delete") out.vk = VK_DELETE;
-        else if (part == L"home") out.vk = VK_HOME;
-        else if (part == L"end") out.vk = VK_END;
-        else if (part == L"pageup") out.vk = VK_PRIOR;
-        else if (part == L"pagedown") out.vk = VK_NEXT;
-        else if (part == L"scrolllock") out.vk = VK_SCROLL;
+        else if (part == L"prtsc" || part == L"print") out.vk = VK_SNAPSHOT;
+        else if (const KeyName* k = FindKey(part)) out.vk = k->vk;
         else if (part.size() >= 2 && part[0] == L'f' && iswdigit(part[1])) {
             int n = _wtoi(part.c_str() + 1);
             if (n < 1 || n > 24) return false;

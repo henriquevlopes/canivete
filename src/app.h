@@ -27,10 +27,13 @@ struct Settings {
     std::wstring folder;    // empty = Windows "Screenshots" folder
     std::wstring fileName;  // pattern with %tokens
     std::wstring fullScreen;  // "all" or "monitor"
+    std::wstring format;      // "png" or "jpg"
+    int jpegQuality = 90;     // 1..100
     bool saveToFile = true;
     bool copyToClipboard = true;
     bool includeCursor = false;
     bool showNotification = true;
+    bool showMagnifier = true;
 };
 
 extern Settings g_settings;
@@ -40,8 +43,20 @@ extern HWND g_mainWnd;
 std::wstring AppDataDir();
 std::wstring SettingsPath();
 void LoadSettings();
+void SaveSettings(const Settings& s);
 bool ParseHotkey(const std::wstring& text, Hotkey& out);
+std::wstring HotkeyText(const Hotkey& hk);  // "Ctrl+Shift+PrintScreen", "" when none
 void Log(const wchar_t* fmt, ...);
+
+// ---- main.cpp ------------------------------------------------------------------------------
+std::wstring Settings_Applied();     // reload after a save; returns hotkey problems ("" = all fine)
+void Hotkeys_Suspend(bool suspend);  // while a hotkey box in Settings has focus
+bool AutostartEnabled();
+void SetAutostart(bool on);
+
+// ---- settings_ui.cpp -----------------------------------------------------------------------
+void SettingsUI_Show();
+HWND SettingsUI_Window();  // for IsDialogMessage, nullptr when closed
 
 // ---- 32-bit top-down DIB section with its own memory DC --------------------------------------
 struct Dib {
@@ -113,5 +128,7 @@ void Output_Init();
 void Output_Process(std::unique_ptr<CaptureResult> r);  // async: encode, save, clipboard, toast
 void Output_OnDone(LPARAM job);                          // main thread part
 std::vector<BYTE> EncodePng(const Image& img);
+std::vector<BYTE> EncodeJpeg(const Image& img, int quality);
+std::wstring PreviewFileName(const std::wstring& pattern);  // example name for the Settings window
 std::wstring ScreenshotsDir();
 bool WriteFileBytes(const std::wstring& path, const std::vector<BYTE>& data);
