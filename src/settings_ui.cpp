@@ -51,6 +51,7 @@ enum : int {
     IDC_NOTIFY,
     IDC_CURSOR,
     IDC_MAGNIFIER,
+    IDC_EDITOR,
     IDC_AUTOSTART,
     IDC_COLORFMT,
     IDC_APPLY,
@@ -183,7 +184,9 @@ void Build() {
     y += 34;
     Check(IDC_CLIP, L"Copy to the clipboard", y);
     y += 26;
-    Check(IDC_NOTIFY, L"Show a preview after each capture", y);
+    Check(IDC_NOTIFY, L"Show a preview after each capture (click it to draw on the screenshot)", y);
+    y += 26;
+    Check(IDC_EDITOR, L"Open the editor right after each capture", y);
     y += 26;
     Check(IDC_CURSOR, L"Include the mouse pointer", y);
     y += 26;
@@ -192,7 +195,7 @@ void Build() {
 
     Heading(L"Color picker", y);
     y += 28;
-    Label(L"Copy as", y);
+    Label(L"Default format", y);
     HWND cf = Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, IDC_COLORFMT, kCX, y, 260, 240);
     for (const ColorFormatDef& f : kColorFormats) SendMessageW(cf, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(f.label));
     y += 38;
@@ -455,6 +458,7 @@ void Populate() {
     SetCheck(IDC_NOTIFY, s.showNotification);
     SetCheck(IDC_CURSOR, s.includeCursor);
     SetCheck(IDC_MAGNIFIER, s.showMagnifier);
+    SetCheck(IDC_EDITOR, s.openEditor);
     SetCheck(IDC_AUTOSTART, AutostartEnabled());
     CheckHotkeys();
     UpdateEnable();
@@ -478,6 +482,7 @@ void Apply() {
     s.showNotification = Checked(IDC_NOTIFY);
     s.includeCursor = Checked(IDC_CURSOR);
     s.showMagnifier = Checked(IDC_MAGNIFIER);
+    s.openEditor = Checked(IDC_EDITOR);
     const LRESULT cf = SendMessageW(Item(IDC_COLORFMT), CB_GETCURSEL, 0, 0);
     if (cf >= 0 && cf < static_cast<LRESULT>(std::size(kColorFormats))) s.colorFormat = kColorFormats[cf].key;
     SaveSettings(s);

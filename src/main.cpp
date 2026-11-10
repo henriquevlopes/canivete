@@ -355,6 +355,26 @@ int RunGrabTest(const wchar_t* outPath) {
     return 0;
 }
 
+// Opens an image file in the editor, in this process, and exits when the editor closes.
+int RunEditor(const wchar_t* file) {
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    LoadSettings();
+    Output_Init();
+    auto r = std::make_shared<CaptureResult>();
+    if (!LoadImageFile(file, r->img)) return 2;
+    POINT p;
+    GetCursorPos(&p);
+    r->screenRect = {p.x, p.y, p.x + 1, p.y + 1};
+    Editor_Open(r, file);
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    CoUninitialize();
+    return 0;
+}
+
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
@@ -364,6 +384,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     UINT cmd = 0;
     if (argc >= 2) {
         if (!_wcsicmp(argv[1], L"--grab") && argc >= 3) return RunGrabTest(argv[2]);
+        if (!_wcsicmp(argv[1], L"--edit") && argc >= 3) return RunEditor(argv[2]);
         if (!_wcsicmp(argv[1], L"--region")) cmd = static_cast<UINT>(CaptureMode::Region);
         else if (!_wcsicmp(argv[1], L"--window")) cmd = static_cast<UINT>(CaptureMode::Window);
         else if (!_wcsicmp(argv[1], L"--full")) cmd = static_cast<UINT>(CaptureMode::Full);

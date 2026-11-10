@@ -211,6 +211,7 @@ struct Toast {
     Dib thumb;
     RECT thumbRect{};
     std::wstring path, line1, line2;
+    std::shared_ptr<CaptureResult> last;  // the capture shown, so a click can open it in the editor
     double scale = 1;
     int alpha = 0;
 } T;
@@ -220,6 +221,7 @@ void ToastHide() {
     KillTimer(T.hwnd, kTimerFade);
     ShowWindow(T.hwnd, SW_HIDE);
     T.thumb.Free();
+    T.last.reset();
 }
 
 void ToastPaint(HDC dc) {
@@ -268,10 +270,13 @@ LRESULT CALLBACK ToastProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         SetLayeredWindowAttributes(h, 0, static_cast<BYTE>(T.alpha), LWA_ALPHA);
         SetTimer(h, kTimerHold, 2500, nullptr);
         return 0;
-    case WM_LBUTTONUP:
-        if (!T.path.empty()) ShellExecuteW(nullptr, L"open", T.path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    case WM_LBUTTONUP: {  // click = edit the screenshot
+        std::shared_ptr<CaptureResult> last = T.last;
+        const std::wstring path = T.path;
         ToastHide();
+        if (last) Editor_Open(std::move(last), path);
         return 0;
+    }
     case WM_RBUTTONUP:
         if (!T.path.empty()) {
             std::wstring args = L"/select,\"" + T.path + L"\"";
@@ -350,6 +355,7 @@ void Output_ShowColor(COLORREF c, POINT at, const std::wstring& line1, const std
                     (static_cast<uint32_t>(GetRValue(c)) << 16) | (GetGValue(c) << 8) | GetBValue(c));
     r.screenRect = {at.x, at.y, at.x + 1, at.y + 1};
     ToastShow(r, L"", false);
+    T.last.reset();
     T.line1 = line1;
     T.line2 = line2;
     InvalidateRect(T.hwnd, nullptr, FALSE);
@@ -447,5 +453,69 @@ void Output_Process(std::unique_ptr<CaptureResult> r) {
 void Output_OnDone(LPARAM lp) {
     std::unique_ptr<Job> job(reinterpret_cast<Job*>(lp));
     if (g_settings.copyToClipboard) SetClipboardImage(job->r->img, job->png);
-    if (g_settings.showNotification) ToastShow(*job->r, job->path, g_settings.copyToClipboard);
+    std::shared_ptr<CaptureResult> r(std::move(job->r));
+    if (g_settings.openEditor) {
+        Editor_Open(std::move(r), job->path);
+        return;
+    }
+    if (g_settings.showNotification) {
+        ToastShow(*r, job->path, g_settings.copyToClipboard);
+        T.last = std::move(r);
+    }
+}
+
+bool LoadImageFile(const std::wstring& path, Image& out) {
+    ComPtr<IWICImagingFactory> f;
+    ComPtr<IWICBitmapDecoder> dec;
+    ComPtr<IWICBitmapFrameDecode> frame;
+    ComPtr<IWICFormatConverter> conv;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&f))) ||
+        FAILED(f->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &dec)) ||
+        FAILED(dec->GetFrame(0, &frame)) || FAILED(f->CreateFormatConverter(&conv)) ||
+        FAILED(conv->Initialize(frame.Get(), GUID_WICPixelFormat32bppBGR, WICBitmapDitherTypeNone, nullptr, 0,
+                                WICBitmapPaletteTypeCustom)))
+        return false;
+    UINT w = 0, h = 0;
+    conv->GetSize(&w, &h);
+    out.w = static_cast<int>(w);
+    out.h = static_cast<int>(h);
+    out.px.resize(static_cast<size_t>(w) * h);
+    return SUCCEEDED(conv->CopyPixels(nullptr, w * 4, static_cast<UINT>(out.px.size() * 4),
+                                      reinterpret_cast<BYTE*>(out.px.data())));
+}
+
+void Output_CopyImage(const Image& img) { SetClipboardImage(img, EncodePng(img)); }
+
+std::wstring Output_SaveImage(const Image& img, const CaptureResult& meta, const std::wstring& path) {
+    std::wstring target = path;
+    if (target.empty()) {
+        SYSTEMTIME t;
+        GetLocalTime(&t);
+        const std::wstring base = ScreenshotsDir() + L"\\" + ExpandPattern(g_settings.fileName, meta, t);
+        SHCreateDirectoryExW(nullptr, base.substr(0, base.find_last_of(L'\\')).c_str(), nullptr);
+        target = UniquePath(base, g_settings.format == L"jpg" ? L".jpg" : L".png");
+    }
+    const wchar_t* ext = PathFindExtensionW(target.c_str());
+    const bool jpg = !_wcsicmp(ext, L".jpg") || !_wcsicmp(ext, L".jpeg");
+    const std::vector<BYTE> data = jpg ? EncodeJpeg(img, g_settings.jpegQuality) : EncodePng(img);
+    if (data.empty()) return L"";
+    // Write next to it first, then swap, so a failed write never destroys the original.
+    const std::wstring tmp = target + L".tmp";
+    DeleteFileW(tmp.c_str());
+    if (!WriteFileBytes(tmp, data) || !MoveFileExW(tmp.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        Log(L"Could not save the edited image to %s (error %lu)", target.c_str(), GetLastError());
+        DeleteFileW(tmp.c_str());
+        return L"";
+    }
+    Log(L"Edited image saved -> %s", target.c_str());
+    return target;
+}
+
+void Output_EditDone(std::shared_ptr<CaptureResult> r, const std::wstring& path) {
+    SetClipboardImage(r->img, EncodePng(r->img));
+    std::wstring saved;
+    if (!path.empty() || g_settings.saveToFile) saved = Output_SaveImage(r->img, *r, path);
+    ToastShow(*r, saved, true);
+    T.line1 = saved.empty() ? L"Edited image copied" : L"Edited image copied and saved";
+    T.last = std::move(r);
 }

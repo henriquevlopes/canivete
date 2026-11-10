@@ -36,6 +36,7 @@ struct Settings {
     bool includeCursor = false;
     bool showNotification = true;
     bool showMagnifier = true;
+    bool openEditor = false;  // open the editor after each capture instead of the preview
 };
 
 extern Settings g_settings;
@@ -149,6 +150,15 @@ void Output_Init();
 void Output_Process(std::unique_ptr<CaptureResult> r);  // async: encode, save, clipboard, toast
 void Output_OnDone(LPARAM job);                          // main thread part
 void Output_ShowColor(COLORREF c, POINT at, const std::wstring& line1, const std::wstring& line2);
+void Output_CopyImage(const Image& img);  // DIB + PNG on the clipboard
+bool LoadImageFile(const std::wstring& path, Image& out);
+// Saves over `path` (format from its extension), or to a new file name when `path` is empty.
+// Returns the path written, "" on failure.
+std::wstring Output_SaveImage(const Image& img, const CaptureResult& meta, const std::wstring& path);
+void Output_EditDone(std::shared_ptr<CaptureResult> r, const std::wstring& path);  // copy, save, preview
+
+// ---- editor.cpp ----------------------------------------------------------------------------
+void Editor_Open(std::shared_ptr<CaptureResult> r, const std::wstring& path);
 std::vector<BYTE> EncodePng(const Image& img);
 std::vector<BYTE> EncodeJpeg(const Image& img, int quality);
 std::wstring PreviewFileName(const std::wstring& pattern);  // example name for the Settings window

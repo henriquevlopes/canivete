@@ -105,9 +105,33 @@ std::wstring FormatColor(COLORREF c, const std::wstring& key) {
     return buf;
 }
 
+// Menu of every format with this color's value; the one chosen in Settings is first and bold, so
+// Enter takes it. Returns the format key, or "" when the menu was dismissed.
+std::wstring AskFormat(COLORREF c, POINT at) {
+    HMENU m = CreatePopupMenu();
+    std::vector<int> order;
+    for (int i = 0; i < static_cast<int>(std::size(kColorFormats)); ++i)
+        if (g_settings.colorFormat == kColorFormats[i].key) order.insert(order.begin(), i);
+        else order.push_back(i);
+    for (int i : order) {
+        std::wstring label = kColorFormats[i].label;
+        label = label.substr(0, label.find(L"   "));  // "Gray 0-1", "HEX", ...
+        const std::wstring item = label + L"\t" + FormatColor(c, kColorFormats[i].key);
+        AppendMenuW(m, MF_STRING, 1 + i, item.c_str());
+    }
+    SetMenuDefaultItem(m, 1 + order.front(), FALSE);
+    SetForegroundWindow(g_mainWnd);
+    const int cmd = TrackPopupMenuEx(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, at.x, at.y, g_mainWnd, nullptr);
+    PostMessageW(g_mainWnd, WM_NULL, 0, 0);
+    DestroyMenu(m);
+    return cmd > 0 ? kColorFormats[cmd - 1].key : L"";
+}
+
 void Color_Picked(COLORREF c, POINT at) {
     LoadRecent();
-    const std::wstring text = FormatColor(c, g_settings.colorFormat);
+    const std::wstring format = AskFormat(c, at);
+    if (format.empty()) return;
+    const std::wstring text = FormatColor(c, format);
     const bool ok = CopyText(text);
     g_recent.erase(std::remove(g_recent.begin(), g_recent.end(), c), g_recent.end());
     g_recent.insert(g_recent.begin(), c);
