@@ -67,8 +67,8 @@ Settings: tray > Settings… opens a small window with a tab per feature on the 
 Screenshots, Color picker, GIF recording, Video recording, Image tools, Renamer; Ctrl+Tab switches).
 General has the folder, file name (with an Insert menu of tokens and a live example), PNG/JPG and
 quality, and start with Windows; each feature tab has its hotkey (click the box, press the keys) and
-options. Each feature tab also has an On/Off switch: a feature that is off loses its hotkeys, its
-tray menu entries and its Explorer right-click and Send to entries (the list shows it as "Off").
+options. Each feature also has an On/Off switch next to its name in the list: a feature that is off loses its hotkeys, its
+tray menu entries and its Explorer right-click and Send to entries (its tab is greyed out).
 Everything is stored in
 `%APPDATA%\Canivete\settings.ini`; edits to that file apply as soon as it is saved.
 Log: `%APPDATA%\Canivete\canivete.log`.

@@ -8,6 +8,7 @@
 #include "../res/resource.h"
 
 #include <commctrl.h>
+#include <windowsx.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
 #include <wrl/client.h>
@@ -31,9 +32,9 @@ constexpr COLORREF kNavBg = RGB(243, 243, 243);
 constexpr COLORREF kNavSel = RGB(226, 226, 226);
 constexpr COLORREF kAccent = RGB(0, 95, 184);
 // Layout in 96-DPI pixels.
-constexpr int kW = 660;              // client width
+constexpr int kW = 684;              // client width
 constexpr int kM = 16;               // outer margin
-constexpr int kNavW = 172;           // width of the tab list panel
+constexpr int kNavW = 196;           // width of the tab list panel
 constexpr int kL = kNavW + 24;       // left edge of a tab's content
 constexpr int kR = kW - 20;          // right edge of a tab's content
 constexpr int kCW = kR - kL;         // content width
@@ -73,7 +74,7 @@ enum : int {
     IDC_NAV,
     IDC_OPENRESIZE,
     IDC_OPENRENAME,
-    IDC_TOGGLE0 = 300,  // On switches 300..305, one per Feature
+    IDC_OFFNOTE0 = 300,  // "Turned off" notes 300..305, one per Feature
 };
 
 const wchar_t* const kHkNames[kHotkeyCount] = {L"Region screenshot", L"Window screenshot", L"Full screenshot",
@@ -189,6 +190,7 @@ void Hint(const wchar_t* text, int x, int y, int w, int h) {
 }
 
 LRESULT CALLBACK HotkeyBoxProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR);
+LRESULT CALLBACK NavProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR);
 
 void HotkeyRow(int i, int y) {
     Label(kHkNames[i], y);
@@ -205,9 +207,10 @@ int BeginTab(int t) {
     U.buildTab = t;
     U.buildHeader = true;
     const TabDef& d = kTabs[t];
-    Add(WC_STATICW, d.name, SS_LEFT | SS_NOPREFIX, IDC_TITLE, kL, 16, kCW - 110, 30, 0, kFontTitle);
+    Add(WC_STATICW, d.name, SS_LEFT | SS_NOPREFIX, IDC_TITLE, kL, 16, kCW - 210, 30, 0, kFontTitle);
     if (d.feature >= 0)
-        Add(WC_BUTTONW, L"", BS_OWNERDRAW | WS_TABSTOP, IDC_TOGGLE0 + d.feature, kR - 84, 20, 84, 24);
+        Add(WC_STATICW, L"Turned off (switch in the list)", SS_RIGHT | SS_NOPREFIX, IDC_OFFNOTE0 + d.feature,
+            kR - 200, 26, 200, 18);
     Add(WC_STATICW, d.desc, SS_LEFT | SS_NOPREFIX, IDC_DESC, kL, 52, kCW, 36);
     U.buildHeader = false;
     return kTop;
@@ -219,6 +222,7 @@ void Build() {
                 LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_TABSTOP, IDC_NAV, 8, 12,
                 kNavW - 16, kTabCount * kNavItem + 4);
     for (const TabDef& d : kTabs) SendMessageW(U.nav, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(d.name));
+    SetWindowSubclass(U.nav, NavProc, 2, 0);
 
     // General
     int y = BeginTab(0);
@@ -349,6 +353,12 @@ SIZE WindowSize() {
     return {r.right - r.left, r.bottom - r.top};
 }
 
+// "Turned off" next to the title of a feature tab that is off.
+void ShowOffNote() {
+    for (int f = 0; f < kFeatCount; ++f)
+        ShowWindow(Item(IDC_OFFNOTE0 + f), kTabs[U.tab].feature == f && !U.on[f] ? SW_SHOWNA : SW_HIDE);
+}
+
 void ShowTab(int t) {
     U.tab = g_lastTab = std::clamp(t, 0, kTabCount - 1);
     for (const Ctl& c : U.ctls)
@@ -356,6 +366,7 @@ void ShowTab(int t) {
     if (SendMessageW(U.nav, LB_GETCURSEL, 0, 0) != U.tab) SendMessageW(U.nav, LB_SETCURSEL, U.tab, 0);
     HWND f = GetFocus();
     if (f && IsChild(U.hwnd, f) && !IsWindowVisible(f)) SetFocus(U.nav);
+    ShowOffNote();
 }
 
 // ---- hotkey boxes --------------------------------------------------------------------------
@@ -561,7 +572,7 @@ void UpdateEnable() {
 
 void Toggle(int f) {
     U.on[f] = !U.on[f];
-    InvalidateRect(Item(IDC_TOGGLE0 + f), nullptr, TRUE);
+    ShowOffNote();
     InvalidateRect(U.nav, nullptr, TRUE);
     UpdateEnable();
     CheckHotkeys();
@@ -650,6 +661,29 @@ void RoundFill(HDC dc, const RECT& r, int radius, COLORREF fill, COLORREF line) 
     SelectObject(dc, op);
 }
 
+// The small On switch at the right end of a tab in the list.
+RECT SwitchRect(const RECT& item) {
+    const int w = Px(30), h = Px(16);
+    const int right = item.right - Px(10), top = (item.top + item.bottom - h) / 2;
+    return {right - w, top, right, top + h};
+}
+
+void DrawSwitch(HDC dc, const RECT& pill, bool on) {
+    const int h = pill.bottom - pill.top;
+    if (on) RoundFill(dc, pill, h, kAccent, kAccent);
+    else RoundFill(dc, pill, h, kNavBg, RGB(110, 110, 110));
+    const int k = h - Px(6);
+    const int kx = on ? pill.right - Px(3) - k : pill.left + Px(3);
+    const COLORREF kc = on ? RGB(255, 255, 255) : RGB(90, 90, 90);
+    SetDCBrushColor(dc, kc);
+    SetDCPenColor(dc, kc);
+    HGDIOBJ ob = SelectObject(dc, GetStockObject(DC_BRUSH));
+    HGDIOBJ op = SelectObject(dc, GetStockObject(DC_PEN));
+    Ellipse(dc, kx, pill.top + Px(3), kx + k, pill.top + Px(3) + k);
+    SelectObject(dc, ob);
+    SelectObject(dc, op);
+}
+
 void DrawNavItem(const DRAWITEMSTRUCT& d) {
     if (d.itemID == static_cast<UINT>(-1)) return;
     HDC dc = d.hDC;
@@ -669,44 +703,46 @@ void DrawNavItem(const DRAWITEMSTRUCT& d) {
     RECT tr = b;
     tr.left += Px(14);
     tr.right -= Px(10);
+    if (t.feature >= 0) {
+        const RECT sw = SwitchRect(d.rcItem);
+        DrawSwitch(dc, sw, !off);
+        tr.right = sw.left - Px(6);
+    }
     DrawTextW(dc, t.name, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-    if (off) DrawTextW(dc, L"Off", -1, &tr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(dc, of);
     if ((d.itemState & ODS_FOCUS) && !(d.itemState & ODS_NOFOCUSRECT)) DrawFocusRect(dc, &b);
 }
 
-void DrawToggle(const DRAWITEMSTRUCT& d) {
-    const int f = static_cast<int>(d.CtlID) - IDC_TOGGLE0;
-    const bool on = U.on[f];
-    HDC dc = d.hDC;
-    const RECT& rc = d.rcItem;
-    FillColor(dc, rc, GetSysColor(COLOR_WINDOW));
-    const int h = Px(20), w = Px(40);
-    const int top = (rc.top + rc.bottom - h) / 2;
-    RECT pill{rc.left + Px(2), top, rc.left + Px(2) + w, top + h};
-    if (on) RoundFill(dc, pill, h, kAccent, kAccent);
-    else RoundFill(dc, pill, h, GetSysColor(COLOR_WINDOW), RGB(110, 110, 110));
-    const int k = h - Px(8);
-    const int kx = on ? pill.right - Px(4) - k : pill.left + Px(4);
-    const RECT knob{kx, top + Px(4), kx + k, top + Px(4) + k};
-    const COLORREF kc = on ? RGB(255, 255, 255) : RGB(90, 90, 90);
-    SetDCBrushColor(dc, kc);
-    SetDCPenColor(dc, kc);
-    HGDIOBJ ob = SelectObject(dc, GetStockObject(DC_BRUSH));
-    HGDIOBJ op = SelectObject(dc, GetStockObject(DC_PEN));
-    Ellipse(dc, knob.left, knob.top, knob.right, knob.bottom);
-    SelectObject(dc, ob);
-    SelectObject(dc, op);
-    HGDIOBJ of = SelectObject(dc, U.font);
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
-    RECT tr{pill.right + Px(10), rc.top, rc.right, rc.bottom};
-    DrawTextW(dc, on ? L"On" : L"Off", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-    SelectObject(dc, of);
-    if ((d.itemState & ODS_FOCUS) && !(d.itemState & ODS_NOFOCUSRECT)) {
-        RECT fr = rc;
-        DrawFocusRect(dc, &fr);
+// Click a switch in the tab list to turn its feature on or off; Space does it for the selected tab.
+LRESULT CALLBACK NavProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    switch (m) {
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDBLCLK: {
+        const LRESULT hit = SendMessageW(h, LB_ITEMFROMPOINT, 0, lp);
+        const int i = LOWORD(hit);
+        if (HIWORD(hit) || i < 0 || i >= kTabCount || kTabs[i].feature < 0) break;
+        RECT item;
+        SendMessageW(h, LB_GETITEMRECT, i, reinterpret_cast<LPARAM>(&item));
+        RECT sw = SwitchRect(item);
+        InflateRect(&sw, Px(6), Px(6));  // a little easier to hit
+        const POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (!PtInRect(&sw, p)) break;
+        SetFocus(h);
+        ShowTab(i);
+        Toggle(kTabs[i].feature);
+        return 0;
     }
+    case WM_KEYDOWN:
+        if (wp == VK_SPACE) {
+            if (kTabs[U.tab].feature >= 0) Toggle(kTabs[U.tab].feature);
+            return 0;
+        }
+        break;
+    case WM_CHAR:
+        if (wp == L' ') return 0;
+        break;
+    }
+    return DefSubclassProc(h, m, wp, lp);
 }
 
 void Browse() {
@@ -807,7 +843,6 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DRAWITEM: {
         const auto* d = reinterpret_cast<const DRAWITEMSTRUCT*>(lp);
         if (d->CtlType == ODT_LISTBOX) DrawNavItem(*d);
-        else if (d->CtlType == ODT_BUTTON) DrawToggle(*d);
         return TRUE;
     }
     case WM_CTLCOLORLISTBOX:
@@ -822,7 +857,8 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             br = U.focusBrush;
         } else if (id >= IDC_HKST0 && id < IDC_HKST0 + kHotkeyCount) {
             fg = U.bad[id - IDC_HKST0] ? kRed : kGrey;
-        } else if (id == IDC_HINT || id == IDC_EXAMPLE || id == IDC_DESC) {
+        } else if (id == IDC_HINT || id == IDC_EXAMPLE || id == IDC_DESC ||
+                   (id >= IDC_OFFNOTE0 && id < IDC_OFFNOTE0 + static_cast<int>(kFeatCount))) {
             fg = kGrey;
         }
         SetBkColor(dc, bg);
@@ -852,10 +888,6 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (id >= IDC_HK0 && id < IDC_HK0 + kHotkeyCount) {
             if (code == EN_SETFOCUS) StartCapture(id - IDC_HK0);
             else if (code == EN_KILLFOCUS) StopCapture();
-            return 0;
-        }
-        if (id >= IDC_TOGGLE0 && id < IDC_TOGGLE0 + static_cast<int>(kFeatCount)) {
-            if (code == BN_CLICKED || code == BN_DOUBLECLICKED) Toggle(id - IDC_TOGGLE0);
             return 0;
         }
         switch (id) {
