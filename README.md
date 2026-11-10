@@ -1,5 +1,9 @@
 # Canivete
 
+## macOS
+
+A first native macOS build is under [`macOS/`](macOS/README.md), currently focused on the window switcher and Dock Minimize.
+
 Henri's personal Windows tray toolbox (Portuguese *canivete* = pocket knife). One small native exe,
 no runtimes, nothing to install. Personal use only, not for sale or distribution.
 
