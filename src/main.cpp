@@ -552,6 +552,10 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
             LoadSettings();
             return Alpha_Bench(argv[2], argv[3], picks, box);
         }
+        if (!_wcsicmp(argv[1], L"--mp4-shrink") && argc >= 7) {  // in.mp4 out.mp4 percent quality kbps (self-test)
+            const VideoPreset p{L"test", L"", L"", _wtoi(argv[4]), _wtoi(argv[5]), _wtoi(argv[6])};
+            return Recorder_BenchShrink(argv[2], argv[3], p);
+        }
         if (!_wcsicmp(argv[1], L"--region")) cmd = static_cast<UINT>(CaptureMode::Region);
         else if (!_wcsicmp(argv[1], L"--window")) cmd = static_cast<UINT>(CaptureMode::Window);
         else if (!_wcsicmp(argv[1], L"--full")) cmd = static_cast<UINT>(CaptureMode::Full);

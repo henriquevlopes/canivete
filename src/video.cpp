@@ -21,10 +21,11 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
-UINT32 Bitrate(int w, int h, int fps) {
-    // About 0.08 bits per pixel: 1080p at 30 fps is ~5 Mbps, plenty for screen content.
-    const double b = static_cast<double>(w) * h * fps * 0.08;
-    return static_cast<UINT32>(std::clamp(b, 1.5e6, 20e6));
+UINT32 Bitrate(int w, int h, int fps, int quality) {
+    // At quality 70 about 0.08 bits per pixel: 1080p at 30 fps is ~5 Mbps, plenty for screen content.
+    const double bpp = 0.08 * std::clamp(quality, 10, 100) / 70.0;
+    const double b = static_cast<double>(w) * h * fps * bpp;
+    return static_cast<UINT32>(std::clamp(b, 0.3e6, 20e6));
 }
 
 void SetColorInfo(IMFMediaType* t) {
@@ -86,6 +87,7 @@ struct Mp4Writer::Impl {
     DWORD stream = 0;
     std::wstring path;
     int W = 0, H = 0, fps = 30;
+    int quality = 70, audioKbps = 192;
     LONGLONG last = -1;
     bool hw = true;
     bool mfStarted = false;
@@ -103,7 +105,8 @@ static bool AddAudio(Mp4Writer::Impl& p) {
     out->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
     out->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000);
     out->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
-    out->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 24000);  // 192 kbps
+    // AAC encoder takes 96, 128, 160 or 192 kbps
+    out->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, static_cast<UINT32>(p.audioKbps) * 125);
     out->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29);
     if (FAILED(p.w->AddStream(out.Get(), &p.audioStream))) return false;
     MFCreateMediaType(&in);
@@ -141,7 +144,7 @@ static bool TryOpen(Mp4Writer::Impl& p, bool hw, bool quality, std::wstring& inf
     MFCreateMediaType(&out);
     out->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
     out->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
-    out->SetUINT32(MF_MT_AVG_BITRATE, Bitrate(p.W, p.H, p.fps));
+    out->SetUINT32(MF_MT_AVG_BITRATE, Bitrate(p.W, p.H, p.fps, p.quality));
     out->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
     out->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
     MFSetAttributeSize(out.Get(), MF_MT_FRAME_SIZE, p.W, p.H);
@@ -165,20 +168,20 @@ static bool TryOpen(Mp4Writer::Impl& p, bool hw, bool quality, std::wstring& inf
     enc->SetUINT32(CODECAPI_AVEncMPVGOPSize, static_cast<UINT32>(p.fps * 2));  // a keyframe every 2 s
     if (quality) {
         enc->SetUINT32(CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_Quality);
-        enc->SetUINT32(CODECAPI_AVEncCommonQuality, 70);
+        enc->SetUINT32(CODECAPI_AVEncCommonQuality, static_cast<UINT32>(p.quality));
     }
     if (FAILED(p.w->SetInputMediaType(p.stream, in.Get(), enc.Get()))) return false;
     if (p.audio && !AddAudio(p)) return false;
     if (FAILED(p.w->BeginWriting())) return false;
 
-    std::wstring mode = L"bitrate " + std::to_wstring(Bitrate(p.W, p.H, p.fps) / 1000) + L" kbps";
+    std::wstring mode = L"bitrate " + std::to_wstring(Bitrate(p.W, p.H, p.fps, p.quality) / 1000) + L" kbps";
     ComPtr<ICodecAPI> api;
     if (SUCCEEDED(p.w->GetServiceForStream(p.stream, GUID_NULL, IID_PPV_ARGS(&api))) && api) {
         VARIANT v;
         VariantInit(&v);
         if (SUCCEEDED(api->GetValue(&CODECAPI_AVEncCommonRateControlMode, &v)) && v.vt == VT_UI4 &&
             v.ulVal == eAVEncCommonRateControlMode_Quality)
-            mode = L"quality 70";
+            mode = L"quality " + std::to_wstring(p.quality);
         VariantClear(&v);
     }
     info = EncoderName(p.w.Get(), p.stream) + L", " + mode + (p.audio ? L", AAC sound" : L"");
@@ -186,9 +189,12 @@ static bool TryOpen(Mp4Writer::Impl& p, bool hw, bool quality, std::wstring& inf
     return true;
 }
 
-bool Mp4Writer::Open(const std::wstring& path, int w, int h, int fps, bool audio, std::wstring& info) {
+bool Mp4Writer::Open(const std::wstring& path, int w, int h, int fps, bool audio, std::wstring& info, int quality,
+                     int audioKbps) {
     Impl& p = *p_;
     if (w < 2 || h < 2 || (w & 1) || (h & 1)) return false;
+    p.quality = std::clamp(quality, 1, 100);
+    p.audioKbps = audioKbps <= 96 ? 96 : audioKbps <= 128 ? 128 : audioKbps <= 160 ? 160 : 192;
     if (!p.mfStarted) {
         if (FAILED(MFStartup(MF_VERSION, MFSTARTUP_LITE))) return false;
         p.mfStarted = true;
@@ -280,4 +286,230 @@ bool Mp4Writer::Close() {
     if (FAILED(hr)) Log(L"Video: finishing the file failed (0x%08X)", static_cast<unsigned>(hr));
     p.w.Reset();
     return SUCCEEDED(hr);
+}
+
+// ---- smaller copies -------------------------------------------------------------------------
+
+// Measured on 10 s of 1080p (scrolling text / full-screen motion), as recorded: 1.8 / 24.5 MB.
+// Balanced: 1.0 / 8.6 MB, text looks the same. Smallest: 0.8 / 0.75 MB. Halving the size only pays
+// off with lots of motion: scrolling text came out bigger at half size, so calm recordings keep theirs.
+const VideoPreset kVideoPresets[kVideoPresetCount] = {
+    {L"smallest", L"Smallest file", L"lower quality", 50, 20, 96},
+    {L"balanced", L"Balanced", L"a little softer", 100, 35, 128},
+    {L"best", L"Best quality", L"as recorded", 100, 0, 192},
+};
+
+bool Mp4_IsBusy(uint64_t bytes, uint32_t ms, int w, int h) {
+    // bits per pixel of the recording (quality 70): ~0.02 for scrolling text, ~0.3 for full motion
+    if (!ms || w <= 0 || h <= 0) return false;
+    return bytes * 8.0 / (ms / 1000.0 * 30.0 * w * h) > 0.08;
+}
+
+namespace {
+
+// Shrinks a BGRX picture by averaging the source pixels under each target pixel.
+void Downscale(const BYTE* src, LONG pitch, int sw, int sh, uint32_t* dst, int dw, int dh) {
+    std::vector<int> x0(static_cast<size_t>(dw) + 1);
+    for (int x = 0; x <= dw; ++x) x0[x] = static_cast<int>(static_cast<int64_t>(x) * sw / dw);
+    for (int y = 0; y < dh; ++y) {
+        const int ya = static_cast<int>(static_cast<int64_t>(y) * sh / dh);
+        const int yb = std::max(ya + 1, static_cast<int>(static_cast<int64_t>(y + 1) * sh / dh));
+        for (int x = 0; x < dw; ++x) {
+            const int xa = x0[x], xb = std::max(xa + 1, x0[x + 1]);
+            uint32_t r = 0, g = 0, b = 0;
+            for (int yy = ya; yy < yb; ++yy) {
+                const uint32_t* row = reinterpret_cast<const uint32_t*>(src + static_cast<ptrdiff_t>(yy) * pitch);
+                for (int xx = xa; xx < xb; ++xx) {
+                    r += (row[xx] >> 16) & 255;
+                    g += (row[xx] >> 8) & 255;
+                    b += row[xx] & 255;
+                }
+            }
+            const uint32_t n = static_cast<uint32_t>((yb - ya) * (xb - xa));
+            dst[static_cast<size_t>(y) * dw + x] = (((r + n / 2) / n) << 16) | (((g + n / 2) / n) << 8) | ((b + n / 2) / n);
+        }
+    }
+}
+
+struct MfScope {
+    bool com = false, mf = false;
+    MfScope() {
+        com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
+        mf = SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE));
+    }
+    ~MfScope() {
+        if (mf) MFShutdown();
+        if (com) CoUninitialize();
+    }
+};
+
+}  // namespace
+
+void Mp4_ShrinkSize(int w, int h, int percent, bool busy, int& outW, int& outH) {
+    double f = busy ? std::clamp(percent, 1, 100) / 100.0 : 1.0;
+    f = std::max(f, std::min(1.0, 640.0 / std::max(1, std::max(w, h))));  // never below 640 on the long side
+    outW = f >= 1.0 ? w : std::max(16, static_cast<int>(std::lround(w * f)) & ~1);
+    outH = f >= 1.0 ? h : std::max(16, static_cast<int>(std::lround(h * f)) & ~1);
+}
+
+bool Mp4_Shrink(const std::wstring& src, const VideoPreset& vp, const std::wstring& outPath,
+                const std::atomic<bool>& cancel, std::wstring& err) {
+    MfScope mf;
+    if (!mf.mf) {
+        err = L"Media Foundation didn't start";
+        return false;
+    }
+    bool ok = false;
+    {
+        ComPtr<IMFAttributes> a;
+        MFCreateAttributes(&a, 1);
+        a->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);  // decoder output turned into RGB32
+        ComPtr<IMFSourceReader> r;
+        if (FAILED(MFCreateSourceReaderFromURL(src.c_str(), a.Get(), &r))) {
+            err = L"can't read the recording";
+            return false;
+        }
+        // Find the streams.
+        DWORD vIdx = MAXDWORD, aIdx = MAXDWORD;
+        int W = 0, H = 0, fps = 30;
+        for (DWORD i = 0;; ++i) {
+            ComPtr<IMFMediaType> t;
+            if (FAILED(r->GetNativeMediaType(i, 0, &t))) break;
+            GUID major{};
+            t->GetGUID(MF_MT_MAJOR_TYPE, &major);
+            if (major == MFMediaType_Video && vIdx == MAXDWORD) {
+                vIdx = i;
+                UINT32 w = 0, h = 0, n = 0, d = 0;
+                MFGetAttributeSize(t.Get(), MF_MT_FRAME_SIZE, &w, &h);
+                W = static_cast<int>(w);
+                H = static_cast<int>(h);
+                if (SUCCEEDED(MFGetAttributeRatio(t.Get(), MF_MT_FRAME_RATE, &n, &d)) && d && n)
+                    fps = std::clamp(static_cast<int>((n + d / 2) / d), 1, 120);
+            } else if (major == MFMediaType_Audio && aIdx == MAXDWORD)
+                aIdx = i;
+        }
+        if (vIdx == MAXDWORD || W < 2 || H < 2) {
+            err = L"no picture in the recording";
+            return false;
+        }
+        r->SetStreamSelection(static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS), FALSE);
+        r->SetStreamSelection(vIdx, TRUE);
+        ComPtr<IMFMediaType> vt;
+        MFCreateMediaType(&vt);
+        vt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        vt->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+        if (FAILED(r->SetCurrentMediaType(vIdx, nullptr, vt.Get()))) {
+            err = L"can't decode the picture";
+            return false;
+        }
+        UINT32 fw = 0, fh = 0;  // decoded frame size (may be padded, e.g. 1088 for 1080)
+        {
+            ComPtr<IMFMediaType> cur;
+            r->GetCurrentMediaType(vIdx, &cur);
+            MFGetAttributeSize(cur.Get(), MF_MT_FRAME_SIZE, &fw, &fh);
+        }
+        if (static_cast<int>(fw) < W || static_cast<int>(fh) < H) {
+            W = std::min<int>(W, static_cast<int>(fw)) & ~1;
+            H = std::min<int>(H, static_cast<int>(fh)) & ~1;
+        }
+        bool sound = false;
+        if (aIdx != MAXDWORD) {
+            ComPtr<IMFMediaType> at;
+            MFCreateMediaType(&at);
+            at->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+            at->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+            at->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+            at->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000);
+            at->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
+            at->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 4);
+            at->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 48000 * 4);
+            r->SetStreamSelection(aIdx, TRUE);
+            sound = SUCCEEDED(r->SetCurrentMediaType(aIdx, nullptr, at.Get()));
+            if (!sound) r->SetStreamSelection(aIdx, FALSE);
+        }
+
+        bool busy = false;
+        {
+            PROPVARIANT v;
+            PropVariantInit(&v);
+            WIN32_FILE_ATTRIBUTE_DATA fa;
+            if (SUCCEEDED(r->GetPresentationAttribute(static_cast<DWORD>(MF_SOURCE_READER_MEDIASOURCE), MF_PD_DURATION, &v)) &&
+                v.vt == VT_UI8 && GetFileAttributesExW(src.c_str(), GetFileExInfoStandard, &fa))
+                busy = Mp4_IsBusy((static_cast<uint64_t>(fa.nFileSizeHigh) << 32) | fa.nFileSizeLow,
+                                  static_cast<uint32_t>(v.uhVal.QuadPart / 10000), W, H);
+            PropVariantClear(&v);
+        }
+        int ow = W, oh = H;
+        Mp4_ShrinkSize(W, H, vp.percent, busy, ow, oh);
+
+        Mp4Writer w;
+        std::wstring info;
+        if (!w.Open(outPath, ow, oh, fps, sound, info, vp.quality ? vp.quality : 70, vp.audioKbps)) {
+            err = L"no encoder";
+            return false;
+        }
+        sound = sound && w.HasAudio();
+        std::vector<uint32_t> frame(static_cast<size_t>(ow) * oh);
+        bool vEnd = false, aEnd = !sound, failed = false;
+        uint64_t frames = 0;
+        while (!(vEnd && aEnd)) {
+            if (cancel) {
+                err = L"cancelled";
+                failed = true;
+                break;
+            }
+            DWORD idx = 0, flags = 0;
+            LONGLONG ts = 0;
+            ComPtr<IMFSample> s;
+            if (FAILED(r->ReadSample(static_cast<DWORD>(MF_SOURCE_READER_ANY_STREAM), 0, &idx, &flags, &ts, &s)) ||
+                (flags & MF_SOURCE_READERF_ERROR)) {
+                err = L"reading the recording failed";
+                failed = true;
+                break;
+            }
+            if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
+                if (idx == vIdx) vEnd = true;
+                else aEnd = true;
+            }
+            if (!s) continue;
+            ComPtr<IMFMediaBuffer> buf;
+            if (FAILED(s->GetBufferByIndex(0, &buf))) continue;
+            if (idx == vIdx) {
+                ComPtr<IMF2DBuffer> b2;
+                BYTE* scan0 = nullptr;
+                LONG pitch = 0;
+                const bool locked2d = SUCCEEDED(buf.As(&b2)) && SUCCEEDED(b2->Lock2D(&scan0, &pitch));
+                if (!locked2d) {
+                    if (FAILED(buf->Lock(&scan0, nullptr, nullptr))) continue;
+                    pitch = static_cast<LONG>(fw) * 4;
+                }
+                if (ow == W && oh == H)
+                    for (int y = 0; y < H; ++y)
+                        memcpy(&frame[static_cast<size_t>(y) * ow], scan0 + static_cast<ptrdiff_t>(y) * pitch,
+                               static_cast<size_t>(W) * 4);
+                else
+                    Downscale(scan0, pitch, W, H, frame.data(), ow, oh);
+                if (locked2d) b2->Unlock2D();
+                else buf->Unlock();
+                if (w.Frame(ts, frame.data())) ++frames;
+            } else if (idx == aIdx && sound) {
+                BYTE* d = nullptr;
+                DWORD len = 0;
+                if (FAILED(buf->Lock(&d, nullptr, &len))) continue;
+                if (len >= 4) w.Audio(ts, reinterpret_cast<const int16_t*>(d), len / 4);
+                buf->Unlock();
+            }
+        }
+        if (!failed && frames == 0) {
+            err = L"no frames";
+            failed = true;
+        }
+        if (!failed) {
+            ok = w.Close();
+            if (!ok) err = L"finishing the file failed";
+        }
+        // (when failed, the writer is dropped unfinished here and the file deleted below)
+    }
+    if (!ok) DeleteFileW(outPath.c_str());
+    return ok;
 }

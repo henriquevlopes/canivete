@@ -43,6 +43,7 @@ struct Settings {
     bool videoSound = true;   // videos: record what the computer plays
     bool videoMic = false;    // videos: record the microphone
     std::wstring gifPreset;   // last GIF choice: a kGifPresets key
+    std::wstring videoPreset; // last video choice: a kVideoPresets key
 };
 
 extern Settings g_settings;
@@ -226,7 +227,9 @@ public:
     Mp4Writer();
     ~Mp4Writer();
     // audio: add a sound track (fed with Audio). info: the encoder used.
-    bool Open(const std::wstring& path, int width, int height, int fps, bool audio, std::wstring& info);
+    // quality: the encoder's 1-100 quality (or a bitrate scaled to it); audioKbps: AAC bitrate.
+    bool Open(const std::wstring& path, int width, int height, int fps, bool audio, std::wstring& info,
+              int quality = 70, int audioKbps = 192);
     bool Frame(LONGLONG time100ns, const uint32_t* px);
     bool Audio(LONGLONG time100ns, const int16_t* frames, UINT32 count);  // 48 kHz stereo 16-bit
     bool HasAudio() const;
@@ -235,6 +238,27 @@ public:
 private:
     std::unique_ptr<Impl> p_;
 };
+
+// The choices offered after a video recording. The last one keeps the recording as it is.
+struct VideoPreset {
+    const wchar_t* key;    // in settings.ini
+    const wchar_t* title;  // on the button
+    const wchar_t* note;
+    int percent;           // picture size, % of the recorded one (100 = as recorded)
+    int quality;           // encoder quality 1-100 (0 = keep the recording, no re-encode)
+    int audioKbps;
+};
+constexpr int kVideoPresetCount = 3;
+extern const VideoPreset kVideoPresets[kVideoPresetCount];
+
+// A recording with lots of motion (judged by its size): only those get a smaller picture.
+bool Mp4_IsBusy(uint64_t bytes, uint32_t ms, int w, int h);
+// The picture size a preset gives: busy recordings percent of w x h (never below 640 on the long
+// side, even); calm ones keep their size.
+void Mp4_ShrinkSize(int w, int h, int percent, bool busy, int& outW, int& outH);
+// Re-encodes a recorded MP4 smaller (size and/or quality), sound included. Runs on any thread.
+bool Mp4_Shrink(const std::wstring& src, const VideoPreset& p, const std::wstring& outPath,
+                const std::atomic<bool>& cancel, std::wstring& err);
 
 // ---- audio.cpp -----------------------------------------------------------------------------
 // Sound for videos: computer sound (loopback) and/or the microphone, mixed, 48 kHz stereo 16-bit.
@@ -263,6 +287,7 @@ void Recorder_Shutdown();            // app is closing: stop and throw away anyt
 HWND Recorder_Window();              // the save window, for IsDialogMessage
 void Recorder_Test(const RECT& r, int ms, bool video);  // test mode: record r for ms, then save
 int Recorder_BenchVideo(const RECT& r, int ms, const std::wstring& outPath);  // headless MP4 test
+int Recorder_BenchShrink(const std::wstring& in, const std::wstring& out, const VideoPreset& p);  // logs size
 int Recorder_Bench(const RECT& r, int ms, const std::wstring& outDir);  // headless: record + all presets
 
 // ---- alpha.cpp -----------------------------------------------------------------------------

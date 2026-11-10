@@ -40,9 +40,15 @@ Video recording: the same border and bar (the dot is grey with "…" for the mom
 encoder takes to start, then red with the time). 30 frames a second, full size (an odd width or
 height loses one pixel, as video needs even sizes), mouse pointer included. Sound: what the computer plays is
 recorded by default, the microphone only if switched on (Settings → Video recording); both are
-mixed into one track (AAC, 48 kHz stereo). Stop saves
-the MP4 straight to the screenshots folder and copies it as a file, ready to paste; Cancel throws it
-away. H.264 on the graphics card's own encoder when there is one (NVIDIA, AMD, Intel), otherwise
+mixed into one track (AAC, 48 kHz stereo). Stop opens a save window like the GIF one, with three
+sizes, each showing its real file size (the two smaller ones take a few seconds to work out):
+- Smallest file: lower quality, sound 96 kbps; recordings with lots of motion also go to half size
+  (never below 640 pixels). Scrolling text came out bigger at half size, so calm ones keep theirs.
+- Balanced: full size, a little softer (text looks the same), sound 128 kbps.
+- Best quality: the recording as it is.
+10 s of 1080p: scrolling text 0.8 / 1.0 / 1.8 MB, full-screen motion 0.75 / 8.6 / 24.5 MB.
+Enter takes the choice made last time; the file goes to the screenshots folder and is copied,
+ready to paste. Discard (or Cancel on the bar) throws it away. H.264 on the graphics card's own encoder when there is one (NVIDIA, AMD, Intel), otherwise
 Windows' software encoder; quality-based, so a still screen costs almost nothing (10 s of a
 2560×1440 desktop: about 750 KB).
 
@@ -138,6 +144,7 @@ files to the running one, so Explorer's one-copy-per-file launch ends in one win
 jpg png tif bmp right left 180 fliph flipv copy`).
 `Canivete.exe --grab out.png` (or `.jpg`) grabs all monitors to a file and exits (self-test).
 `Canivete.exe --mp4-bench x y w h ms out.mp4` records that area with no window and logs frames, CPU, size and sound (self-test).
+`Canivete.exe --mp4-shrink in.mp4 out.mp4 percent quality kbps` makes one smaller copy and logs its size and time (self-test).
 In test mode, `CANIVETE_AUDIO_FAKE=1` records a quiet 440 Hz tone instead of real sound.
 
 ## Build and install
@@ -163,7 +170,7 @@ Builds Release, installs to `%LOCALAPPDATA%\Programs\Canivete\Canivete.exe` and 
 - `src/renamer.cpp` — renamer window, live preview, regex/counter/date tokens, IFileOperation rename with undo
 - `src/gif.cpp` — GIF encoder: recording file, palette (exact colors or Wu + k-means), LZW, changed-area frames, presets
 - `src/recorder.cpp` — recording border and bar, capture thread (GIF 25 fps, video 30 fps), Save GIF window, video save
-- `src/video.cpp` — MP4 writer: BGRX to NV12 (BT.709), Media Foundation H.264 sink writer, hardware encoder with software fallback, AAC sound stream
+- `src/video.cpp` — MP4 writer: BGRX to NV12 (BT.709), Media Foundation H.264 sink writer, hardware encoder with software fallback, AAC sound stream; the smaller copies offered after recording (decode, shrink, re-encode)
 - `src/audio.cpp` — video sound: WASAPI loopback of the default output + optional microphone, mixed, timed by capture clock
 - `src/alpha.cpp` — Make alpha window: freehand mask, detail/background picks, threshold engine, square power-of-two output
 - `src/shell.cpp` — Explorer right-click Canivete submenu (image actions, Rename) and Send to shortcuts

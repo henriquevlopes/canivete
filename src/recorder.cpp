@@ -88,6 +88,12 @@ std::wstring SizeText(uint64_t b) {
     return s;
 }
 
+uint64_t FileSize(const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fa)) return 0;
+    return (static_cast<uint64_t>(fa.nFileSizeHigh) << 32) | fa.nFileSizeLow;
+}
+
 HFONT MessageFont(UINT dpi, double grow, bool bold) {
     NONCLIENTMETRICSW ncm{sizeof(ncm)};
     SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, dpi);
@@ -293,8 +299,20 @@ void CopyFileToClipboard(const std::wstring& path) {
 
 // ---- save window -----------------------------------------------------------------------------
 
+// The save window serves both GIFs and videos; these pick the right list of choices.
+static_assert(kGifPresetCount == kVideoPresetCount, "the save window has one button per choice");
+bool SavingVideo() { return R.rec && R.rec->video; }
+const wchar_t* PresetKey(int i) { return SavingVideo() ? kVideoPresets[i].key : kGifPresets[i].key; }
+const wchar_t* PresetTitle(int i) { return SavingVideo() ? kVideoPresets[i].title : kGifPresets[i].title; }
+
 std::wstring Note(int i) {
-    std::wstring s = kGifPresets[i].note;
+    std::wstring s = SavingVideo() ? kVideoPresets[i].note : kGifPresets[i].note;
+    if (SavingVideo()) {  // the real picture size, which depends on the recording
+        const int W = R.rec->rect.right - R.rec->rect.left, H = R.rec->rect.bottom - R.rec->rect.top;
+        int w = 0, h = 0;
+        Mp4_ShrinkSize(W, H, kVideoPresets[i].percent, Mp4_IsBusy(FileSize(R.rec->file), R.rec->durationMs, W, H), w, h);
+        s = std::to_wstring(w) + L" × " + std::to_wstring(h) + L", " + s;
+    }
     const Encoded& e = R.enc[i];
     if (!e.done) s += L"   ·   working out the size…";
     else if (!e.ok) s += L"   ·   failed";
@@ -312,20 +330,37 @@ void UpdateButton(int i) {
 void SaveChoice(int i) {
     Encoded& e = R.enc[i];
     if (!e.done || !e.ok || !R.rec) return;
-    const std::wstring path = Output_NewPath(R.rec->meta, L".gif");
+    const bool video = R.rec->video;
+    // Stop the other encoders first: a video's "as recorded" choice is the file they are reading.
+    R.cancelEncode = true;
+    for (std::thread& t : R.encoders)
+        if (t.joinable()) t.join();
+    const std::wstring path = Output_NewPath(R.rec->meta, video ? L".mp4" : L".gif");
     if (!MoveFileExW(e.path.c_str(), path.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING)) {
-        const std::wstring msg = L"The GIF could not be saved to\n" + path;
+        const std::wstring msg = std::wstring(video ? L"The video" : L"The GIF") + L" could not be saved to\n" + path;
         if (TestMode()) Log(L"%s", msg.c_str());
         else MessageBoxW(R.save, msg.c_str(), L"Canivete", MB_ICONWARNING);
+        // The ones not finished yet were stopped: show which are still there to pick.
+        for (int k = 0; k < kGifPresetCount; ++k)
+            if (!R.enc[k].done || !FileSize(R.enc[k].path)) R.enc[k].ok = false, R.enc[k].done = true, UpdateButton(k);
         return;
     }
     e.path.clear();  // moved: nothing left to clean up
     CopyFileToClipboard(path);
-    SaveSettingValue(L"Gif", L"Preset", kGifPresets[i].key);
-    g_settings.gifPreset = kGifPresets[i].key;
-    Log(L"GIF saved (%s, %s) -> %s", kGifPresets[i].key, SizeText(e.size).c_str(), path.c_str());
-    Tray_Notify(L"GIF saved", path.substr(path.find_last_of(L'\\') + 1) + L"  (" + SizeText(e.size) +
-                                  L")\nCopied: paste it into a chat or a folder.");
+    SaveSettingValue(video ? L"Video" : L"Gif", L"Preset", PresetKey(i));
+    (video ? g_settings.videoPreset : g_settings.gifPreset) = PresetKey(i);
+    std::wstring what = SizeText(e.size);
+    if (video) {
+        const unsigned secs = (R.rec->durationMs + 500) / 1000;
+        wchar_t len[32];
+        swprintf_s(len, L"%u:%02u, ", secs / 60, secs % 60);
+        what = len + what;
+        Log(L"Video saved (%s, %s, sound: %s) -> %s", PresetKey(i), SizeText(e.size).c_str(),
+            R.rec->soundInfo.empty() ? L"off" : R.rec->soundInfo.c_str(), path.c_str());
+    } else
+        Log(L"GIF saved (%s, %s) -> %s", PresetKey(i), SizeText(e.size).c_str(), path.c_str());
+    Tray_Notify(video ? L"Video saved" : L"GIF saved", path.substr(path.find_last_of(L'\\') + 1) + L"  (" + what +
+                                                           L")\nCopied: paste it into a chat or a folder.");
     DestroyWindow(R.save);
 }
 
@@ -334,7 +369,7 @@ void Discard() {
         MessageBoxW(R.save, L"Throw this recording away?", L"Canivete", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) !=
             IDYES)
         return;
-    Log(L"GIF recording discarded");
+    Log(SavingVideo() ? L"Video recording discarded" : L"GIF recording discarded");
     DestroyWindow(R.save);
 }
 
@@ -387,19 +422,25 @@ void OpenSaveWindow() {
     const RECT work = WorkAreaAt(area);
     const int ww = wr.right - wr.left, wh = wr.bottom - wr.top;
     const int x = work.left + (work.right - work.left - ww) / 2, y = work.top + (work.bottom - work.top - wh) / 2;
-    R.save = CreateWindowExW(ex, kSaveClass, L"Save GIF", style, x, y, ww, wh, nullptr, nullptr, g_hinst, nullptr);
+    // Enter takes the choice made last time.
+    const std::wstring& last = rec.video ? g_settings.videoPreset : g_settings.gifPreset;
+    R.def = 1;
+    for (int i = 0; i < kGifPresetCount; ++i)
+        if (last == PresetKey(i)) R.def = i;
+    R.save = CreateWindowExW(ex, kSaveClass, rec.video ? L"Save video" : L"Save GIF", style, x, y, ww, wh, nullptr,
+                             nullptr, g_hinst, nullptr);
     R.saveFont = MessageFont(dpi, 1.0, false);
     R.bigFont = MessageFont(dpi, 1.0, true);
 
     wchar_t info[160];
-    swprintf_s(info, L"%.1f seconds, %d × %d pixels, full size. Pick a GIF:", rec.durationMs / 1000.0,
-               rec.rect.right - rec.rect.left, rec.rect.bottom - rec.rect.top);
+    swprintf_s(info, L"%.1f seconds, %d × %d pixels. %s", rec.durationMs / 1000.0, rec.rect.right - rec.rect.left,
+               rec.rect.bottom - rec.rect.top, rec.video ? L"Pick a size:" : L"Pick a GIF:");
     HWND t = CreateWindowExW(0, WC_STATICW, info, WS_CHILD | WS_VISIBLE | SS_NOPREFIX, pad, pad, W - 2 * pad, Px(22),
                              R.save, reinterpret_cast<HMENU>(IDC_INFO), g_hinst, nullptr);
     SendMessageW(t, WM_SETFONT, reinterpret_cast<WPARAM>(R.bigFont), FALSE);
     int by = pad + Px(32);
     for (int i = 0; i < kGifPresetCount; ++i) {
-        HWND b = CreateWindowExW(0, WC_BUTTONW, kGifPresets[i].title,
+        HWND b = CreateWindowExW(0, WC_BUTTONW, PresetTitle(i),
                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_DISABLED |
                                      (i == R.def ? BS_DEFCOMMANDLINK : BS_COMMANDLINK),
                                  pad, by, W - 2 * pad, btnH, R.save, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PRESET0 + i)),
@@ -420,10 +461,37 @@ void OpenSaveWindow() {
     SetForegroundWindow(R.save);
     SetFocus(d);
 
-    // All three GIFs are made at once, so each button can show its real size.
+    // All three are made at once, so each button can show its real size.
     R.cancelEncode = false;
     const std::wstring file = rec.file;
     HWND notify = R.save;
+    if (rec.video) {
+        for (int i = 0; i < kVideoPresetCount; ++i) {
+            R.enc[i] = {};
+            if (!kVideoPresets[i].quality) {  // the recording as it is
+                R.enc[i].path = file;
+                R.enc[i].size = FileSize(file);
+                R.enc[i].ok = R.enc[i].done = true;
+                UpdateButton(i);
+                continue;
+            }
+            R.enc[i].path = file.substr(0, file.size() - 4) + L"-" + kVideoPresets[i].key + L".mp4";
+            R.encoders[i] = std::thread([i, file, notify] {
+                Encoded& e = R.enc[i];
+                const ULONGLONG t0 = GetTickCount64();
+                std::wstring err;
+                e.ok = Mp4_Shrink(file, kVideoPresets[i], e.path, R.cancelEncode, err);
+                e.ms = GetTickCount64() - t0;
+                e.size = e.ok ? FileSize(e.path) : 0;
+                if (!R.cancelEncode)
+                    Log(L"Video %s: %s in %llu ms%s%s", kVideoPresets[i].key, SizeText(e.size).c_str(), e.ms,
+                        e.ok ? L"" : L", failed: ", err.c_str());
+                e.done = true;
+                PostMessageW(notify, WM_GIF_ENCODED, i, 0);
+            });
+        }
+        return;
+    }
     for (int i = 0; i < kGifPresetCount; ++i) {
         R.enc[i] = {};
         R.enc[i].path = file.substr(0, file.size() - 4) + L"-" + kGifPresets[i].key + L".gif";
@@ -458,7 +526,7 @@ void CloseRecordingWindows() {
     R.barFont = nullptr;
 }
 
-// Video: straight to the screenshots folder, copied as a file, with a tray notice.
+// Video: the save window offers the recording as it is plus two smaller copies.
 void VideoDone() {
     Recording& rec = *R.rec;
     if (rec.cancelled || (rec.error.empty() && rec.durationMs < 100)) {
@@ -474,27 +542,9 @@ void VideoDone() {
         R.rec.reset();
         return;
     }
-    const std::wstring path = Output_NewPath(rec.meta, L".mp4");
-    if (!MoveFileExW(rec.file.c_str(), path.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING)) {
-        Log(L"Video could not be saved to %s", path.c_str());
-        Tray_Notify(L"Video not saved", L"It could not be saved to\n" + path);
-        DeleteFileW(rec.file.c_str());
-        R.rec.reset();
-        return;
-    }
-    uint64_t size = 0;
-    WIN32_FILE_ATTRIBUTE_DATA fa;
-    if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fa))
-        size = (static_cast<uint64_t>(fa.nFileSizeHigh) << 32) | fa.nFileSizeLow;
-    CopyFileToClipboard(path);
-    const unsigned secs = (rec.durationMs + 500) / 1000;
-    wchar_t len[32];
-    swprintf_s(len, L"%u:%02u", secs / 60, secs % 60);
-    Log(L"Video saved: %u ms, %llu frames (%llu skipped), %s, sound: %s -> %s", rec.durationMs, rec.frames, rec.dropped,
-        SizeText(size).c_str(), rec.soundInfo.empty() ? L"off" : rec.soundInfo.c_str(), path.c_str());
-    Tray_Notify(L"Video saved", path.substr(path.find_last_of(L'\\') + 1) + L"  (" + len + L", " + SizeText(size) +
-                                    L")\nCopied: paste it into a chat or a folder.");
-    R.rec.reset();
+    Log(L"Video recording stopped: %u ms, %llu frames (%llu skipped), %s, sound: %s", rec.durationMs, rec.frames,
+        rec.dropped, SizeText(FileSize(rec.file)).c_str(), rec.soundInfo.empty() ? L"off" : rec.soundInfo.c_str());
+    OpenSaveWindow();
 }
 
 void RecordingDone(bool full) {
@@ -733,6 +783,17 @@ int Recorder_BenchVideo(const RECT& area, int ms, const std::wstring& outPath) {
         ok ? SizeText(size).c_str() : L"FAILED", rec->error.empty() ? L"" : L": ", rec->error.c_str());
     Log(L"Video bench sound: %s", rec->soundInfo.empty() ? L"off" : rec->soundInfo.c_str());
     DeleteFileW(rec->file.c_str());
+    return ok ? 0 : 3;
+}
+
+int Recorder_BenchShrink(const std::wstring& in, const std::wstring& out, const VideoPreset& p) {
+    std::atomic<bool> cancel{false};
+    std::wstring err;
+    const double t0 = NowMs();
+    const bool ok = Mp4_Shrink(in, p, out, cancel, err);
+    const double ms = NowMs() - t0;
+    Log(L"Video shrink: %d%% size, quality %d, sound %d kbps: %s in %.0f ms%s%s", p.percent, p.quality, p.audioKbps,
+        ok ? SizeText(FileSize(out)).c_str() : L"FAILED", ms, ok ? L"" : L": ", err.c_str());
     return ok ? 0 : 3;
 }
 

@@ -148,6 +148,7 @@ void LoadSettings() {
     s.hkGif = ReadStr(L"Hotkeys", L"RecordGif", L"Ctrl+Shift+PrintScreen");
     s.hkVideo = ReadStr(L"Hotkeys", L"RecordVideo", L"Shift+PrintScreen");
     s.gifPreset = Lower(Trim(ReadStr(L"Gif", L"Preset", L"balanced")));
+    s.videoPreset = Lower(Trim(ReadStr(L"Video", L"Preset", L"balanced")));
     s.colorFormat = Lower(Trim(ReadStr(L"ColorPicker", L"CopyFormat", L"gray")));
     {
         bool known = false;
