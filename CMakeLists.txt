@@ -21,6 +21,7 @@ add_executable(Canivete WIN32
     src/recorder.cpp
     src/alpha.cpp
     src/video.cpp
+    src/audio.cpp
     res/canivete.rc
     res/app.manifest
 )

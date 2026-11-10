@@ -3,6 +3,7 @@
 // The graphics card's encoder is used when there is one (NVIDIA, AMD, Intel all ship one as a Media
 // Foundation transform); otherwise Windows' own software encoder. Quality-based rate control is asked
 // for first, so still screens cost almost nothing; encoders that refuse it use a bitrate scaled to size.
+// Sound (audio.cpp) goes in as a second stream: 48 kHz stereo 16-bit PCM, encoded to AAC 192 kbps.
 #include "app.h"
 
 #include <codecapi.h>
@@ -14,6 +15,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <mutex>
 
 using Microsoft::WRL::ComPtr;
 
@@ -87,7 +89,33 @@ struct Mp4Writer::Impl {
     LONGLONG last = -1;
     bool hw = true;
     bool mfStarted = false;
+    bool audio = false;  // has a sound stream
+    DWORD audioStream = 0;
+    LONGLONG audioLast = -1;
+    std::mutex m;  // video and sound are written from different threads
 };
+
+static bool AddAudio(Mp4Writer::Impl& p) {
+    ComPtr<IMFMediaType> out, in;
+    MFCreateMediaType(&out);
+    out->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+    out->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
+    out->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+    out->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000);
+    out->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
+    out->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 24000);  // 192 kbps
+    out->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29);
+    if (FAILED(p.w->AddStream(out.Get(), &p.audioStream))) return false;
+    MFCreateMediaType(&in);
+    in->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+    in->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+    in->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+    in->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000);
+    in->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
+    in->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 4);
+    in->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 48000 * 4);
+    return SUCCEEDED(p.w->SetInputMediaType(p.audioStream, in.Get(), nullptr));
+}
 
 Mp4Writer::Mp4Writer() : p_(std::make_unique<Impl>()) {}
 
@@ -103,6 +131,8 @@ static bool TryOpen(Mp4Writer::Impl& p, bool hw, bool quality, std::wstring& inf
     MFCreateAttributes(&a, 4);
     a->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, hw ? TRUE : FALSE);
     a->SetGUID(MF_TRANSCODE_CONTAINERTYPE, MFTranscodeContainerType_MPEG4);
+    // Never make one stream wait for the other (they come from two threads); the encoders keep up.
+    a->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
     // (MF_MPEG4SINK_MOOV_BEFORE_MDAT is left out on purpose: Finalize fails with access denied, and with
     // a read-write byte stream the file comes out unplayable.)
     if (FAILED(MFCreateSinkWriterFromURL(p.path.c_str(), nullptr, a.Get(), &p.w))) return false;
@@ -138,6 +168,7 @@ static bool TryOpen(Mp4Writer::Impl& p, bool hw, bool quality, std::wstring& inf
         enc->SetUINT32(CODECAPI_AVEncCommonQuality, 70);
     }
     if (FAILED(p.w->SetInputMediaType(p.stream, in.Get(), enc.Get()))) return false;
+    if (p.audio && !AddAudio(p)) return false;
     if (FAILED(p.w->BeginWriting())) return false;
 
     std::wstring mode = L"bitrate " + std::to_wstring(Bitrate(p.W, p.H, p.fps) / 1000) + L" kbps";
@@ -150,12 +181,12 @@ static bool TryOpen(Mp4Writer::Impl& p, bool hw, bool quality, std::wstring& inf
             mode = L"quality 70";
         VariantClear(&v);
     }
-    info = EncoderName(p.w.Get(), p.stream) + L", " + mode;
+    info = EncoderName(p.w.Get(), p.stream) + L", " + mode + (p.audio ? L", AAC sound" : L"");
     p.hw = hw;
     return true;
 }
 
-bool Mp4Writer::Open(const std::wstring& path, int w, int h, int fps, std::wstring& info) {
+bool Mp4Writer::Open(const std::wstring& path, int w, int h, int fps, bool audio, std::wstring& info) {
     Impl& p = *p_;
     if (w < 2 || h < 2 || (w & 1) || (h & 1)) return false;
     if (!p.mfStarted) {
@@ -167,9 +198,14 @@ bool Mp4Writer::Open(const std::wstring& path, int w, int h, int fps, std::wstri
     p.H = h;
     p.fps = fps;
     // Graphics-card encoder first, then Windows' software one; quality mode first, then a bitrate.
-    for (bool hw : {true, false})
-        for (bool q : {true, false})
-            if (TryOpen(p, hw, q, info)) return true;
+    // If nothing works with sound, a video without it is still better than none.
+    for (bool a : {audio, false}) {
+        p.audio = a;
+        for (bool hw : {true, false})
+            for (bool q : {true, false})
+                if (TryOpen(p, hw, q, info)) return true;
+        if (!audio) break;
+    }
     p.w.Reset();
     DeleteFileW(path.c_str());
     return false;
@@ -191,6 +227,8 @@ bool Mp4Writer::Frame(LONGLONG time100ns, const uint32_t* px) {
     s->AddBuffer(buf.Get());
     s->SetSampleTime(time100ns);
     s->SetSampleDuration(10000000LL / p.fps);
+    std::lock_guard<std::mutex> lock(p.m);
+    if (!p.w) return false;
     HRESULT hr = p.w->WriteSample(p.stream, s.Get());
     if (FAILED(hr) && p.hw && p.last < 0) {
         // Some graphics-card encoders only fail on the first frame: start over with the software one.
@@ -205,8 +243,34 @@ bool Mp4Writer::Frame(LONGLONG time100ns, const uint32_t* px) {
     return true;
 }
 
+bool Mp4Writer::HasAudio() const { return p_->w && p_->audio; }
+
+bool Mp4Writer::Audio(LONGLONG time100ns, const int16_t* frames, UINT32 count) {
+    Impl& p = *p_;
+    if (!p.audio || !count || time100ns < p.audioLast) return false;
+    const DWORD bytes = count * 4;
+    ComPtr<IMFMediaBuffer> buf;
+    if (FAILED(MFCreateMemoryBuffer(bytes, &buf))) return false;
+    BYTE* d = nullptr;
+    if (FAILED(buf->Lock(&d, nullptr, nullptr))) return false;
+    memcpy(d, frames, bytes);
+    buf->Unlock();
+    buf->SetCurrentLength(bytes);
+    ComPtr<IMFSample> s;
+    MFCreateSample(&s);
+    s->AddBuffer(buf.Get());
+    s->SetSampleTime(time100ns);
+    s->SetSampleDuration(static_cast<LONGLONG>(count) * 10000000LL / 48000);
+    std::lock_guard<std::mutex> lock(p.m);
+    if (!p.w) return false;
+    if (FAILED(p.w->WriteSample(p.audioStream, s.Get()))) return false;
+    p.audioLast = time100ns;
+    return true;
+}
+
 bool Mp4Writer::Close() {
     Impl& p = *p_;
+    std::lock_guard<std::mutex> lock(p.m);
     if (!p.w) return false;
     if (p.last < 0) {
         p.w.Reset();

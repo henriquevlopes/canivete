@@ -48,6 +48,7 @@ struct Recording {
     bool video = false;
     Mp4Writer mp4;
     std::wstring error;  // video: what went wrong
+    std::wstring soundInfo;  // video: what sound was recorded, for the log
     uint64_t frames = 0, dropped = 0;
     std::thread thread;
     std::atomic<bool> stop{false};
@@ -174,13 +175,22 @@ void CaptureLoop(Recording* rec, HWND notify, int delayMs) {
     const double period = rec->video ? 1000.0 / kVideoFps : kFrameMs;
     Dib d;
     bool full = false;
+    std::unique_ptr<AudioCapture> audio;
+    std::thread audioThread;
+    std::atomic<bool> audioStop{false};
     if (rec->video) {
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        if (g_settings.videoSound || g_settings.videoMic) {
+            audio = std::make_unique<AudioCapture>();
+            if (!audio->Open(g_settings.videoSound, g_settings.videoMic, rec->soundInfo)) audio.reset();
+            Log(L"Video sound: %s", rec->soundInfo.c_str());
+        }
         std::wstring info;
-        if (rec->mp4.Open(rec->file, r.right - r.left, r.bottom - r.top, kVideoFps, info))
+        if (rec->mp4.Open(rec->file, r.right - r.left, r.bottom - r.top, kVideoFps, audio != nullptr, info))
             Log(L"Video encoder: %s", info.c_str());
         else
             rec->error = L"Windows couldn't start a video encoder for this area.";
+        if (!rec->mp4.HasAudio()) audio.reset();
     }
     if (rec->error.empty() && d.Create(r.right - r.left, r.bottom - r.top)) {
         HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
@@ -196,6 +206,13 @@ void CaptureLoop(Recording* rec, HWND notify, int delayMs) {
         HDC screen = GetDC(nullptr);
         rec->start = NowMs();
         rec->started = true;
+        if (audio)
+            audioThread = std::thread([&audio, &audioStop, rec] {
+                CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+                audio->Run(std::llround(rec->start * 10000), audioStop,
+                           [rec](LONGLONG t, const int16_t* f, UINT32 n) { rec->mp4.Audio(t, f, n); });
+                CoUninitialize();
+            });
         for (uint64_t k = 0; !rec->stop; ++k) {
             const double now = NowMs() - rec->start;
             const double target = static_cast<double>(k) * period;
@@ -232,6 +249,14 @@ void CaptureLoop(Recording* rec, HWND notify, int delayMs) {
         if (timer) CloseHandle(timer);
     }
     rec->durationMs = rec->started ? static_cast<uint32_t>(NowMs() - rec->start) : 0;
+    audioStop = true;
+    if (audioThread.joinable()) audioThread.join();
+    if (audio) {
+        wchar_t s[128];
+        swprintf_s(s, L", sound %.2f s (%llu ms silence added, %llu ms cut)", audio->Frames() / 48000.0,
+                   audio->Padded() / 48, audio->Cut() / 48);
+        rec->soundInfo += s;
+    }
     if (rec->video) {
         if (!rec->mp4.Close() && rec->frames > 0 && rec->error.empty()) rec->error = L"The video file couldn't be finished.";
         CoUninitialize();
@@ -465,8 +490,8 @@ void VideoDone() {
     const unsigned secs = (rec.durationMs + 500) / 1000;
     wchar_t len[32];
     swprintf_s(len, L"%u:%02u", secs / 60, secs % 60);
-    Log(L"Video saved: %u ms, %llu frames (%llu skipped), %s -> %s", rec.durationMs, rec.frames, rec.dropped,
-        SizeText(size).c_str(), path.c_str());
+    Log(L"Video saved: %u ms, %llu frames (%llu skipped), %s, sound: %s -> %s", rec.durationMs, rec.frames, rec.dropped,
+        SizeText(size).c_str(), rec.soundInfo.empty() ? L"off" : rec.soundInfo.c_str(), path.c_str());
     Tray_Notify(L"Video saved", path.substr(path.find_last_of(L'\\') + 1) + L"  (" + len + L", " + SizeText(size) +
                                     L")\nCopied: paste it into a chat or a folder.");
     R.rec.reset();
@@ -706,6 +731,7 @@ int Recorder_BenchVideo(const RECT& area, int ms, const std::wstring& outPath) {
     Log(L"Video bench: %dx%d, %u ms recorded (%.0f ms with setup), %llu frames, %llu skipped, CPU %.0f ms (%.0f%% of one core), %s%s%s",
         r.right - r.left, r.bottom - r.top, rec->durationMs, total, rec->frames, rec->dropped, cpuMs, 100 * cpuMs / total,
         ok ? SizeText(size).c_str() : L"FAILED", rec->error.empty() ? L"" : L": ", rec->error.c_str());
+    Log(L"Video bench sound: %s", rec->soundInfo.empty() ? L"off" : rec->soundInfo.c_str());
     DeleteFileW(rec->file.c_str());
     return ok ? 0 : 3;
 }

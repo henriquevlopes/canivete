@@ -53,6 +53,8 @@ enum : int {
     IDC_MAGNIFIER,
     IDC_EDITOR,
     IDC_AUTOSTART,
+    IDC_VSOUND,
+    IDC_VMIC,
     IDC_COLORFMT,
     IDC_APPLY,
 };
@@ -203,6 +205,13 @@ void Build() {
     HWND cf = Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, IDC_COLORFMT, kCX, y, 260, 240);
     for (const ColorFormatDef& f : kColorFormats) SendMessageW(cf, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(f.label));
     y += 38;
+
+    Heading(L"Video recording", y);
+    y += 28;
+    Check(IDC_VSOUND, L"Record the computer's sound", y);
+    y += 26;
+    Check(IDC_VMIC, L"Record the microphone", y);
+    y += 36;
 
     Heading(L"Windows", y);
     y += 28;
@@ -467,6 +476,8 @@ void Populate() {
     SetCheck(IDC_CURSOR, s.includeCursor);
     SetCheck(IDC_MAGNIFIER, s.showMagnifier);
     SetCheck(IDC_EDITOR, s.openEditor);
+    SetCheck(IDC_VSOUND, s.videoSound);
+    SetCheck(IDC_VMIC, s.videoMic);
     SetCheck(IDC_AUTOSTART, AutostartEnabled());
     CheckHotkeys();
     UpdateEnable();
@@ -491,6 +502,8 @@ void Apply() {
     s.includeCursor = Checked(IDC_CURSOR);
     s.showMagnifier = Checked(IDC_MAGNIFIER);
     s.openEditor = Checked(IDC_EDITOR);
+    s.videoSound = Checked(IDC_VSOUND);
+    s.videoMic = Checked(IDC_VMIC);
     const LRESULT cf = SendMessageW(Item(IDC_COLORFMT), CB_GETCURSEL, 0, 0);
     if (cf >= 0 && cf < static_cast<LRESULT>(std::size(kColorFormats))) s.colorFormat = kColorFormats[cf].key;
     SaveSettings(s);

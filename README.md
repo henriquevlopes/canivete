@@ -15,7 +15,7 @@ Plan and research notes: [PLAN.md](PLAN.md).
 | 2b | Screenshot editor (shapes, text, numbers) | done |
 | 3 | Image resizer | done |
 | 4 | Renamer | done |
-| 5 | MP4 recording | video done, sound later |
+| 5 | MP4 recording | done (video + sound) |
 | 6 | GIF recording | done |
 
 ## Use
@@ -38,7 +38,9 @@ The encoder builds one palette for the whole GIF and writes only the changed par
 
 Video recording: the same border and bar (the dot is grey with "…" for the moment the video
 encoder takes to start, then red with the time). 30 frames a second, full size (an odd width or
-height loses one pixel, as video needs even sizes), mouse pointer included, no sound yet. Stop saves
+height loses one pixel, as video needs even sizes), mouse pointer included. Sound: what the computer plays is
+recorded by default, the microphone only if switched on (Settings → Video recording); both are
+mixed into one track (AAC, 48 kHz stereo). Stop saves
 the MP4 straight to the screenshots folder and copies it as a file, ready to paste; Cancel throws it
 away. H.264 on the graphics card's own encoder when there is one (NVIDIA, AMD, Intel), otherwise
 Windows' software encoder; quality-based, so a still screen costs almost nothing (10 s of a
@@ -135,7 +137,8 @@ files to the running one, so Explorer's one-copy-per-file launch ends in one win
 `Canivete.exe --do <action> a.jpg b.png` runs a right-click menu action (`small medium large half custom
 jpg png tif bmp right left 180 fliph flipv copy`).
 `Canivete.exe --grab out.png` (or `.jpg`) grabs all monitors to a file and exits (self-test).
-`Canivete.exe --mp4-bench x y w h ms out.mp4` records that area with no window and logs frames, CPU and size (self-test).
+`Canivete.exe --mp4-bench x y w h ms out.mp4` records that area with no window and logs frames, CPU, size and sound (self-test).
+In test mode, `CANIVETE_AUDIO_FAKE=1` records a quiet 440 Hz tone instead of real sound.
 
 ## Build and install
 
@@ -160,6 +163,7 @@ Builds Release, installs to `%LOCALAPPDATA%\Programs\Canivete\Canivete.exe` and 
 - `src/renamer.cpp` — renamer window, live preview, regex/counter/date tokens, IFileOperation rename with undo
 - `src/gif.cpp` — GIF encoder: recording file, palette (exact colors or Wu + k-means), LZW, changed-area frames, presets
 - `src/recorder.cpp` — recording border and bar, capture thread (GIF 25 fps, video 30 fps), Save GIF window, video save
-- `src/video.cpp` — MP4 writer: BGRX to NV12 (BT.709), Media Foundation H.264 sink writer, hardware encoder with software fallback
+- `src/video.cpp` — MP4 writer: BGRX to NV12 (BT.709), Media Foundation H.264 sink writer, hardware encoder with software fallback, AAC sound stream
+- `src/audio.cpp` — video sound: WASAPI loopback of the default output + optional microphone, mixed, timed by capture clock
 - `src/alpha.cpp` — Make alpha window: freehand mask, detail/background picks, threshold engine, square power-of-two output
 - `src/shell.cpp` — Explorer right-click Canivete submenu (image actions, Rename) and Send to shortcuts

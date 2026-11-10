@@ -101,7 +101,13 @@ Same pipeline ShareX 21 now uses by default, refined with OBS details:
   H.264 Encoder MFT here), quality mode 70 accepted, bitrate fallback ~0.08 bit/pixel, software
   encoder fallback. 2560×1440: 30 fps steady, ~50% of one core, 10 s of desktop ≈ 750 KB. The
   "moov first" (fast start) sink option fails (access denied / broken file), so it is off.
-  Still to do: sound (WASAPI loopback + mic, AAC), and WGC + GPU colour conversion if CPU use matters.
+  Sound built (2026-11-10): WASAPI shared mode asking Windows for 48 kHz stereo float (AUTOCONVERTPCM),
+  loopback of the default output plus a silent render stream so loopback keeps flowing (OBS trick),
+  optional default microphone mixed in; packets placed by their capture time (gaps filled with
+  silence, overlaps cut, 50 ms slack); AAC 192 kbps as a second sink-writer stream (throttling off,
+  writes behind a mutex). If the sound stream can't be added, the video is recorded without it.
+  Settings: computer sound on, microphone off by default. Sound and picture end within ~20 ms.
+  Still to do: WGC + GPU colour conversion if CPU use matters.
   Built (2026-11-10): records changed 32×32 tiles at 25 fps, then makes three GIFs at once
   (Smallest / Balanced / Smoothest) so the save window shows each real size. Own Wu + k-means
   palette and ordered dither instead of a ShareX port.
@@ -151,7 +157,7 @@ PowerToys' feature set, done directly with WIC:
 | 2 | Color picker | Small, reuses overlay + magnifier |
 | 3 | Image resizer | Independent, quick win |
 | 4 | Renamer | Independent, biggest UI |
-| 5 | MP4 recording (video first, then sound) | Hardest part; built on a proven base |
+| 5 | MP4 recording (video first, then sound) | Done 2026-11-10 |
 | 6 | GIF recording | Reuses phase 5 capture |
 | 7 | Polish: settings window, icons, mixed-DPI + multi-monitor checks, size/RAM measurement | |
 

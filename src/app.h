@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -39,6 +40,8 @@ struct Settings {
     bool showNotification = true;
     bool showMagnifier = true;
     bool openEditor = false;  // open the editor after each capture instead of the preview
+    bool videoSound = true;   // videos: record what the computer plays
+    bool videoMic = false;    // videos: record the microphone
     std::wstring gifPreset;   // last GIF choice: a kGifPresets key
 };
 
@@ -222,9 +225,31 @@ public:
     struct Impl;
     Mp4Writer();
     ~Mp4Writer();
-    bool Open(const std::wstring& path, int width, int height, int fps, std::wstring& info);  // info: encoder used
+    // audio: add a sound track (fed with Audio). info: the encoder used.
+    bool Open(const std::wstring& path, int width, int height, int fps, bool audio, std::wstring& info);
     bool Frame(LONGLONG time100ns, const uint32_t* px);
+    bool Audio(LONGLONG time100ns, const int16_t* frames, UINT32 count);  // 48 kHz stereo 16-bit
+    bool HasAudio() const;
     bool Close();  // finishes the file
+
+private:
+    std::unique_ptr<Impl> p_;
+};
+
+// ---- audio.cpp -----------------------------------------------------------------------------
+// Sound for videos: computer sound (loopback) and/or the microphone, mixed, 48 kHz stereo 16-bit.
+class AudioCapture {
+public:
+    struct Impl;
+    using Writer = std::function<void(LONGLONG time100ns, const int16_t* frames, UINT32 count)>;
+    AudioCapture();
+    ~AudioCapture();
+    bool Open(bool desktop, bool mic, std::wstring& info);  // false: nothing to record (info says why)
+    // Records until stop, calling write on this thread. start100ns: QPC time (100 ns) of video frame 0.
+    void Run(LONGLONG start100ns, const std::atomic<bool>& stop, const Writer& write);
+    uint64_t Frames() const;
+    uint64_t Padded() const;  // silence added for gaps
+    uint64_t Cut() const;     // overlapping frames dropped
 
 private:
     std::unique_ptr<Impl> p_;
