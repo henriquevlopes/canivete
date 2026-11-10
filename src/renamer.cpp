@@ -49,9 +49,25 @@ enum : int {
     IDC_SUB,
     IDC_LIST,
     IDC_STATUS,
+    IDC_NUMBERS,
 };
 
-enum : UINT { ID_TOKEN0 = 500 };
+enum : UINT { ID_TOKEN0 = 500, ID_NUMBERS0 = 600 };
+
+// "Numbers ▾": ready-made settings for the usual ways to number files ({} = the counter).
+struct NumberRecipe {
+    const wchar_t* label;
+    bool regex;
+    const wchar_t* search;
+    const wchar_t* replace;
+    int selFrom, selTo;  // part of the new text selected afterwards, for typing over (-1 = none)
+};
+const NumberRecipe kNumberRecipes[] = {
+    {L"Number in front\t01 Holiday.jpg", true, L"^", L"{} ", -1, -1},
+    {L"Number at the end\tHoliday 01.jpg", true, L"$", L" {}", -1, -1},
+    {L"New name with a number\tPhoto 01.jpg", false, L"", L"Photo {}", 0, 5},
+    {L"Only numbers\t01.jpg", false, L"", L"{}", -1, -1},
+};
 struct Token {
     const wchar_t* label;
     const wchar_t* text;
@@ -635,8 +651,10 @@ HWND Combo(int id, int x, int y, int w, std::initializer_list<const wchar_t*> it
 void Build() {
     int y = 14;
     Label(L"Search for", y);
-    HWND s = Add(WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, IDC_SEARCH, kCX, y, kM, 24, kStretchW, WS_EX_CLIENTEDGE);
+    HWND s = Add(WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, IDC_SEARCH, kCX, y, kM + 96, 24, kStretchW,
+                 WS_EX_CLIENTEDGE);
     SendMessageW(s, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"empty = the whole name"));
+    Add(WC_BUTTONW, L"Numbers ▾", BS_PUSHBUTTON | WS_TABSTOP, IDC_NUMBERS, kM + 90, y - 1, 90, 26, kRight);
     y += 34;
     Label(L"Replace with", y);
     HWND r = Add(WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, IDC_REPLACE, kCX, y, kM + 96, 24, kStretchW,
@@ -746,6 +764,38 @@ void TokensMenu() {
     HWND e = Ctrl(IDC_REPLACE);
     SetFocus(e);
     SendMessageW(e, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(t.text));
+    Recompute();
+}
+
+void NumbersMenu() {
+    HMENU m = CreatePopupMenu();
+    for (UINT i = 0; i < std::size(kNumberRecipes); ++i) AppendMenuW(m, MF_STRING, ID_NUMBERS0 + i, kNumberRecipes[i].label);
+    RECT r;
+    GetWindowRect(Ctrl(IDC_NUMBERS), &r);
+    const UINT id = TrackPopupMenuEx(m, TPM_RETURNCMD | TPM_RIGHTALIGN | TPM_TOPALIGN, r.right, r.bottom, U.hwnd, nullptr);
+    DestroyMenu(m);
+    if (id < ID_NUMBERS0 || id >= ID_NUMBERS0 + std::size(kNumberRecipes)) return;
+    const NumberRecipe& n = kNumberRecipes[id - ID_NUMBERS0];
+
+    // Enough digits for the list, so names sort right: 01..99, 001..999.
+    const Opts o = ReadOpts();
+    size_t count = 0;
+    for (const Item& it : U.items)
+        if (Included(it, o)) ++count;
+    const int digits = std::max(2, static_cast<int>(std::to_wstring(std::max<size_t>(count, 1)).size()));
+    const std::wstring counter = L"${padding=" + std::to_wstring(digits) + L"}";
+    std::wstring replace = n.replace;
+    replace.replace(replace.find(L"{}"), 2, counter);
+
+    SetWindowTextW(Ctrl(IDC_SEARCH), n.search);
+    SetWindowTextW(Ctrl(IDC_REPLACE), replace.c_str());
+    SetCheck(IDC_REGEX, n.regex);
+    SetCheck(IDC_ALL, false);
+    SendMessageW(Ctrl(IDC_APPLY), CB_SETCURSEL, 0, 0);  // name only: keep the extension
+    HWND e = Ctrl(IDC_REPLACE);
+    SetFocus(e);
+    if (n.selFrom >= 0) SendMessageW(e, EM_SETSEL, n.selFrom, n.selTo);  // "Photo" selected: type your own word
+    else SendMessageW(e, EM_SETSEL, replace.size(), replace.size());
     Recompute();
 }
 
@@ -860,6 +910,9 @@ LRESULT CALLBACK RenamerProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case IDC_TOKENS:
             TokensMenu();
+            break;
+        case IDC_NUMBERS:
+            NumbersMenu();
             break;
         case IDC_SEARCH:
         case IDC_REPLACE:

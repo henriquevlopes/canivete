@@ -77,7 +77,10 @@ match case, change the name, the extension or both, text case (lowercase, UPPERC
 Sentence case), and which items count (files, folders, everything inside the folders). Empty search
 replaces the whole name. Tokens in the new text (the Insert button lists them): `${}` a counter,
 `${padding=3}` 001, `${start=10,increment=10}`, and `$YYYY $MM $DD $hh $mm $ss` from the file's
-modified date; only matched items use up a counter number. Delete removes a row from the list.
+modified date; only matched items use up a counter number. The Numbers button numbers everything
+in one click: in front (`01 Holiday.jpg`), at the end (`Holiday 01.jpg`), a new name with a number
+(`Photo 01.jpg`, with "Photo" selected so you can type over it) or numbers only; it pads to the
+digits needed (01 for up to 99 items, 001 above). Delete removes a row from the list.
 All renames are one Windows operation, so Ctrl+Z in Explorer undoes the whole batch.
 
 Command line: `Canivete.exe --region | --window | --full | --color | --settings` acts in the running copy.
