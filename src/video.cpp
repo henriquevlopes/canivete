@@ -352,8 +352,12 @@ void Mp4_ShrinkSize(int w, int h, int percent, bool busy, int& outW, int& outH) 
     outH = f >= 1.0 ? h : std::max(16, static_cast<int>(std::lround(h * f)) & ~1);
 }
 
+// from / to (100 ns) trim the video: frames are kept by their time (to the frame), sound to the
+// sample, and both move up by `from`, so they stay in step.
 bool Mp4_Shrink(const std::wstring& src, const VideoPreset& vp, const std::wstring& outPath,
-                const std::atomic<bool>& cancel, std::wstring& err) {
+                const std::atomic<bool>& cancel, std::wstring& err, LONGLONG from, LONGLONG to) {
+    from = std::max<LONGLONG>(0, from);
+    if (to <= from) to = from + 1;
     MfScope mf;
     if (!mf.mf) {
         err = L"Media Foundation didn't start";
@@ -452,6 +456,8 @@ bool Mp4_Shrink(const std::wstring& src, const VideoPreset& vp, const std::wstri
         std::vector<uint32_t> frame(static_cast<size_t>(ow) * oh);
         bool vEnd = false, aEnd = !sound, failed = false;
         uint64_t frames = 0;
+        const LONGLONG half = 10000000LL / fps / 2;  // a frame belongs to the time nearest to it
+        const LONGLONG fromS = from * 48000 / 10000000, toS = to == LLONG_MAX ? LLONG_MAX : to * 48000 / 10000000;
         while (!(vEnd && aEnd)) {
             if (cancel) {
                 err = L"cancelled";
@@ -475,6 +481,12 @@ bool Mp4_Shrink(const std::wstring& src, const VideoPreset& vp, const std::wstri
             ComPtr<IMFMediaBuffer> buf;
             if (FAILED(s->GetBufferByIndex(0, &buf))) continue;
             if (idx == vIdx) {
+                if (ts < from - half) continue;
+                if (to != LLONG_MAX && ts >= to - half) {
+                    vEnd = true;  // past the end: the rest is not needed
+                    r->SetStreamSelection(vIdx, FALSE);
+                    continue;
+                }
                 ComPtr<IMF2DBuffer> b2;
                 BYTE* scan0 = nullptr;
                 LONG pitch = 0;
@@ -491,13 +503,22 @@ bool Mp4_Shrink(const std::wstring& src, const VideoPreset& vp, const std::wstri
                     Downscale(scan0, pitch, W, H, frame.data(), ow, oh);
                 if (locked2d) b2->Unlock2D();
                 else buf->Unlock();
-                if (w.Frame(ts, frame.data())) ++frames;
+                if (w.Frame(std::max<LONGLONG>(0, ts - from), frame.data())) ++frames;
             } else if (idx == aIdx && sound) {
                 BYTE* d = nullptr;
                 DWORD len = 0;
                 if (FAILED(buf->Lock(&d, nullptr, &len))) continue;
-                if (len >= 4) w.Audio(ts, reinterpret_cast<const int16_t*>(d), len / 4);
+                // This packet's samples, cut to [from, to) to the sample.
+                const LONGLONG s0 = (ts * 48000 + 5000000) / 10000000, s1 = s0 + len / 4;
+                const LONGLONG k0 = std::max(s0, fromS), k1 = std::min(s1, toS);
+                if (k1 > k0)
+                    w.Audio((k0 - fromS) * 10000000 / 48000, reinterpret_cast<const int16_t*>(d) + (k0 - s0) * 2,
+                            static_cast<UINT32>(k1 - k0));
                 buf->Unlock();
+                if (s0 >= toS) {
+                    aEnd = true;
+                    r->SetStreamSelection(aIdx, FALSE);
+                }
             }
         }
         if (!failed && frames == 0) {

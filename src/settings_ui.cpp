@@ -47,8 +47,8 @@ constexpr int kTop = 98;             // first row under a tab's title and descri
 constexpr int kNavItem = 34;         // height of one tab in the list
 
 enum : int {
-    IDC_HK0 = 200,    // hotkey boxes 200..205
-    IDC_HKST0 = 210,  // their status texts 210..215
+    IDC_HK0 = 200,    // hotkey boxes 200..207
+    IDC_HKST0 = 210,  // their status texts 210..217
     IDC_STATIC = 220,
     IDC_HINT,
     IDC_DESC,
@@ -72,6 +72,10 @@ enum : int {
     IDC_AUTOSTART,
     IDC_VSOUND,
     IDC_VMIC,
+    IDC_GKEYS,
+    IDC_GALLKEYS,
+    IDC_VKEYS,
+    IDC_VALLKEYS,
     IDC_COLORFMT,
     IDC_APPLY,
     IDC_NAV,
@@ -105,9 +109,15 @@ enum : int {
     IDC_OFFNOTE0 = 300,  // "Turned off" notes 300..307, one per Feature
 };
 
-const wchar_t* const kHkNames[kHotkeyCount] = {L"Region screenshot", L"Window screenshot", L"Full screenshot",
-                                                L"Color picker", L"Record GIF", L"Record video"};
-constexpr Feature kHkFeature[kHotkeyCount] = {kFeatShots, kFeatShots, kFeatShots, kFeatColor, kFeatGif, kFeatVideo};
+// The app's hotkeys (always registered), then the two pause keys (taken only while recording).
+constexpr int kHkSlots = kHotkeyCount + 2;
+constexpr int kHkGifPause = kHotkeyCount, kHkVideoPause = kHotkeyCount + 1;
+const wchar_t* const kHkNames[kHkSlots] = {L"Region screenshot", L"Window screenshot", L"Full screenshot",
+                                           L"Color picker",      L"Record GIF",        L"Record video",
+                                           L"Pause / resume",    L"Pause / resume"};
+constexpr Feature kHkFeature[kHkSlots] = {kFeatShots, kFeatShots, kFeatShots, kFeatColor,
+                                          kFeatGif,   kFeatVideo, kFeatGif,   kFeatVideo};
+constexpr bool IsPauseKey(int i) { return i >= kHotkeyCount; }
 
 struct TabDef {
     const wchar_t* name;
@@ -160,8 +170,8 @@ struct UI {
     HWND lastFocus = nullptr;
     bool on[kFeatCount]{};  // feature switches being edited (saved only on OK / Apply)
     // Hotkeys being edited (saved only on OK / Apply).
-    Hotkey hk[kHotkeyCount];
-    bool bad[kHotkeyCount]{};
+    Hotkey hk[kHkSlots];
+    bool bad[kHkSlots]{};
     int capturing = -1;    // which hotkey box has focus, -1 = none
     UINT liveMods = 0;     // Alt / Win held right now (seen by the hook)
     bool accepted = false;  // a key was taken while the current modifiers are held
@@ -336,18 +346,32 @@ void Build() {
     // GIF recording
     y = BeginTab(3);
     HotkeyRow(4, y);
+    y += 30;
+    HotkeyRow(kHkGifPause, y);
     y += 28;
     HotkeyHint(y);
+    y += 42;
+    Check(IDC_GKEYS, L"Show keys and clicks in the recording", y);
+    y += 26;
+    Add(WC_BUTTONW, L"Show every key, not only shortcuts (shows what you type)", BS_AUTOCHECKBOX | WS_TABSTOP,
+        IDC_GALLKEYS, kL + 20, y, kCW - 20, 20);
 
     // Video recording
     y = BeginTab(4);
     HotkeyRow(5, y);
+    y += 30;
+    HotkeyRow(kHkVideoPause, y);
     y += 28;
     HotkeyHint(y);
     y += 42;
     Check(IDC_VSOUND, L"Record the computer's sound", y);
     y += 26;
     Check(IDC_VMIC, L"Record the microphone", y);
+    y += 26;
+    Check(IDC_VKEYS, L"Show keys and clicks in the recording", y);
+    y += 26;
+    Add(WC_BUTTONW, L"Show every key, not only shortcuts (shows what you type)", BS_AUTOCHECKBOX | WS_TABSTOP,
+        IDC_VALLKEYS, kL + 20, y, kCW - 20, 20);
 
     // Uploads
     y = BeginTab(kSettingsTabUploads);
@@ -503,12 +527,14 @@ void ShowHotkey(int i) {
 
 // Status next to each box: off, duplicate, taken by another app.
 void CheckHotkeys() {
-    Hotkey owned[kHotkeyCount];  // what Canivete itself has registered (saved settings)
-    const std::wstring* saved[kHotkeyCount] = {&g_settings.hkRegion, nullptr, &g_settings.hkFull,
-                                               &g_settings.hkColor, &g_settings.hkGif, &g_settings.hkVideo};
-    for (int i = 0; i < kHotkeyCount; ++i)
+    Hotkey owned[kHkSlots];  // what Canivete itself has registered (saved settings)
+    const std::wstring* saved[kHkSlots] = {&g_settings.hkRegion, nullptr,
+                                           &g_settings.hkFull,   &g_settings.hkColor,
+                                           &g_settings.hkGif,    &g_settings.hkVideo,
+                                           &g_settings.hkGifPause, &g_settings.hkVideoPause};
+    for (int i = 0; i < kHkSlots; ++i)
         if (saved[i] && FeatureOn(kHkFeature[i])) ParseHotkey(*saved[i], owned[i]);
-    for (int i = 0; i < kHotkeyCount; ++i) {
+    for (int i = 0; i < kHkSlots; ++i) {
         if (!Shown(i)) continue;
         std::wstring st;
         bool bad = false;
@@ -518,13 +544,14 @@ void CheckHotkeys() {
         } else if (!hk.vk) {
             st = L"Off";
         } else {
-            for (int j = 0; j < kHotkeyCount && !bad; ++j)
-                if (j != i && HotkeyOn(j) && U.hk[j].vk && SameKey(hk, U.hk[j])) {
+            for (int j = 0; j < kHkSlots && !bad; ++j)  // (GIF and video can share one pause key)
+                if (j != i && !(IsPauseKey(i) && IsPauseKey(j)) && HotkeyOn(j) && U.hk[j].vk &&
+                    SameKey(hk, U.hk[j])) {
                     st = std::wstring(L"Same as ") + kHkNames[j];
                     bad = true;
                 }
             const bool mine =
-                std::any_of(owned, owned + kHotkeyCount, [&](const Hotkey& o) { return o.vk && SameKey(hk, o); });
+                std::any_of(owned, owned + kHkSlots, [&](const Hotkey& o) { return o.vk && SameKey(hk, o); });
             if (!bad && !mine) {
                 if (RegisterHotKey(U.hwnd, 900 + i, hk.mods, hk.vk)) {
                     UnregisterHotKey(U.hwnd, 900 + i);
@@ -680,6 +707,8 @@ void UpdateEnable() {
     for (int id : {IDC_FOLDER, IDC_BROWSE, IDC_NAME, IDC_TOKENS, IDC_EXAMPLE, IDC_FORMAT})
         EnableWindow(Item(id), save);
     for (int id : {IDC_QLABEL, IDC_QUALITY, IDC_QSPIN}) EnableWindow(Item(id), save && JpgSelected());
+    EnableWindow(Item(IDC_GALLKEYS), U.on[kFeatGif] && Checked(IDC_GKEYS));
+    EnableWindow(Item(IDC_VALLKEYS), U.on[kFeatVideo] && Checked(IDC_VKEYS));
 }
 
 void Toggle(int f) {
@@ -786,7 +815,9 @@ void Populate() {
     ParseHotkey(s.hkColor, U.hk[3]);
     ParseHotkey(s.hkGif, U.hk[4]);
     ParseHotkey(s.hkVideo, U.hk[5]);
-    for (int i = 0; i < kHotkeyCount; ++i)
+    ParseHotkey(s.hkGifPause, U.hk[kHkGifPause]);
+    ParseHotkey(s.hkVideoPause, U.hk[kHkVideoPause]);
+    for (int i = 0; i < kHkSlots; ++i)
         if (Shown(i)) ShowHotkey(i);
     int cf = 0;
     for (int i = 0; i < static_cast<int>(std::size(kColorFormats)); ++i)
@@ -805,6 +836,10 @@ void Populate() {
     SetCheck(IDC_EDITOR, s.openEditor);
     SetCheck(IDC_VSOUND, s.videoSound);
     SetCheck(IDC_VMIC, s.videoMic);
+    SetCheck(IDC_GKEYS, s.gifShowKeys);
+    SetCheck(IDC_GALLKEYS, s.gifAllKeys);
+    SetCheck(IDC_VKEYS, s.videoShowKeys);
+    SetCheck(IDC_VALLKEYS, s.videoAllKeys);
     SetCheck(IDC_AUTOSTART, AutostartEnabled());
     SetCheck(IDC_CHECKUPD, s.checkUpdates);
     SetCheck(IDC_MAINTDAILY, s.maintDaily);
@@ -833,8 +868,9 @@ void Populate() {
 void Apply() {
     Settings s = g_settings;
     for (int f = 0; f < kFeatCount; ++f) s.features[f] = U.on[f];
-    std::wstring* hks[kHotkeyCount] = {&s.hkRegion, &s.hkWindow, &s.hkFull, &s.hkColor, &s.hkGif, &s.hkVideo};
-    for (int i = 0; i < kHotkeyCount; ++i) *hks[i] = U.hk[i].vk ? HotkeyText(U.hk[i]) : L"None";
+    std::wstring* hks[kHkSlots] = {&s.hkRegion, &s.hkWindow, &s.hkFull,     &s.hkColor,
+                                   &s.hkGif,    &s.hkVideo,  &s.hkGifPause, &s.hkVideoPause};
+    for (int i = 0; i < kHkSlots; ++i) *hks[i] = U.hk[i].vk ? HotkeyText(U.hk[i]) : L"None";
     s.saveToFile = Checked(IDC_SAVE);
     s.folder = Trim(GetText(IDC_FOLDER));
     s.fileName = Trim(GetText(IDC_NAME));
@@ -851,6 +887,10 @@ void Apply() {
     s.openEditor = Checked(IDC_EDITOR);
     s.videoSound = Checked(IDC_VSOUND);
     s.videoMic = Checked(IDC_VMIC);
+    s.gifShowKeys = Checked(IDC_GKEYS);
+    s.gifAllKeys = Checked(IDC_GALLKEYS);
+    s.videoShowKeys = Checked(IDC_VKEYS);
+    s.videoAllKeys = Checked(IDC_VALLKEYS);
     s.checkUpdates = Checked(IDC_CHECKUPD);
     s.maintDaily = Checked(IDC_MAINTDAILY);
     const LRESULT cf = SendMessageW(Item(IDC_COLORFMT), CB_GETCURSEL, 0, 0);
@@ -1142,14 +1182,14 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         HDC dc = reinterpret_cast<HDC>(wp);
         const int id = GetDlgCtrlID(reinterpret_cast<HWND>(lp));
         const Palette& p = Pal();
-        const bool hotkeyBox = id >= IDC_HK0 && id < IDC_HK0 + kHotkeyCount;
+        const bool hotkeyBox = id >= IDC_HK0 && id < IDC_HK0 + kHkSlots;
         COLORREF bg = hotkeyBox ? p.edit : p.window, fg = p.text;
         if (hotkeyBox && U.capturing == id - IDC_HK0) {
             bg = p.focusBg;
         } else if (hotkeyBox && !IsWindowEnabled(reinterpret_cast<HWND>(lp))) {
             bg = p.window;
             fg = p.grey;
-        } else if (id >= IDC_HKST0 && id < IDC_HKST0 + kHotkeyCount) {
+        } else if (id >= IDC_HKST0 && id < IDC_HKST0 + kHkSlots) {
             fg = U.bad[id - IDC_HKST0] ? p.red : p.grey;
         } else if (id == IDC_DRVSTATUS || id == IDC_S3STATUS) {
             fg = (id == IDC_DRVSTATUS ? U.driveBad : U.s3Bad) ? p.red : p.grey;
@@ -1189,7 +1229,7 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_COMMAND: {
         const int id = LOWORD(wp), code = HIWORD(wp);
-        if (id >= IDC_HK0 && id < IDC_HK0 + kHotkeyCount) {
+        if (id >= IDC_HK0 && id < IDC_HK0 + kHkSlots) {
             if (code == EN_SETFOCUS) StartCapture(id - IDC_HK0);
             else if (code == EN_KILLFOCUS) StopCapture();
             return 0;
@@ -1209,6 +1249,8 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (code == LBN_SELCHANGE) ShowTab(static_cast<int>(SendMessageW(U.nav, LB_GETCURSEL, 0, 0)));
             break;
         case IDC_SAVE:
+        case IDC_GKEYS:
+        case IDC_VKEYS:
             UpdateEnable();
             break;
         case IDC_FORMAT:

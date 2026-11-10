@@ -4,6 +4,8 @@
 // While recording, a silent stream plays on the output device: without it, loopback delivers nothing
 // while no app makes a sound (OBS does the same). Each packet carries the time it was captured, so
 // the track stays in step with the video: gaps are filled with silence, overlaps are cut.
+// Pauses: sound captured while paused is dropped and every later packet moves up by the paused time,
+// the same way the recorder moves the picture up, so the two stay in step after resuming.
 #include "app.h"
 
 #include <audioclient.h>
@@ -11,7 +13,9 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
+#include <mutex>
 
 using Microsoft::WRL::ComPtr;
 
@@ -73,7 +77,45 @@ struct AudioCapture::Impl {
     ComPtr<IAudioClient> silence;  // plays nothing on the output, keeps loopback flowing
     bool hasDesk = false, hasMic = false, fake = false;
     uint64_t frames = 0, padded = 0, cut = 0;
+    std::mutex m;
+    std::vector<std::pair<LONGLONG, LONGLONG>> pauses;  // [from, to) in QPC 100 ns; to = LLONG_MAX while paused
+
+    // Recording time of a QPC time: the paused spans before it taken out (inside a pause: its start).
+    LONGLONG Active(LONGLONG t) {
+        std::lock_guard<std::mutex> lock(m);
+        LONGLONG cutOut = 0;
+        for (const auto& [a, b] : pauses) {
+            if (t >= b) cutOut += b - a;
+            else if (t > a) cutOut += t - a;
+        }
+        return t - cutOut;
+    }
+    bool Paused(LONGLONG t) {
+        std::lock_guard<std::mutex> lock(m);
+        for (const auto& [a, b] : pauses)
+            if (t >= a && t < b) return true;
+        return false;
+    }
+    // The other way round (test tone): the QPC time at which recording time t was live.
+    LONGLONG Wall(LONGLONG t) {
+        std::lock_guard<std::mutex> lock(m);
+        LONGLONG shift = 0;
+        for (const auto& [a, b] : pauses)
+            if (b != LLONG_MAX && t + shift >= a) shift += b - a;
+        return t + shift;
+    }
 };
+
+void AudioCapture::Pause(LONGLONG at100) {
+    std::lock_guard<std::mutex> lock(p_->m);
+    if (p_->pauses.empty() || p_->pauses.back().second != LLONG_MAX) p_->pauses.push_back({at100, LLONG_MAX});
+}
+
+void AudioCapture::Resume(LONGLONG at100) {
+    std::lock_guard<std::mutex> lock(p_->m);
+    if (!p_->pauses.empty() && p_->pauses.back().second == LLONG_MAX)
+        p_->pauses.back().second = std::max(at100, p_->pauses.back().first);
+}
 
 AudioCapture::AudioCapture() : p_(std::make_unique<Impl>()) {}
 AudioCapture::~AudioCapture() = default;
@@ -170,9 +212,12 @@ void AudioCapture::Run(LONGLONG start100, const std::atomic<bool>& stop, const W
             push(nullptr, static_cast<UINT32>(upTo - static_cast<LONGLONG>(written)));
         }
     };
-    auto frameAt = [&](LONGLONG t100) { return (t100 - start100) * static_cast<LONGLONG>(kRate) / 10000000LL; };
+    auto frameAt = [&](LONGLONG t100) {
+        return (p.Active(t100) - start100) * static_cast<LONGLONG>(kRate) / 10000000LL;
+    };
     // A packet of the stream that sets the pace (computer sound, or the microphone alone).
     auto master = [&](const float* src, UINT32 n, LONGLONG qpc) {
+        if (p.Paused(qpc)) return;  // captured while paused: left out
         LONGLONG at = frameAt(qpc);
         if (at + n <= 0) return;  // from before the recording started
         if (at > static_cast<LONGLONG>(written) + kSlack) pad(at);  // a gap: fill with silence
@@ -186,7 +231,8 @@ void AudioCapture::Run(LONGLONG start100, const std::atomic<bool>& stop, const W
         }
         if (n) push(src, n);
     };
-    auto micIn = [&](const float* src, UINT32 n, LONGLONG) {
+    auto micIn = [&](const float* src, UINT32 n, LONGLONG qpc) {
+        if (p.Paused(qpc)) return;
         if (src) micFifo.insert(micFifo.end(), src, src + static_cast<size_t>(n) * 2);
         else micFifo.insert(micFifo.end(), static_cast<size_t>(n) * 2, 0.0f);
         if (micFifo.size() > kMicMax * 2) micFifo.erase(micFifo.begin(), micFifo.end() - kMicMax * 2);
@@ -199,13 +245,20 @@ void AudioCapture::Run(LONGLONG start100, const std::atomic<bool>& stop, const W
     double phase = 0;
     while (!stop) {
         Sleep(10);
-        if (p.fake) {  // test mode: a quiet 440 Hz tone, exactly in time
+        if (p.fake) {
+            // Test mode: a quiet 440 Hz tone, exactly in time, with a loud 1 kHz beep for the first
+            // 100 ms of every whole second since the start (real time, pauses included). The test
+            // picture flashes on the same seconds, so the two can be checked to line up.
             const LONGLONG upTo = frameAt(Now100ns());
             if (upTo > static_cast<LONGLONG>(written)) {
                 const UINT32 n = static_cast<UINT32>(upTo - static_cast<LONGLONG>(written));
                 tone.resize(static_cast<size_t>(n) * 2);
-                for (UINT32 i = 0; i < n; ++i, phase += 2 * 3.14159265358979 * 440 / kRate)
-                    tone[2 * i] = tone[2 * i + 1] = static_cast<float>(0.25 * std::sin(phase));
+                for (UINT32 i = 0; i < n; ++i) {
+                    const LONGLONG t = start100 + static_cast<LONGLONG>((written + i) * 10000000ULL / kRate);
+                    const bool beep = (p.Wall(t) - start100) % 10000000LL < 1000000LL;
+                    phase += 2 * 3.14159265358979 * (beep ? 1000 : 440) / kRate;
+                    tone[2 * i] = tone[2 * i + 1] = static_cast<float>((beep ? 0.6 : 0.1) * std::sin(phase));
+                }
                 push(tone.data(), n);
             }
             continue;

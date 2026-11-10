@@ -32,6 +32,9 @@ const wchar_t kDefaultIni[] =
     L"FullScreenshot=PrintScreen\r\n"
     L"RecordGif=Ctrl+Shift+PrintScreen\r\n"
     L"RecordVideo=Shift+PrintScreen\r\n"
+    L"; Pause / resume a recording (only taken while recording)\r\n"
+    L"PauseGif=Ctrl+Alt+PrintScreen\r\n"
+    L"PauseVideo=Ctrl+Alt+PrintScreen\r\n"
     L"\r\n"
     L"[Screenshot]\r\n"
     L"; Folder: empty = your Windows Screenshots folder\r\n"
@@ -158,6 +161,8 @@ void LoadSettings() {
     s.hkColor = ReadStr(L"Hotkeys", L"ColorPicker", L"Win+C");
     s.hkGif = ReadStr(L"Hotkeys", L"RecordGif", L"Ctrl+Shift+PrintScreen");
     s.hkVideo = ReadStr(L"Hotkeys", L"RecordVideo", L"Shift+PrintScreen");
+    s.hkGifPause = ReadStr(L"Hotkeys", L"PauseGif", L"Ctrl+Alt+PrintScreen");
+    s.hkVideoPause = ReadStr(L"Hotkeys", L"PauseVideo", L"Ctrl+Alt+PrintScreen");
     for (int f = 0; f < kFeatCount; ++f) s.features[f] = ReadBool(L"Features", kFeatureKeys[f], true);
     s.gifPreset = Lower(Trim(ReadStr(L"Gif", L"Preset", L"balanced")));
     s.videoPreset = Lower(Trim(ReadStr(L"Video", L"Preset", L"balanced")));
@@ -179,6 +184,10 @@ void LoadSettings() {
     s.openEditor = ReadBool(L"Screenshot", L"OpenEditor", false);
     s.videoSound = ReadBool(L"Video", L"Sound", true);
     s.videoMic = ReadBool(L"Video", L"Microphone", false);
+    s.gifShowKeys = ReadBool(L"Gif", L"ShowKeys", false);
+    s.gifAllKeys = ReadBool(L"Gif", L"ShowAllKeys", false);
+    s.videoShowKeys = ReadBool(L"Video", L"ShowKeys", false);
+    s.videoAllKeys = ReadBool(L"Video", L"ShowAllKeys", false);
     s.maintDaily = ReadBool(L"Maintenance", L"DailyCheck", true);
     s.checkUpdates = ReadBool(L"General", L"CheckUpdates", true);
     s.uploadService = Lower(Trim(ReadStr(L"Upload", L"Service", L"drive"))) == L"s3" ? L"s3" : L"drive";
@@ -214,6 +223,8 @@ void SaveSettings(const Settings& s) {
     WriteStr(L"Hotkeys", L"ColorPicker", s.hkColor);
     WriteStr(L"Hotkeys", L"RecordGif", s.hkGif);
     WriteStr(L"Hotkeys", L"RecordVideo", s.hkVideo);
+    WriteStr(L"Hotkeys", L"PauseGif", s.hkGifPause);
+    WriteStr(L"Hotkeys", L"PauseVideo", s.hkVideoPause);
     WriteStr(L"ColorPicker", L"CopyFormat", s.colorFormat);
     WriteStr(L"Screenshot", L"Folder", s.folder);
     WriteStr(L"Screenshot", L"FileName", s.fileName);
@@ -228,6 +239,10 @@ void SaveSettings(const Settings& s) {
     WriteBool(L"Screenshot", L"OpenEditor", s.openEditor);
     WriteBool(L"Video", L"Sound", s.videoSound);
     WriteBool(L"Video", L"Microphone", s.videoMic);
+    WriteBool(L"Gif", L"ShowKeys", s.gifShowKeys);
+    WriteBool(L"Gif", L"ShowAllKeys", s.gifAllKeys);
+    WriteBool(L"Video", L"ShowKeys", s.videoShowKeys);
+    WriteBool(L"Video", L"ShowAllKeys", s.videoAllKeys);
     WriteBool(L"Maintenance", L"DailyCheck", s.maintDaily);
     WriteBool(L"General", L"CheckUpdates", s.checkUpdates);
     WriteStr(L"Upload", L"Service", s.uploadService);

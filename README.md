@@ -30,6 +30,7 @@ Plan and research notes: [PLAN.md](PLAN.md).
 | Win+C | Color picker: the screen freezes, a magnifier follows the mouse. Click, Enter or Space copies the color; Esc or right-click cancels; arrows nudge |
 | Ctrl+Shift+PrtSc | Record a GIF: pick an area like a region screenshot; press again (or Stop) to finish |
 | Shift+PrtSc | Record a video (MP4): pick an area the same way; press again (or Stop) to finish |
+| Ctrl+Alt+PrtSc | Pause / resume the GIF or video being recorded (set separately for GIF and video in Settings) |
 
 GIF recording: a red border marks the area and a small bar shows the time with Stop and Cancel
 (neither shows up in the GIF). Recording runs at 25 frames a second and full size; only the parts
@@ -38,6 +39,23 @@ real file size: **Smallest file** (10 fps, 64 colors), **Balanced** (15 fps, 256
 **Smoothest** (25 fps, 256 colors, smooth gradients). Click one: it goes to the screenshots folder
 and is copied as a file, ready to paste. The last choice is the default next time (Enter takes it).
 The encoder builds one palette for the whole GIF and writes only the changed part of each frame.
+
+Pause: the bar's Pause button (or the pause hotkey) stops the clock; the bar says "Paused" and
+Resume carries on. The paused time is simply left out of the GIF or video, and the sound stays in
+step with the picture.
+
+Trim: both save windows show a timeline under the choices, with a preview of the frame at the handle
+and a strip of small frames. Drag the start and end handles (or click one and use the arrow keys:
+one frame per press, Shift for one second, Home/End, Space switches handle). When you let go, the
+three sizes are worked out again for the trimmed part. Video cuts land on the exact frame with the
+sound cut to match; a trimmed "Best quality" is made again at high quality instead of copied.
+
+Show keys and clicks (Settings → GIF recording / Video recording, off by default; the bar's Keys box
+turns it on or off while recording): clicks show as a ring where you clicked (amber for left, a blue
+double ring for right) and keys as small pills at the bottom, like "Ctrl+B", with "×3" for repeats,
+fading out after about 1.5 s. They are drawn into the frames themselves. By default only shortcuts
+(with Ctrl, Alt or Win) and special keys (Enter, Esc, Tab, arrows, F-keys…) show, never letters you
+type; "Show every key" shows everything, typed text included.
 
 Video recording: the same border and bar (the dot is grey with "…" for the moment the video
 encoder takes to start, then red with the time). 30 frames a second, full size (an odd width or
@@ -266,7 +284,11 @@ jpg png tif bmp right left 180 fliph flipv nobg copy`).
 `Canivete.exe --grab out.png` (or `.jpg`) grabs all monitors to a file and exits (self-test).
 `Canivete.exe --mp4-bench x y w h ms out.mp4` records that area with no window and logs frames, CPU, size and sound (self-test).
 `Canivete.exe --mp4-shrink in.mp4 out.mp4 percent quality kbps` makes one smaller copy and logs its size and time (self-test).
-In test mode, `CANIVETE_AUDIO_FAKE=1` records a quiet 440 Hz tone instead of real sound.
+In test mode, `CANIVETE_AUDIO_FAKE=1` records a quiet 440 Hz tone instead of real sound, with a loud beep for
+the first 100 ms of every second (the fake picture's corner flashes white at the same moments, to check sync).
+`tools\test_record.ps1` (run through `tools\hidden_test.ps1`; needs ffmpeg, Python with numpy and Pillow) tests
+pause, trim and keys/clicks: test copies take `CANIVETE_REC_PAUSE=at,for` (ms), `CANIVETE_REC_TRIM=from,to` (ms)
+and `CANIVETE_REC_INPUT=ms:L:x,y;ms:K:Ctrl+B` (made-up clicks and keys); `tools\check_record.py` measures the results.
 
 ## Build and install
 
@@ -299,7 +321,9 @@ and publishes it with its SHA256 on `henriquevlopes/canivete-releases`; running 
 - `src/resizer.cpp` — image resizer window, WIC resize engine on worker threads, right-click quick actions (convert, rotate, copy)
 - `src/renamer.cpp` — renamer window, live preview, regex/counter/date tokens, IFileOperation rename with undo
 - `src/gif.cpp` — GIF encoder: recording file, palette (exact colors or Wu + k-means), LZW, changed-area frames, presets
-- `src/recorder.cpp` — recording border and bar, capture thread (GIF 25 fps, video 30 fps), Save GIF window, video save
+- `src/recorder.cpp` — recording border and bar (Pause, Keys), capture thread (GIF 25 fps, video 30 fps), Save GIF window, video save
+- `src/overlay.cpp` — show keys and clicks: low-level keyboard/mouse hooks, which keys may show, GDI+ pills and rings drawn into frames
+- `src/trim.cpp` — the save windows' trim timeline: preview, frame strip, handles (mouse and keys)
 - `src/video.cpp` — MP4 writer: BGRX to NV12 (BT.709), Media Foundation H.264 sink writer, hardware encoder with software fallback, AAC sound stream; the smaller copies offered after recording (decode, shrink, re-encode)
 - `src/audio.cpp` — video sound: WASAPI loopback of the default output + optional microphone, mixed, timed by capture clock
 - `src/alpha.cpp` — Make alpha window: freehand mask, detail/background picks, threshold engine, square power-of-two output

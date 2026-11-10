@@ -8,6 +8,7 @@
 // Encoder: one palette for the whole GIF (Wu's color cube cuts on a 5-bit histogram, refined by
 // k-means on a 6-bit one, or the exact colors when there are few), then per frame only the pixels
 // that really changed are written; everything else is transparent and costs almost nothing.
+// Trimming (from / to): the GIF starts with the whole picture as it was at `from` and ends at `to`.
 #include "app.h"
 
 #include <algorithm>
@@ -47,12 +48,18 @@ struct Reader {
     }
     // Reads the next record into `canvas` (w*h). Calls tile(x, y, w, h) for each tile.
     // Returns false at the end; `end` is true when the end mark was read (time = stop time).
+    // before(time) is called first, with the canvas still as it was; returning false stops there.
     template <class F>
     bool Next(uint32_t& time, bool& end, std::vector<uint32_t>& canvas, F&& tile) {
+        return Next(time, end, canvas, tile, [](uint32_t) { return true; });
+    }
+    template <class F, class B>
+    bool Next(uint32_t& time, bool& end, std::vector<uint32_t>& canvas, F&& tile, B&& before) {
         uint32_t head[2];
         if (fread(head, 4, 2, f) != 2) return false;
         time = head[0];
         end = head[1] == kEndMark;
+        if (!before(time)) return false;
         if (end) return true;
         for (uint32_t i = 0; i < head[1]; ++i) {
             uint16_t r[4];
@@ -521,8 +528,9 @@ GifWriter::~GifWriter() {
 // ---- encoder ---------------------------------------------------------------------------------
 
 bool Gif_Encode(const std::wstring& recording, const GifPreset& p, const std::wstring& outPath,
-                const std::atomic<bool>& cancel, std::wstring& err) {
-    // Pass 1: every color that ever shows, for the palette.
+                const std::atomic<bool>& cancel, std::wstring& err, uint32_t from, uint32_t to) {
+    if (to <= from) to = from + 1;
+    // Pass 1: every color that shows between from and to, for the palette.
     Histogram hist;
     int W = 0, H = 0;
     {
@@ -535,15 +543,27 @@ bool Gif_Encode(const std::wstring& recording, const GifPreset& p, const std::ws
         H = rd.h;
         std::vector<uint32_t> canvas(static_cast<size_t>(W) * H);
         uint32_t t;
-        bool end = false;
-        while (!end && rd.Next(t, end, canvas, [&](int x, int y, int tw, int th) {
-            for (int row = 0; row < th; ++row) {
-                const uint32_t* s = &canvas[static_cast<size_t>(y + row) * W + x];
-                for (int i = 0; i < tw; ++i) hist.Add(s[i]);
-            }
-        })) {
+        bool end = false, inside = false;
+        auto addCanvas = [&] {  // the whole picture as it is at `from`
+            inside = true;
+            for (uint32_t px : canvas) hist.Add(px);
+        };
+        while (!end && rd.Next(
+                           t, end, canvas,
+                           [&](int x, int y, int tw, int th) {
+                               if (!inside) return;
+                               for (int row = 0; row < th; ++row) {
+                                   const uint32_t* s = &canvas[static_cast<size_t>(y + row) * W + x];
+                                   for (int i = 0; i < tw; ++i) hist.Add(s[i]);
+                               }
+                           },
+                           [&](uint32_t time) {
+                               if (!inside && time > from) addCanvas();
+                               return time <= to;
+                           })) {
             if (cancel) return false;
         }
+        if (!inside) addCanvas();
     }
     const int colors = std::max(2, p.colors - 1);  // the last index is "transparent"
     const std::vector<Rgb> pal = BuildPalette(hist, colors);
@@ -677,30 +697,43 @@ bool Gif_Encode(const std::wstring& recording, const GifPreset& p, const std::ws
     const uint32_t interval = 1000 / std::max(1, p.fps);
     const uint32_t slack = std::min<uint32_t>(10, interval / 4);  // capture timer jitter
     uint32_t nextSlot = 0, t = 0, lastT = 0;
-    bool end = false;
-    while (!end && rd.Next(t, end, canvas, [&](int x, int y, int, int) {
-        dirty[static_cast<size_t>(y / kTile) * tilesX + x / kTile] = 1;
-        anyDirty = true;
-    })) {
+    bool end = false, cutOff = false;
+    // The first frame: the whole picture as it is at `from`.
+    auto begin = [&] {
+        haveFirst = true;
+        firstTime = from;
+        std::fill(dirty.begin(), dirty.end(), uint8_t{1});
+        emit(from);
+        lastT = from;
+        nextSlot = from + interval;
+    };
+    while (!end && rd.Next(
+                       t, end, canvas,
+                       [&](int x, int y, int, int) {
+                           dirty[static_cast<size_t>(y / kTile) * tilesX + x / kTile] = 1;
+                           anyDirty = true;
+                       },
+                       [&](uint32_t time) {
+                           if (!haveFirst && time > from) begin();
+                           if (time > to) cutOff = true;
+                           return !cutOff;
+                       })) {
         if (cancel) {
             fclose(out);
             DeleteFileW(outPath.c_str());
             return false;
         }
-        if (end) break;
-        if (!haveFirst) {
-            haveFirst = true;
-            firstTime = t;
-            nextSlot = t;
-        }
+        if (end || !haveFirst) continue;
         lastT = t;
         if (t + slack >= nextSlot) {  // this record's time slot is due: show the screen as it is now
             emit(t);
             while (nextSlot <= t + slack) nextSlot += interval;
         }
     }
+    if (!haveFirst) begin();
     if (anyDirty) emit(lastT);  // the last changes, even when they fell between slots
-    writePending(end ? std::max(t, lastT + 100) : lastT + 100);
+    const uint32_t stopAt = cutOff ? to : end ? std::max(t, lastT + 100) : lastT + 100;
+    writePending(std::max(std::min(stopAt, to), lastT + 20));
     fputc(0x3B, out);
     const bool ok = fclose(out) == 0 && haveFirst;
     if (!ok) {

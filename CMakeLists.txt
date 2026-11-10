@@ -30,6 +30,8 @@ add_executable(Canivete WIN32
     src/theme.cpp
     src/rmbg.cpp
     src/rmbg_model.cpp
+    src/overlay.cpp
+    src/trim.cpp
     res/canivete.rc
     res/app.manifest
 )

@@ -56,6 +56,9 @@ struct Settings {
     bool openEditor = false;  // open the editor after each capture instead of the preview
     bool videoSound = true;   // videos: record what the computer plays
     bool videoMic = false;    // videos: record the microphone
+    std::wstring hkGifPause, hkVideoPause;  // pause / resume while recording (only held while recording)
+    bool gifShowKeys = false, videoShowKeys = false;  // draw keys and clicks into the recording
+    bool gifAllKeys = false, videoAllKeys = false;    // every key, not only shortcuts and special keys
     std::wstring gifPreset;   // last GIF choice: a kGifPresets key
     std::wstring videoPreset; // last video choice: a kVideoPresets key
     bool maintDaily = true;   // Maintenance: check once a day in the background and tell me what needs doing
@@ -304,8 +307,9 @@ private:
     std::vector<uint32_t> prev_;
 };
 
+// fromMs / toMs: only that part of the recording (trim), in recording time.
 bool Gif_Encode(const std::wstring& recording, const GifPreset& p, const std::wstring& outPath,
-                const std::atomic<bool>& cancel, std::wstring& err);
+                const std::atomic<bool>& cancel, std::wstring& err, uint32_t fromMs = 0, uint32_t toMs = UINT32_MAX);
 
 // ---- video.cpp -----------------------------------------------------------------------------
 // MP4 (H.264) writer. Width and height must be even. Frames are BGRX, top-down.
@@ -345,8 +349,9 @@ bool Mp4_IsBusy(uint64_t bytes, uint32_t ms, int w, int h);
 // side, even); calm ones keep their size.
 void Mp4_ShrinkSize(int w, int h, int percent, bool busy, int& outW, int& outH);
 // Re-encodes a recorded MP4 smaller (size and/or quality), sound included. Runs on any thread.
+// from100 / to100: keep only the frames from..to (100 ns units, trim), sound cut to match.
 bool Mp4_Shrink(const std::wstring& src, const VideoPreset& p, const std::wstring& outPath,
-                const std::atomic<bool>& cancel, std::wstring& err);
+                const std::atomic<bool>& cancel, std::wstring& err, LONGLONG from100 = 0, LONGLONG to100 = LLONG_MAX);
 
 // ---- audio.cpp -----------------------------------------------------------------------------
 // Sound for videos: computer sound (loopback) and/or the microphone, mixed, 48 kHz stereo 16-bit.
@@ -359,6 +364,10 @@ public:
     bool Open(bool desktop, bool mic, std::wstring& info);  // false: nothing to record (info says why)
     // Records until stop, calling write on this thread. start100ns: QPC time (100 ns) of video frame 0.
     void Run(LONGLONG start100ns, const std::atomic<bool>& stop, const Writer& write);
+    // Recording paused / resumed at this QPC time (100 ns): sound from the pause is left out and the
+    // rest moves up, so it stays in step with the picture. Called from another thread.
+    void Pause(LONGLONG at100ns);
+    void Resume(LONGLONG at100ns);
     uint64_t Frames() const;
     uint64_t Padded() const;  // silence added for gaps
     uint64_t Cut() const;     // overlapping frames dropped
@@ -377,6 +386,34 @@ void Recorder_Test(const RECT& r, int ms, bool video);  // test mode: record r f
 int Recorder_BenchVideo(const RECT& r, int ms, const std::wstring& outPath);  // headless MP4 test
 int Recorder_BenchShrink(const std::wstring& in, const std::wstring& out, const VideoPreset& p);  // logs size
 int Recorder_Bench(const RECT& r, int ms, const std::wstring& outDir);  // headless: record + all presets
+
+// ---- overlay.cpp ---------------------------------------------------------------------------
+// "Show keys and clicks": key presses (a pill near the bottom) and mouse clicks (a ring) drawn into
+// the recorded frames. Input comes from low-level hooks on the main thread (never in test mode).
+void Overlay_Begin(const RECT& area, bool allKeys, UINT dpi);  // a recording starts (hooks still off)
+void Overlay_SetOn(bool on);      // main thread: hooks on / off
+bool Overlay_On();
+void Overlay_Ignore(const Hotkey& hk);  // Canivete's own hotkeys are never shown
+void Overlay_Paused(bool paused);  // input while paused is dropped; resuming starts clean
+void Overlay_End();               // hooks off, everything cleared
+void Overlay_Key(UINT vk, bool down);           // what the keyboard hook passes on (tests call it too)
+void Overlay_Click(POINT screen, bool right);   // a button press at this screen point
+void Overlay_Draw(uint32_t* px, int w, int h);  // capture thread: draws onto a BGRX frame (if anything)
+std::wstring Overlay_KeyLabel(UINT vk, UINT mods, bool allKeys);  // "Ctrl+B", "" = not shown (tests)
+
+// ---- trim.cpp ------------------------------------------------------------------------------
+// The save window's timeline: a preview picture and a start and an end handle.
+struct TrimThumb {
+    uint32_t ms = 0;  // recording time of this picture
+    Image img;        // small copy
+};
+constexpr WORD kTrimChanged = 0x4001;  // WM_COMMAND notification: the user let go of a handle
+// fps: the handles move a frame at a time and land on frame boundaries (0 = 50 ms steps).
+HWND Trim_Create(HWND parent, int id, int x, int y, int w, int h, const std::vector<TrimThumb>* thumbs,
+                 uint32_t durationMs, int fps, UINT dpi);
+void Trim_Get(HWND trim, uint32_t& fromMs, uint32_t& toMs);
+void Trim_Set(HWND trim, uint32_t fromMs, uint32_t toMs);
+uint32_t Trim_SnapMs(uint32_t ms, int fps);  // to the nearest frame boundary
 
 // ---- alpha.cpp -----------------------------------------------------------------------------
 void Alpha_Open(const Image& img, const CaptureResult& meta);  // "Make alpha" window for this picture
