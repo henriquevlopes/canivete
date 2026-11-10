@@ -1167,7 +1167,17 @@ void Queue(std::unique_ptr<Job> j) {
 }  // namespace
 
 void Rmbg_Files(const std::vector<std::wstring>& files) {
-    if (files.empty() || !ReadyOrAsk()) return;
+    if (files.empty()) return;
+    // Test copies (CANIVETE_RMBG_FAKE=1): only show the progress window, at 42 %, to look at it.
+    // Nothing is downloaded or changed.
+    if (TestMode() && GetEnvironmentVariableW(L"CANIVETE_RMBG_FAKE", nullptr, 0) > 0) {
+        EnsureWindow();
+        g_busy = true;
+        g_pr.Set(L"Downloading the AI model (one time only)…  42 %", 420);
+        ShowWindowNow();
+        return;
+    }
+    if (!ReadyOrAsk()) return;
     auto j = std::make_unique<Job>();
     j->files = files;
     Log(L"rmbg: %d file(s) queued", static_cast<int>(files.size()));
