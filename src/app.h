@@ -16,8 +16,8 @@ constexpr UINT WM_APP_TRAY = WM_APP + 1;          // tray icon callback
 constexpr UINT WM_APP_CAPTURE_DONE = WM_APP + 2;  // lParam = Output job, finished on a worker
 constexpr UINT WM_APP_COMMAND = WM_APP + 3;       // wParam = command id (from a second instance)
 
-enum class CaptureMode { Region = 1, Window = 2, Full = 3, Color = 4, Gif = 5 };  // also the hotkey ids
-constexpr int kHotkeyCount = 5;
+enum class CaptureMode { Region = 1, Window = 2, Full = 3, Color = 4, Gif = 5, Video = 6 };  // also the hotkey ids
+constexpr int kHotkeyCount = 6;
 
 // ---- settings.cpp --------------------------------------------------------------------------
 struct Hotkey {
@@ -26,7 +26,7 @@ struct Hotkey {
 };
 
 struct Settings {
-    std::wstring hkRegion, hkWindow, hkFull, hkColor, hkGif;
+    std::wstring hkRegion, hkWindow, hkFull, hkColor, hkGif, hkVideo;
     std::wstring folder;    // empty = Windows "Screenshots" folder
     std::wstring fileName;  // pattern with %tokens
     std::wstring fullScreen;  // "all" or "monitor"
@@ -215,13 +215,29 @@ private:
 bool Gif_Encode(const std::wstring& recording, const GifPreset& p, const std::wstring& outPath,
                 const std::atomic<bool>& cancel, std::wstring& err);
 
+// ---- video.cpp -----------------------------------------------------------------------------
+// MP4 (H.264) writer. Width and height must be even. Frames are BGRX, top-down.
+class Mp4Writer {
+public:
+    struct Impl;
+    Mp4Writer();
+    ~Mp4Writer();
+    bool Open(const std::wstring& path, int width, int height, int fps, std::wstring& info);  // info: encoder used
+    bool Frame(LONGLONG time100ns, const uint32_t* px);
+    bool Close();  // finishes the file
+
+private:
+    std::unique_ptr<Impl> p_;
+};
+
 // ---- recorder.cpp --------------------------------------------------------------------------
-void Recorder_Start(const RECT& r);  // records that screen area until Recorder_Stop
+void Recorder_Start(const RECT& r, bool video = false);  // records that screen area until Recorder_Stop
 bool Recorder_Active();              // recording, or its save window is open
 void Recorder_Stop();                // stop recording (or bring the save window forward)
 void Recorder_Shutdown();            // app is closing: stop and throw away anything in progress
 HWND Recorder_Window();              // the save window, for IsDialogMessage
-void Recorder_Test(const RECT& r, int ms);  // test mode: record r for ms, then the save window
+void Recorder_Test(const RECT& r, int ms, bool video);  // test mode: record r for ms, then save
+int Recorder_BenchVideo(const RECT& r, int ms, const std::wstring& outPath);  // headless MP4 test
 int Recorder_Bench(const RECT& r, int ms, const std::wstring& outDir);  // headless: record + all presets
 
 // ---- alpha.cpp -----------------------------------------------------------------------------

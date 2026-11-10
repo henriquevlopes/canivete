@@ -17,9 +17,10 @@ const wchar_t kDefaultIni[] =
     L"; Leave a hotkey empty to turn it off.\r\n"
     L"[Hotkeys]\r\n"
     L"RegionScreenshot=Ctrl+PrintScreen\r\n"
-    L"WindowScreenshot=Alt+PrintScreen\r\n"
+    L"WindowScreenshot=None\r\n"
     L"FullScreenshot=PrintScreen\r\n"
     L"RecordGif=Ctrl+Shift+PrintScreen\r\n"
+    L"RecordVideo=Shift+PrintScreen\r\n"
     L"\r\n"
     L"[Screenshot]\r\n"
     L"; Folder: empty = your Windows Screenshots folder\r\n"
@@ -145,6 +146,7 @@ void LoadSettings() {
     s.hkFull = ReadStr(L"Hotkeys", L"FullScreenshot", L"PrintScreen");
     s.hkColor = ReadStr(L"Hotkeys", L"ColorPicker", L"Win+C");
     s.hkGif = ReadStr(L"Hotkeys", L"RecordGif", L"Ctrl+Shift+PrintScreen");
+    s.hkVideo = ReadStr(L"Hotkeys", L"RecordVideo", L"Shift+PrintScreen");
     s.gifPreset = Lower(Trim(ReadStr(L"Gif", L"Preset", L"balanced")));
     s.colorFormat = Lower(Trim(ReadStr(L"ColorPicker", L"CopyFormat", L"gray")));
     {
@@ -177,6 +179,7 @@ void SaveSettings(const Settings& s) {
     WriteStr(L"Hotkeys", L"FullScreenshot", s.hkFull);
     WriteStr(L"Hotkeys", L"ColorPicker", s.hkColor);
     WriteStr(L"Hotkeys", L"RecordGif", s.hkGif);
+    WriteStr(L"Hotkeys", L"RecordVideo", s.hkVideo);
     WriteStr(L"ColorPicker", L"CopyFormat", s.colorFormat);
     WriteStr(L"Screenshot", L"Folder", s.folder);
     WriteStr(L"Screenshot", L"FileName", s.fileName);

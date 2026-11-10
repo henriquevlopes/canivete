@@ -14,7 +14,7 @@ HWND g_mainWnd = nullptr;
 
 namespace {
 
-enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_COLOR, ID_GIF, ID_OPEN_FOLDER, ID_SETTINGS, ID_EXIT, ID_RESIZE, ID_RENAME };
+enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_COLOR, ID_GIF, ID_OPEN_FOLDER, ID_SETTINGS, ID_EXIT, ID_RESIZE, ID_RENAME, ID_VIDEO };
 constexpr UINT ID_RECENT0 = 200;  // .. 209: recent colors in the tray menu
 constexpr UINT kCmdAlreadyRunning = 99;
 constexpr UINT kCmdSettings = 98;
@@ -148,6 +148,7 @@ std::wstring RegisterHotkeys() {
         {CaptureMode::Full, &g_settings.hkFull, L"Full screenshot"},
         {CaptureMode::Color, &g_settings.hkColor, L"Color picker"},
         {CaptureMode::Gif, &g_settings.hkGif, L"Record GIF"},
+        {CaptureMode::Video, &g_settings.hkVideo, L"Record video"},
     };
     std::wstring failed;
     for (const Entry& e : list) UnregisterHotKey(g_mainWnd, static_cast<int>(e.mode));
@@ -241,7 +242,12 @@ void ShowMenu() {
     };
     item(ID_REGION, L"Region screenshot", g_settings.hkRegion);
     item(ID_FULL, L"Full screenshot", g_settings.hkFull);
-    item(ID_GIF, Recorder_Active() ? L"Stop GIF recording" : L"Record GIF", g_settings.hkGif);
+    if (Recorder_Active()) {
+        item(ID_GIF, L"Stop recording", L"");
+    } else {
+        item(ID_GIF, L"Record GIF", g_settings.hkGif);
+        item(ID_VIDEO, L"Record video", g_settings.hkVideo);
+    }
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     item(ID_COLOR, L"Pick a color", g_settings.hkColor);
     // Recent colors: a swatch and the value in the copy format; clicking copies it again.
@@ -349,12 +355,14 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_FULL:
         case ID_COLOR:
         case ID_GIF:
-            if (LOWORD(wp) == ID_GIF && Recorder_Active()) {
+        case ID_VIDEO:
+            if ((LOWORD(wp) == ID_GIF || LOWORD(wp) == ID_VIDEO) && Recorder_Active()) {
                 Recorder_Stop();
                 break;
             }
             // Wait for the menu to fade out so it isn't in the screenshot.
-            g_deferredMode = static_cast<CaptureMode>(LOWORD(wp) - ID_REGION + 1);
+            g_deferredMode = LOWORD(wp) == ID_VIDEO ? CaptureMode::Video
+                                                    : static_cast<CaptureMode>(LOWORD(wp) - ID_REGION + 1);
             SetTimer(h, kTimerDeferred, 250, nullptr);
             break;
         case ID_OPEN_FOLDER: {
@@ -509,8 +517,9 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     UINT cmd = 0;
     std::vector<std::wstring> list;  // --resize / --rename files, or --do's action then files
     ULONG_PTR listTag = 0;
-    RECT gifRect{};  // --gif-test area and length
+    RECT gifRect{};  // --gif-test / --mp4-test area and length
     int gifMs = 0;
+    bool testVideo = false;
     if (argc >= 2) {
         if (!_wcsicmp(argv[1], L"--resize") || !_wcsicmp(argv[1], L"--rename")) {
             listTag = !_wcsicmp(argv[1], L"--resize") ? kCopyResize : kCopyRename;
@@ -548,6 +557,20 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
         else if (!_wcsicmp(argv[1], L"--full")) cmd = static_cast<UINT>(CaptureMode::Full);
         else if (!_wcsicmp(argv[1], L"--color")) cmd = static_cast<UINT>(CaptureMode::Color);
         else if (!_wcsicmp(argv[1], L"--gif")) cmd = static_cast<UINT>(CaptureMode::Gif);
+        else if (!_wcsicmp(argv[1], L"--mp4")) cmd = static_cast<UINT>(CaptureMode::Video);
+        else if ((!_wcsicmp(argv[1], L"--mp4-test") || !_wcsicmp(argv[1], L"--mp4-bench")) && argc >= 7) {
+            gifRect = {_wtoi(argv[2]), _wtoi(argv[3]), _wtoi(argv[2]) + _wtoi(argv[4]), _wtoi(argv[3]) + _wtoi(argv[5])};
+            gifMs = _wtoi(argv[6]);
+            testVideo = true;
+            if (!_wcsicmp(argv[1], L"--mp4-bench")) {  // x y w h ms out.mp4
+                if (argc < 8) return 1;
+                const std::wstring out = argv[7];
+                LocalFree(argv);
+                LoadSettings();
+                return Recorder_BenchVideo(gifRect, gifMs, out);
+            }
+            if (!TestMode()) return 1;
+        }
         else if ((!_wcsicmp(argv[1], L"--gif-test") || !_wcsicmp(argv[1], L"--gif-bench")) && argc >= 7) {
             gifRect = {_wtoi(argv[2]), _wtoi(argv[3]), _wtoi(argv[2]) + _wtoi(argv[4]), _wtoi(argv[3]) + _wtoi(argv[5])};
             gifMs = _wtoi(argv[6]);
@@ -605,7 +628,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     if (!TestMode()) Shell_Register();
     Log(L"Canivete %s started", CANIVETE_VERSION);
     if (cmd) PostMessageW(g_mainWnd, WM_APP_COMMAND, cmd, 0);
-    if (gifMs > 0) Recorder_Test(gifRect, gifMs);
+    if (gifMs > 0) Recorder_Test(gifRect, gifMs, testVideo);
     if (listTag) {
         if (list.empty()) list.push_back(L"");  // still opens the window
         QueueList(listTag, list);

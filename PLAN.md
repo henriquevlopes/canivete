@@ -96,6 +96,12 @@ Same pipeline ShareX 21 now uses by default, refined with OBS details:
   ordered/Bayer for smaller files), write only the changed rectangle of each frame, exact timings.
   Port ShareX's `AdaptiveGifQuantizer` + `GifWriter` (already does exactly this).
   Optional later: animated WebP, much smaller than GIF.
+  MP4 built (2026-11-10), video only: same BitBlt capture loop as the GIF at 30 fps, own BGRX → NV12
+  (BT.709 video range) on the CPU, Media Foundation sink writer with hardware transforms on (NVIDIA
+  H.264 Encoder MFT here), quality mode 70 accepted, bitrate fallback ~0.08 bit/pixel, software
+  encoder fallback. 2560×1440: 30 fps steady, ~50% of one core, 10 s of desktop ≈ 750 KB. The
+  "moov first" (fast start) sink option fails (access denied / broken file), so it is off.
+  Still to do: sound (WASAPI loopback + mic, AAC), and WGC + GPU colour conversion if CPU use matters.
   Built (2026-11-10): records changed 32×32 tiles at 25 fps, then makes three GIFs at once
   (Smallest / Balanced / Smoothest) so the save window shows each real size. Own Wu + k-means
   palette and ordered dither instead of a ShareX port.

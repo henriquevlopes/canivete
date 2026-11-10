@@ -22,6 +22,7 @@ struct State {
     bool active = false;
     bool picking = false;      // color picker: no dimming, no selection, click picks the pixel
     bool forGif = false;       // the area is for a GIF recording, not a screenshot
+    bool forVideo = false;     // ... for an MP4 recording
     RECT vr{};                 // virtual desktop, screen coords
     Dib frozen, dim, back, mag;
     std::vector<RECT> windows;   // top-level windows, z-order (topmost first), screen coords
@@ -343,9 +344,10 @@ void Finish() {
         return;
     }
     if (S.forGif) {
-        Log(L"GIF area %dx%d at %d,%d", r.right - r.left, r.bottom - r.top, r.left, r.top);
+        Log(L"%s area %dx%d at %d,%d", S.forVideo ? L"Video" : L"GIF", r.right - r.left, r.bottom - r.top, r.left, r.top);
+        const bool video = S.forVideo;
         Close();
-        Recorder_Start(r);
+        Recorder_Start(r, video);
         return;
     }
     auto res = std::make_unique<CaptureResult>();
@@ -594,15 +596,17 @@ HWND WindowUnderCursor() {
 
 void Capture_Start(CaptureMode mode) {
     if (S.active) return;
-    if (mode == CaptureMode::Gif && Recorder_Active()) {  // the hotkey again stops the recording
+    if ((mode == CaptureMode::Gif || mode == CaptureMode::Video) && Recorder_Active()) {  // the hotkey again stops it
         Recorder_Stop();
         return;
     }
     HWND fg = GetForegroundWindow();
-    S.forGif = mode == CaptureMode::Gif;
+    S.forGif = mode == CaptureMode::Gif || mode == CaptureMode::Video;
+    S.forVideo = mode == CaptureMode::Video;
     switch (mode) {
     case CaptureMode::Region:
     case CaptureMode::Gif:
+    case CaptureMode::Video:
         StartRegion(fg, false);
         break;
     case CaptureMode::Color:

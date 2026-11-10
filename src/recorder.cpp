@@ -1,7 +1,8 @@
-// GIF recording, the part with windows: a red border around the area, a small bar with the time and
-// Stop / Cancel, the capture thread (25 frames a second, only changed tiles go to disk), and the
-// save window that offers three ready-made GIFs with their real file sizes.
-// The border, bar and save window are hidden from screen capture, so they never end up in the GIF.
+// Screen recording, GIF and MP4: a red border around the area, a small bar with the time and
+// Stop / Cancel, and the capture thread. GIF: 25 frames a second, only changed tiles go to disk, then
+// a save window offers three ready-made GIFs with their real file sizes. MP4: 30 frames a second
+// straight into the H.264 encoder (video.cpp); Stop saves it to the screenshots folder at once.
+// The border, bar and save window are hidden from screen capture, so they never end up in a recording.
 #include "app.h"
 
 #include <commctrl.h>
@@ -22,6 +23,7 @@ constexpr wchar_t kSaveClass[] = L"CaniveteGifSave";
 constexpr UINT WM_REC_DONE = WM_APP + 40;     // capture thread finished; wParam 1 = hit the size limit
 constexpr UINT WM_GIF_ENCODED = WM_APP + 41;  // wParam = preset index
 constexpr int kFrameMs = 40;                  // 25 frames a second, the most any preset uses
+constexpr int kVideoFps = 30;
 constexpr uint64_t kMaxBytes = 4ull << 30;    // the recording stops itself at 4 GB of changes
 constexpr COLORREF kRed = RGB(232, 44, 56);
 constexpr DWORD kExcludeFromCapture = 0x11;   // WDA_EXCLUDEFROMCAPTURE
@@ -41,8 +43,12 @@ double NowMs() {
 
 struct Recording {
     RECT rect{};
-    std::wstring file;  // the recording (.cgf)
+    std::wstring file;  // the recording (.cgf, or the .mp4 being written)
     GifWriter writer;
+    bool video = false;
+    Mp4Writer mp4;
+    std::wstring error;  // video: what went wrong
+    uint64_t frames = 0, dropped = 0;
     std::thread thread;
     std::atomic<bool> stop{false};
     std::atomic<bool> started{false};
@@ -113,12 +119,14 @@ std::wstring TempFolder() {
 // Leftovers of a recording that never finished (Canivete closed or crashed meanwhile).
 void DeleteLeftovers() {
     const std::wstring dir = TempFolder();
-    WIN32_FIND_DATAW fd;
-    HANDLE f = FindFirstFileW((dir + L"\\gif-*").c_str(), &fd);
-    if (f == INVALID_HANDLE_VALUE) return;
-    do DeleteFileW((dir + L"\\" + fd.cFileName).c_str());
-    while (FindNextFileW(f, &fd));
-    FindClose(f);
+    for (const wchar_t* pattern : {L"\\gif-*", L"\\vid-*"}) {
+        WIN32_FIND_DATAW fd;
+        HANDLE f = FindFirstFileW((dir + pattern).c_str(), &fd);
+        if (f == INVALID_HANDLE_VALUE) continue;
+        do DeleteFileW((dir + L"\\" + fd.cFileName).c_str());
+        while (FindNextFileW(f, &fd));
+        FindClose(f);
+    }
 }
 
 void ProcessOf(HWND h, std::wstring& proc, std::wstring& title) {
@@ -159,12 +167,22 @@ void DrawFake(Dib& d, double t) {
     TextOutW(d.dc, 10, 10, s, static_cast<int>(wcslen(s)));
 }
 
-// The capture thread: grabs the area every 40 ms and writes the tiles that changed.
+// The capture thread: grabs the area on a fixed clock. GIF: every 40 ms, writes the tiles that
+// changed. Video: 30 times a second, each frame goes to the encoder.
 void CaptureLoop(Recording* rec, HWND notify, int delayMs) {
     const RECT r = rec->rect;
+    const double period = rec->video ? 1000.0 / kVideoFps : kFrameMs;
     Dib d;
     bool full = false;
-    if (d.Create(r.right - r.left, r.bottom - r.top)) {
+    if (rec->video) {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        std::wstring info;
+        if (rec->mp4.Open(rec->file, r.right - r.left, r.bottom - r.top, kVideoFps, info))
+            Log(L"Video encoder: %s", info.c_str());
+        else
+            rec->error = L"Windows couldn't start a video encoder for this area.";
+    }
+    if (rec->error.empty() && d.Create(r.right - r.left, r.bottom - r.top)) {
         HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
         if (!timer) timer = CreateWaitableTimerW(nullptr, TRUE, nullptr);
         auto wait = [&](double ms) {
@@ -180,9 +198,13 @@ void CaptureLoop(Recording* rec, HWND notify, int delayMs) {
         rec->started = true;
         for (uint64_t k = 0; !rec->stop; ++k) {
             const double now = NowMs() - rec->start;
-            const double target = static_cast<double>(k) * kFrameMs;
+            const double target = static_cast<double>(k) * period;
             if (target > now) wait(target - now);
-            else if (now - target > kFrameMs) k = static_cast<uint64_t>(now / kFrameMs);  // fell behind: skip
+            else if (now - target > period) {  // fell behind: skip
+                const uint64_t nk = static_cast<uint64_t>(now / period);
+                rec->dropped += nk - k;
+                k = nk;
+            }
             if (rec->stop) break;
             const double t = NowMs() - rec->start;
             if (rec->fake) {
@@ -192,6 +214,14 @@ void CaptureLoop(Recording* rec, HWND notify, int delayMs) {
                 DrawCursorAt(d.dc, r.left, r.top);
             }
             GdiFlush();
+            if (rec->video) {
+                if (!rec->mp4.Frame(static_cast<LONGLONG>(k) * 10000000LL / kVideoFps, d.bits)) {
+                    rec->error = L"The video encoder stopped working.";
+                    break;
+                }
+                ++rec->frames;
+                continue;
+            }
             rec->writer.Frame(static_cast<uint32_t>(t), d.bits);
             if (rec->writer.Bytes() > kMaxBytes) {
                 full = true;
@@ -202,7 +232,12 @@ void CaptureLoop(Recording* rec, HWND notify, int delayMs) {
         if (timer) CloseHandle(timer);
     }
     rec->durationMs = rec->started ? static_cast<uint32_t>(NowMs() - rec->start) : 0;
-    rec->writer.Close(rec->durationMs);
+    if (rec->video) {
+        if (!rec->mp4.Close() && rec->frames > 0 && rec->error.empty()) rec->error = L"The video file couldn't be finished.";
+        CoUninitialize();
+    } else {
+        rec->writer.Close(rec->durationMs);
+    }
     if (notify) PostMessageW(notify, WM_REC_DONE, full ? 1 : 0, 0);
 }
 
@@ -398,9 +433,52 @@ void CloseRecordingWindows() {
     R.barFont = nullptr;
 }
 
+// Video: straight to the screenshots folder, copied as a file, with a tray notice.
+void VideoDone() {
+    Recording& rec = *R.rec;
+    if (rec.cancelled || (rec.error.empty() && rec.durationMs < 100)) {
+        DeleteFileW(rec.file.c_str());
+        Log(L"Video recording cancelled");
+        R.rec.reset();
+        return;
+    }
+    if (!rec.error.empty()) {
+        DeleteFileW(rec.file.c_str());
+        Log(L"Video recording failed: %s", rec.error.c_str());
+        Tray_Notify(L"Video recording failed", rec.error);
+        R.rec.reset();
+        return;
+    }
+    const std::wstring path = Output_NewPath(rec.meta, L".mp4");
+    if (!MoveFileExW(rec.file.c_str(), path.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING)) {
+        Log(L"Video could not be saved to %s", path.c_str());
+        Tray_Notify(L"Video not saved", L"It could not be saved to\n" + path);
+        DeleteFileW(rec.file.c_str());
+        R.rec.reset();
+        return;
+    }
+    uint64_t size = 0;
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fa))
+        size = (static_cast<uint64_t>(fa.nFileSizeHigh) << 32) | fa.nFileSizeLow;
+    CopyFileToClipboard(path);
+    const unsigned secs = (rec.durationMs + 500) / 1000;
+    wchar_t len[32];
+    swprintf_s(len, L"%u:%02u", secs / 60, secs % 60);
+    Log(L"Video saved: %u ms, %llu frames (%llu skipped), %s -> %s", rec.durationMs, rec.frames, rec.dropped,
+        SizeText(size).c_str(), path.c_str());
+    Tray_Notify(L"Video saved", path.substr(path.find_last_of(L'\\') + 1) + L"  (" + len + L", " + SizeText(size) +
+                                    L")\nCopied: paste it into a chat or a folder.");
+    R.rec.reset();
+}
+
 void RecordingDone(bool full) {
     if (R.rec->thread.joinable()) R.rec->thread.join();
     CloseRecordingWindows();
+    if (R.rec->video) {
+        VideoDone();
+        return;
+    }
     if (R.rec->cancelled || R.rec->durationMs < 100) {
         DeleteFileW(R.rec->file.c_str());
         Log(L"GIF recording cancelled");
@@ -419,14 +497,17 @@ void PaintBar(HWND h, HDC dc) {
     const int cy = (rc.bottom - rc.top) / 2, d = Px(10);
     HGDIOBJ oldB = SelectObject(dc, GetStockObject(DC_BRUSH));
     HGDIOBJ oldP = SelectObject(dc, GetStockObject(NULL_PEN));
-    SetDCBrushColor(dc, kRed);
+    // Grey dot and "…" until the first frame is taken (the video encoder needs a moment to start).
+    const bool live = R.rec && R.rec->started;
+    SetDCBrushColor(dc, live ? kRed : RGB(150, 150, 150));
     Ellipse(dc, Px(10), cy - d / 2, Px(10) + d, cy + d / 2);
     SelectObject(dc, oldB);
     SelectObject(dc, oldP);
-    unsigned secs = 0;
-    if (R.rec && R.rec->started) secs = static_cast<unsigned>((NowMs() - R.rec->start) / 1000);
-    wchar_t s[32];
-    swprintf_s(s, L"%u:%02u", secs / 60, secs % 60);
+    wchar_t s[32] = L"…";
+    if (live) {
+        const unsigned secs = static_cast<unsigned>((NowMs() - R.rec->start) / 1000);
+        swprintf_s(s, L"%u:%02u", secs / 60, secs % 60);
+    }
     HGDIOBJ oldF = SelectObject(dc, R.barFont);
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, GetSysColor(COLOR_BTNTEXT));
@@ -517,7 +598,8 @@ void ShowRecordingWindows(const RECT& r) {
     int y = r.bottom + t + Px(6);
     if (y + bh > work.bottom) y = r.top - t - Px(6) - bh;
     if (y < work.top) y = r.bottom - bh - Px(8);
-    R.bar = CreateWindowExW(ex, kBarClass, L"Canivete GIF recording", WS_POPUP | WS_BORDER, x, y, bw, bh, nullptr, nullptr,
+    R.bar = CreateWindowExW(ex, kBarClass, R.rec && R.rec->video ? L"Canivete video recording" : L"Canivete GIF recording",
+                            WS_POPUP | WS_BORDER, x, y, bw, bh, nullptr, nullptr,
                             g_hinst, nullptr);
     SetWindowDisplayAffinity(R.bar, kExcludeFromCapture);
     R.barFont = MessageFont(dpi, 1.0, true);
@@ -531,32 +613,43 @@ void ShowRecordingWindows(const RECT& r) {
     SetTimer(R.bar, kTimerTick, 250, nullptr);
 }
 
-std::unique_ptr<Recording> NewRecording(const RECT& r) {
+std::unique_ptr<Recording> NewRecording(const RECT& r, bool video) {
     auto rec = std::make_unique<Recording>();
     rec->rect = r;
-    rec->file = TempFolder() + L"\\gif-" + std::to_wstring(GetTickCount64()) + L".cgf";
+    rec->video = video;
+    rec->file = TempFolder() + (video ? L"\\vid-" : L"\\gif-") + std::to_wstring(GetTickCount64()) + (video ? L".mp4" : L".cgf");
     wchar_t fake[8];
     rec->fake = TestMode() && GetEnvironmentVariableW(L"CANIVETE_GIF_FAKE", fake, 8) > 0;
     ProcessOf(GetForegroundWindow(), rec->meta.processName, rec->meta.windowTitle);
     rec->meta.screenRect = r;
     rec->meta.img.w = r.right - r.left;
     rec->meta.img.h = r.bottom - r.top;
-    if (!rec->writer.Open(rec->file, r.right - r.left, r.bottom - r.top)) return nullptr;
+    if (!video && !rec->writer.Open(rec->file, r.right - r.left, r.bottom - r.top)) return nullptr;
     return rec;
 }
 
 }  // namespace
 
-void Recorder_Start(const RECT& r) {
+void Recorder_Start(const RECT& area, bool video) {
+    RECT r = area;
+    if (video) {  // video encoders need an even width and height
+        r.right -= (r.right - r.left) & 1;
+        r.bottom -= (r.bottom - r.top) & 1;
+    }
     if (R.rec || r.right - r.left < 2 || r.bottom - r.top < 2) return;
+    if (video && (r.right - r.left < 16 || r.bottom - r.top < 16)) {
+        Tray_Notify(L"Video not recorded", L"The area is too small for a video (16 x 16 pixels at least).");
+        return;
+    }
     RegisterClasses();
     if (!R.save) DeleteLeftovers();
-    R.rec = NewRecording(r);
+    R.rec = NewRecording(r, video);
     if (!R.rec) {
         Tray_Notify(L"GIF recording failed", L"Couldn't create the recording file in the temp folder.");
         return;
     }
-    Log(L"GIF recording started: %dx%d at %d,%d", r.right - r.left, r.bottom - r.top, r.left, r.top);
+    Log(L"%s recording started: %dx%d at %d,%d", video ? L"Video" : L"GIF", r.right - r.left, r.bottom - r.top, r.left,
+        r.top);
     ShowRecordingWindows(r);
     R.rec->thread = std::thread(CaptureLoop, R.rec.get(), R.bar, 150);
 }
@@ -585,13 +678,40 @@ void Recorder_Shutdown() {
     CloseRecordingWindows();
 }
 
-void Recorder_Test(const RECT& r, int ms) {
-    Recorder_Start(r);
+void Recorder_Test(const RECT& r, int ms, bool video) {
+    Recorder_Start(r, video);
     if (R.bar) SetTimer(R.bar, kTimerTestStop, ms, nullptr);
 }
 
+int Recorder_BenchVideo(const RECT& area, int ms, const std::wstring& outPath) {
+    RECT r = area;
+    r.right -= (r.right - r.left) & 1;
+    r.bottom -= (r.bottom - r.top) & 1;
+    auto rec = NewRecording(r, true);
+    const double t0 = NowMs();
+    rec->thread = std::thread(CaptureLoop, rec.get(), nullptr, 0);
+    Sleep(ms);
+    rec->stop = true;
+    rec->thread.join();
+    const double total = NowMs() - t0;
+    bool ok = rec->error.empty() && MoveFileExW(rec->file.c_str(), outPath.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING);
+    uint64_t size = 0;
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (ok && GetFileAttributesExW(outPath.c_str(), GetFileExInfoStandard, &fa))
+        size = (static_cast<uint64_t>(fa.nFileSizeHigh) << 32) | fa.nFileSizeLow;
+    FILETIME c, e, k, u;
+    GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u);
+    const double cpuMs = ((static_cast<uint64_t>(k.dwHighDateTime) << 32 | k.dwLowDateTime) +
+                          (static_cast<uint64_t>(u.dwHighDateTime) << 32 | u.dwLowDateTime)) / 10000.0;
+    Log(L"Video bench: %dx%d, %u ms recorded (%.0f ms with setup), %llu frames, %llu skipped, CPU %.0f ms (%.0f%% of one core), %s%s%s",
+        r.right - r.left, r.bottom - r.top, rec->durationMs, total, rec->frames, rec->dropped, cpuMs, 100 * cpuMs / total,
+        ok ? SizeText(size).c_str() : L"FAILED", rec->error.empty() ? L"" : L": ", rec->error.c_str());
+    DeleteFileW(rec->file.c_str());
+    return ok ? 0 : 3;
+}
+
 int Recorder_Bench(const RECT& r, int ms, const std::wstring& outDir) {
-    auto rec = NewRecording(r);
+    auto rec = NewRecording(r, false);
     if (!rec) return 2;
     rec->thread = std::thread(CaptureLoop, rec.get(), nullptr, 0);
     Sleep(ms);

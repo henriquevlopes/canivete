@@ -32,8 +32,8 @@ constexpr int kCX = kM + 140;       // left edge of the controls column
 constexpr int kCW = kW - kM - kCX;  // width of the controls column
 
 enum : int {
-    IDC_HK0 = 200,    // hotkey boxes 200..203
-    IDC_HKST0 = 210,  // their status texts 210..213
+    IDC_HK0 = 200,    // hotkey boxes 200..205
+    IDC_HKST0 = 210,  // their status texts 210..215
     IDC_STATIC = 220,
     IDC_HINT,
     IDC_SAVE = 230,
@@ -58,7 +58,7 @@ enum : int {
 };
 
 const wchar_t* const kHkNames[kHotkeyCount] = {L"Region screenshot", L"Window screenshot", L"Full screenshot",
-                                                L"Color picker", L"Record GIF"};
+                                                L"Color picker", L"Record GIF", L"Record video"};
 
 struct Ctl {
     HWND wnd;
@@ -273,6 +273,7 @@ void CheckHotkeys() {
     ParseHotkey(g_settings.hkFull, owned[2]);
     ParseHotkey(g_settings.hkColor, owned[3]);
     ParseHotkey(g_settings.hkGif, owned[4]);
+    ParseHotkey(g_settings.hkVideo, owned[5]);
     for (int i = 0; i < kHotkeyCount; ++i) {
         if (!Shown(i)) continue;
         std::wstring st;
@@ -449,6 +450,7 @@ void Populate() {
     ParseHotkey(s.hkFull, U.hk[2]);
     ParseHotkey(s.hkColor, U.hk[3]);
     ParseHotkey(s.hkGif, U.hk[4]);
+    ParseHotkey(s.hkVideo, U.hk[5]);
     for (int i = 0; i < kHotkeyCount; ++i) ShowHotkey(i);
     int cf = 0;
     for (int i = 0; i < static_cast<int>(std::size(kColorFormats)); ++i)
@@ -473,7 +475,7 @@ void Populate() {
 
 void Apply() {
     Settings s = g_settings;
-    std::wstring* hks[kHotkeyCount] = {&s.hkRegion, &s.hkWindow, &s.hkFull, &s.hkColor, &s.hkGif};
+    std::wstring* hks[kHotkeyCount] = {&s.hkRegion, &s.hkWindow, &s.hkFull, &s.hkColor, &s.hkGif, &s.hkVideo};
     for (int i = 0; i < kHotkeyCount; ++i) *hks[i] = U.hk[i].vk ? HotkeyText(U.hk[i]) : L"None";
     s.saveToFile = Checked(IDC_SAVE);
     s.folder = Trim(GetText(IDC_FOLDER));

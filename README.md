@@ -15,7 +15,7 @@ Plan and research notes: [PLAN.md](PLAN.md).
 | 2b | Screenshot editor (shapes, text, numbers) | done |
 | 3 | Image resizer | done |
 | 4 | Renamer | done |
-| 5 | MP4 recording | – |
+| 5 | MP4 recording | video done, sound later |
 | 6 | GIF recording | done |
 
 ## Use
@@ -26,6 +26,7 @@ Plan and research notes: [PLAN.md](PLAN.md).
 | PrtSc | All monitors (or the one under the mouse, see settings) |
 | Win+C | Color picker: the screen freezes, a magnifier follows the mouse. Click, Enter or Space copies the color; Esc or right-click cancels; arrows nudge |
 | Ctrl+Shift+PrtSc | Record a GIF: pick an area like a region screenshot; press again (or Stop) to finish |
+| Shift+PrtSc | Record a video (MP4): pick an area the same way; press again (or Stop) to finish |
 
 GIF recording: a red border marks the area and a small bar shows the time with Stop and Cancel
 (neither shows up in the GIF). Recording runs at 25 frames a second and full size; only the parts
@@ -34,6 +35,14 @@ real file size: **Smallest file** (10 fps, 64 colors), **Balanced** (15 fps, 256
 **Smoothest** (25 fps, 256 colors, smooth gradients). Click one: it goes to the screenshots folder
 and is copied as a file, ready to paste. The last choice is the default next time (Enter takes it).
 The encoder builds one palette for the whole GIF and writes only the changed part of each frame.
+
+Video recording: the same border and bar (the dot is grey with "…" for the moment the video
+encoder takes to start, then red with the time). 30 frames a second, full size (an odd width or
+height loses one pixel, as video needs even sizes), mouse pointer included, no sound yet. Stop saves
+the MP4 straight to the screenshots folder and copies it as a file, ready to paste; Cancel throws it
+away. H.264 on the graphics card's own encoder when there is one (NVIDIA, AMD, Intel), otherwise
+Windows' software encoder; quality-based, so a still screen costs almost nothing (10 s of a
+2560×1440 desktop: about 750 KB).
 
 Screenshots are saved as PNG (or JPG) to the Windows Screenshots folder and copied to the clipboard
 (as image and PNG). A small preview pops up bottom-right: click opens the editor, right-click shows
@@ -115,7 +124,7 @@ in one click: in front (`01 Holiday.jpg`), at the end (`Holiday 01.jpg`), a new 
 digits needed (01 for up to 99 items, 001 above). Delete removes a row from the list.
 All renames are one Windows operation, so Ctrl+Z in Explorer undoes the whole batch.
 
-Command line: `Canivete.exe --region | --window | --full | --color | --settings` acts in the running copy.
+Command line: `Canivete.exe --region | --window | --full | --color | --gif | --mp4 | --settings` acts in the running copy.
 `Canivete.exe --edit image.png` opens any image in the editor; `--alpha image.png` opens Make alpha.
 `Canivete.exe --alpha-bench in.png out.png [x y]... [box x y w h]` makes an alpha with no window (test).
 `Canivete.exe --resize a.jpg b.png folder` opens the resizer with those files (each copy hands its
@@ -124,6 +133,7 @@ files to the running one, so Explorer's one-copy-per-file launch ends in one win
 `Canivete.exe --do <action> a.jpg b.png` runs a right-click menu action (`small medium large half custom
 jpg png tif bmp right left 180 fliph flipv copy`).
 `Canivete.exe --grab out.png` (or `.jpg`) grabs all monitors to a file and exits (self-test).
+`Canivete.exe --mp4-bench x y w h ms out.mp4` records that area with no window and logs frames, CPU and size (self-test).
 
 ## Build and install
 
@@ -147,6 +157,7 @@ Builds Release, installs to `%LOCALAPPDATA%\Programs\Canivete\Canivete.exe` and 
 - `src/resizer.cpp` — image resizer window, WIC resize engine on worker threads, right-click quick actions (convert, rotate, copy)
 - `src/renamer.cpp` — renamer window, live preview, regex/counter/date tokens, IFileOperation rename with undo
 - `src/gif.cpp` — GIF encoder: recording file, palette (exact colors or Wu + k-means), LZW, changed-area frames, presets
-- `src/recorder.cpp` — GIF recording border and bar, 25 fps capture thread, Save GIF window
+- `src/recorder.cpp` — recording border and bar, capture thread (GIF 25 fps, video 30 fps), Save GIF window, video save
+- `src/video.cpp` — MP4 writer: BGRX to NV12 (BT.709), Media Foundation H.264 sink writer, hardware encoder with software fallback
 - `src/alpha.cpp` — Make alpha window: freehand mask, detail/background picks, threshold engine, square power-of-two output
 - `src/shell.cpp` — Explorer right-click Canivete submenu (image actions, Rename) and Send to shortcuts
