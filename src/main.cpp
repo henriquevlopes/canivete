@@ -691,6 +691,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
         if (!_wcsicmp(argv[1], L"--grab") && argc >= 3) return RunGrabTest(argv[2]);
         if (!_wcsicmp(argv[1], L"--edit") && argc >= 3) return RunEditor(argv[2]);
         if (!_wcsicmp(argv[1], L"--alpha") && argc >= 3) return RunAlpha(argv[2]);
+        if (!_wcsicmp(argv[1], L"--nobg-bench") && argc >= 4) return Rmbg_Bench(argv[2], argv[3]);  // in out
         if (!_wcsicmp(argv[1], L"--alpha-bench") && argc >= 4) {  // in out [x y]... [box x y w h]
             std::vector<POINT> picks;
             RECT box{};

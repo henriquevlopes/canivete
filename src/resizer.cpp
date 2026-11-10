@@ -1232,6 +1232,10 @@ void Resizer_Quick(const std::wstring& action, const std::vector<std::wstring>& 
         CopyFirst(files[0]);
         return;
     }
+    if (a == L"nobg") {
+        Rmbg_Files(files);
+        return;
+    }
 
     auto j = std::make_shared<Job>();
     Options& o = j->o;

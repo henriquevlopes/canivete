@@ -19,6 +19,7 @@ constexpr UINT WM_APP_COMMAND = WM_APP + 3;       // wParam = command id (from a
 constexpr UINT WM_APP_MAINT = WM_APP + 4;         // lParam = background maintenance check result
 constexpr UINT WM_APP_UPDATE = WM_APP + 5;        // Canivete update check / download finished (update.cpp)
 constexpr UINT WM_APP_UPLOAD = WM_APP + 6;        // upload started / progress / finished (upload.cpp)
+constexpr UINT WM_APP_NOBG = WM_APP + 7;          // to the editor: lParam = new std::wstring, Remove background's result
 
 enum class CaptureMode { Region = 1, Window = 2, Full = 3, Color = 4, Gif = 5, Video = 6 };  // also the hotkey ids
 constexpr int kHotkeyCount = 6;
@@ -374,3 +375,9 @@ void Alpha_Open(const Image& img, const CaptureResult& meta);  // "Make alpha" w
 HWND Alpha_Window();
 // Headless: picks = detail clicks (image pixels), box = area to use (empty = all). Writes the PNG.
 int Alpha_Bench(const std::wstring& in, const std::wstring& out, const std::vector<POINT>& picks, const RECT& box);
+
+// ---- rmbg.cpp ------------------------------------------------------------------------------
+// Remove background with a local AI model (downloaded on first use); saves a transparent PNG.
+void Rmbg_Files(const std::vector<std::wstring>& files);  // each saved next to the original
+void Rmbg_Image(const Image& img, const CaptureResult& meta, HWND notify);  // editor: saved, copied, WM_APP_NOBG to notify
+int Rmbg_Bench(const std::wstring& in, const std::wstring& out);  // headless: timings in the log

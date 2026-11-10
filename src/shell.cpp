@@ -37,7 +37,7 @@ const wchar_t* const kOldKeys[] = {
     L"Software\\Classes\\*\\shell\\CaniveteRename",
     L"Software\\Classes\\Directory\\shell\\CaniveteRename",
 };
-constexpr wchar_t kMenuVersion[] = L"|3";  // bump when the entries change, so they are written again
+constexpr wchar_t kMenuVersion[] = L"|4";  // bump when the entries change, so they are written again
 struct MenuEntry {
     const wchar_t* path;    // under the menu's shell key
     const wchar_t* text;
@@ -58,9 +58,10 @@ const MenuEntry kMenu[] = {
     {L"3rotate\\shell\\1right", L"Turn right  (90° clockwise)", L"right", false},
     {L"3rotate\\shell\\2left", L"Turn left  (90° counter-clockwise)", L"left", false},
     {L"3rotate\\shell\\4fliph", L"Flip left to right", L"fliph", true},
-    {L"3rotate\\shell\\5flipv", L"Flip top to bottom", L"flipv", false},
-    {L"4copy", L"Copy to clipboard", L"copy", true},
-    {L"5rename", L"Rename…", L"rename", true},
+    // "Flip top to bottom" (flipv) left the menu for Remove background (16-entry limit); --do flipv still works.
+    {L"4nobg", L"Remove background", L"nobg", true},
+    {L"5copy", L"Copy to clipboard", L"copy", false},
+    {L"6rename", L"Rename…", L"rename", true},
 };
 
 void Put(HKEY key, const wchar_t* name, const std::wstring& v) {
@@ -68,7 +69,7 @@ void Put(HKEY key, const wchar_t* name, const std::wstring& v) {
                    static_cast<DWORD>((v.size() + 1) * sizeof(wchar_t)));
 }
 
-bool IsRename(const MenuEntry& e) { return wcsncmp(e.path, L"5rename", 7) == 0; }
+bool IsRename(const MenuEntry& e) { return wcsncmp(e.path, L"6rename", 7) == 0; }
 bool Wanted(const MenuEntry& e) { return IsRename(e) ? FeatureOn(kFeatRename) : FeatureOn(kFeatImages); }
 
 // Writes one copy of the submenu, with the entries of the features that are on.

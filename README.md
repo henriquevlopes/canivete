@@ -106,14 +106,36 @@ On images:
   no window; Choose a size… opens the resizer below.
 - Convert to > JPG / PNG / TIFF: new files next to the originals (`photo.png` > `photo.jpg`);
   see-through parts become white in JPG; images already in that format are skipped.
-- Rotate > Turn right / left, Flip left to right / top to bottom: saves over the
+- Rotate > Turn right / left, Flip left to right: saves over the
   original (same name and dates; JPG at quality 95 or more, photo info kept). JPG, PNG, BMP, TIFF only.
+- Remove background: cuts the subject out and saves `photo (no background).png` next to the
+  original, with a transparent background, at full size (see below).
 - Copy to clipboard: the (first) image, upright, ready to paste.
 
 On everything (files and folders): Rename… opens the renamer below. A tray notice says what was
 done; problems show in a message. Explorer refreshes the thumbnails of changed images. Windows
-shows at most 16 entries in this menu, so a few extras (half size, upside down, BMP) are only on
-the command line.
+shows at most 16 entries in this menu, so a few extras (half size, upside down, flip top to bottom,
+BMP) are only on the command line.
+
+Remove background (right-click menu, or the editor's scissors button / B): a free AI model,
+[BiRefNet](https://github.com/ZhengPeng7/BiRefNet) (MIT license), finds the subject; it runs on this
+computer, on the graphics card through DirectML (about 1-2 s a photo on an RTX 3080 Ti laptop) or on
+the processor when there is no usable graphics card. The first use asks to download it once, about
+500 MB, from the official places: the model from Hugging Face (`onnx-community/BiRefNet-ONNX`, pinned
+to one version) and Microsoft's ONNX Runtime 1.24.4 from NuGet (plus Microsoft's DirectML 1.15.4,
+~200 MB, only on a Windows whose own DirectML.dll is older than 1.15). Every file is checked against
+its SHA-256; all of it goes to `%APPDATA%\Canivete\ai`. Canivete then rewrites the model once (its
+deformable convolutions become GridSample + a 1x1 convolution, same result, ~10x faster on DirectML;
+`src/rmbg_model.cpp`, Python version in `tools/ai/fixdeform.py`). The mask is computed at 1024 x 1024
+and brought back to full size with a guided filter, so hair and edges follow the photo, and the edge
+colors are cleaned of the old background (blur-fusion foreground estimation) so there is no colored
+fringe. A small window bottom-right shows progress and can cancel; the model stays loaded 3 minutes
+after the last picture, then frees the graphics card. From the editor the result is saved as
+`<capture name> (no background).png` in the screenshots folder and copied (PNG with transparency,
+plus a plain copy on white for apps that don't read PNG).
+Models considered: RMBG-2.0 (BRIA) is as good but non-commercial only; BEN2 (MIT) and the BiRefNet
+lite model are close but slower or rougher here; ISNet/U²-Net are instant but cut hair coarsely;
+Windows' own background remover needs a Copilot+ PC; cloud services need a subscription.
 
 Image resizer: select images in Explorer, right-click > Show more options > Canivete > Resize > Choose a size…
 (or Send to > Canivete - Resize images, which also takes folders), or tray > Resize images…, or
@@ -199,6 +221,8 @@ installs it silently.
 Command line: `Canivete.exe --region | --window | --full | --color | --gif | --mp4 | --settings` acts in the running copy.
 `Canivete.exe --edit image.png` opens any image in the editor; `--alpha image.png` opens Make alpha.
 `Canivete.exe --alpha-bench in.png out.png [x y]... [box x y w h]` makes an alpha with no window (test).
+`Canivete.exe --nobg-bench in.jpg out.png` removes the background with no window, downloading the AI
+files first if needed; timings go to the log (test).
 `Canivete.exe --resize a.jpg b.png folder` opens the resizer with those files (each copy hands its
 files to the running one, so Explorer's one-copy-per-file launch ends in one window).
 `Canivete.exe --rename a.txt folder` opens the renamer the same way.
@@ -218,7 +242,7 @@ the Upload buttons, errors. Test copies only: `CANIVETE_UPLOAD_MOCK=http://127.0
 there, `--set-secret name value` stores a secret, `CANIVETE_GRAB_FAKE=1` makes screenshots a gradient (a hidden
 desktop has no screen).
 `Canivete.exe --do <action> a.jpg b.png` runs a right-click menu action (`small medium large half custom
-jpg png tif bmp right left 180 fliph flipv copy`).
+jpg png tif bmp right left 180 fliph flipv nobg copy`).
 `Canivete.exe --grab out.png` (or `.jpg`) grabs all monitors to a file and exits (self-test).
 `Canivete.exe --mp4-bench x y w h ms out.mp4` records that area with no window and logs frames, CPU, size and sound (self-test).
 `Canivete.exe --mp4-shrink in.mp4 out.mp4 percent quality kbps` makes one smaller copy and logs its size and time (self-test).
@@ -259,6 +283,9 @@ and publishes it with its SHA256 on `henriquevlopes/canivete-releases`; running 
 - `src/video.cpp` — MP4 writer: BGRX to NV12 (BT.709), Media Foundation H.264 sink writer, hardware encoder with software fallback, AAC sound stream; the smaller copies offered after recording (decode, shrink, re-encode)
 - `src/audio.cpp` — video sound: WASAPI loopback of the default output + optional microphone, mixed, timed by capture clock
 - `src/alpha.cpp` — Make alpha window: freehand mask, detail/background picks, threshold engine, square power-of-two output
+- `src/rmbg.cpp` — Remove background: first-use download (WinHTTP, SHA-256, `tar.exe` unpacks the NuGet packages), ONNX Runtime loaded at run time (C API, DirectML on the card with the most memory, CPU fallback), worker thread and progress window, guided-filter upscale of the mask, blur-fusion edge colors, transparent PNG
+- `src/rmbg_model.cpp` — rewrites BiRefNet's exported deformable convolutions into GridSample + 1x1 Conv (minimal protobuf reader/writer)
+- `third_party/onnxruntime/include` — ONNX Runtime 1.24.4 C API headers (MIT, `third_party/onnxruntime/LICENSE`); the DLL itself is downloaded
 - `src/maint.cpp` — Computer maintenance window: Overview, Updates, Installed apps, Cleanup, Startup apps, Health tabs; worker threads; elevated jobs report back with WM_COPYDATA; daily background check
 - `src/maint_info.cpp` — Overview checks: antivirus (Security Center + Defender WMI), device problems, battery wear, last Windows Update, installed apps
 - `src/theme.cpp` — dark/light theme: palette shared by every window, dark title bars, control themes (DarkMode_Explorer/CFD/ItemsView), dark check boxes, dark tray menu, live switch on `ImmersiveColorSet`

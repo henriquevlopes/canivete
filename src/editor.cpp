@@ -61,7 +61,7 @@ struct Shape {
     float scale = 1;  // text and markers: stretched by their corner handles
 };
 
-enum class Item { Tool, Color, Size, Undo, Redo, Copy, Save, Alpha, Upload, Done };
+enum class Item { Tool, Color, Size, Undo, Redo, Copy, Save, Alpha, NoBg, Upload, Done };
 struct ItemRect {
     Item kind;
     int index;
@@ -606,6 +606,7 @@ void Layout(Editor& e) {
     add(Item::Copy, 0, btn);
     add(Item::Save, 0, btn);
     add(Item::Alpha, 0, btn);
+    add(Item::NoBg, 0, btn);
     add(Item::Upload, 0, btn);
     x += e.Px(6);
     add(Item::Done, 0, e.Px(78));
@@ -744,6 +745,7 @@ const wchar_t* Tip(const Editor& e, int i) {
     case Item::Copy: return L"Copy to the clipboard  (Ctrl+C)";
     case Item::Save: return L"Save to the screenshot file  (Ctrl+S)";
     case Item::Alpha: return L"Make alpha: turn details into a white-on-black square for Substance  (M)";
+    case Item::NoBg: return L"Remove background: save as a transparent PNG and copy it  (B)";
     case Item::Upload: {
         static std::wstring tip;
         tip = L"Copy, save, upload to " + Upload_ServiceName() + L", copy the link and close  (U)";
@@ -878,6 +880,9 @@ void Paint(Editor& e, HDC hdc) {
                 break;
             case Item::Save:
                 Glyph(e, b, L"\xE74E", r, true);
+                break;
+            case Item::NoBg:
+                Glyph(e, b, L"\xE8C6", r, true);  // scissors: cut the subject out
                 break;
             case Item::Upload:
                 Glyph(e, b, L"\xE898", r, true);
@@ -1065,6 +1070,12 @@ void MakeAlpha(Editor& e) {
     Alpha_Open(CurrentImage(e), *e.src);
 }
 
+void RemoveBackground(Editor& e) {
+    FinishText(e);
+    ShowStatus(e, L"Removing the background…");
+    Rmbg_Image(CurrentImage(e), *e.src, e.hwnd);  // answers with WM_APP_NOBG
+}
+
 void Close(Editor& e) {
     if (e.dirty && !e.shapes.empty()) {
         const int a = MessageBoxW(e.hwnd, L"Close without saving or copying your edits?", L"Canivete Editor",
@@ -1091,6 +1102,7 @@ void Click(Editor& e, const ItemRect& it) {
     case Item::Copy: CopyNow(e); break;
     case Item::Save: SaveNow(e); break;
     case Item::Alpha: MakeAlpha(e); break;
+    case Item::NoBg: RemoveBackground(e); break;
     case Item::Upload: Done(e, true); return;
     case Item::Done: Done(e); return;
     }
@@ -1322,6 +1334,9 @@ void OnKey(Editor& e, UINT vk) {
     } else if (vk == 'M') {
         MakeAlpha(e);
         return;
+    } else if (vk == 'B') {
+        RemoveBackground(e);
+        return;
     } else if (vk == 'U') {
         Done(e, true);
         return;
@@ -1348,6 +1363,12 @@ LRESULT CALLBACK EditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (!ep) return DefWindowProcW(h, msg, wp, lp);
     Editor& e = *ep;
     switch (msg) {
+    case WM_APP_NOBG: {  // Remove background finished (rmbg.cpp)
+        std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring*>(lp));
+        ShowStatus(e, *text);
+        SetTimer(h, kTimerStatus, 6000, nullptr);
+        return 0;
+    }
     case WM_ERASEBKGND:
         return 1;
     case WM_PAINT: {
