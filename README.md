@@ -56,7 +56,7 @@ Windows' software encoder; quality-based, so a still screen costs almost nothing
 
 Screenshots are saved as PNG (or JPG) to the Windows Screenshots folder and copied to the clipboard
 (as image and PNG). A small preview pops up bottom-right: click opens the editor, right-click shows
-the file in Explorer. Settings can open the editor right after every capture instead. Tray icon right-click: capture menu, Pick a color, Recent colors (last 10; click one to
+the file in Explorer. Settings can open the editor right after every capture instead. Tray icon left-click opens Settings; right-click: capture menu, Pick a color, Recent colors (last 10; click one to
 copy it again) and Settings.
 
 After a pick, a small menu lists the color in every format: Gray 0-1 (brightness like Substance's

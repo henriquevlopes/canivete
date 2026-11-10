@@ -375,10 +375,12 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_APP_TRAY:
         switch (LOWORD(lp)) {
-        case WM_CONTEXTMENU:
-        case NIN_SELECT:
-        case NIN_KEYSELECT:
+        case WM_CONTEXTMENU:  // right-click (or Shift+F10 / the menu key): the menu
             ShowMenu();
+            break;
+        case NIN_SELECT:  // left-click (or Enter / Space): Settings
+        case NIN_KEYSELECT:
+            SettingsUI_Show();
             break;
         case NIN_BALLOONUSERCLICK:
             if (auto f = std::move(g_noticeClick)) {
