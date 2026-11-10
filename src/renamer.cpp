@@ -1,6 +1,7 @@
 // File and folder renamer: search and replace (plain or regex) with a live preview, counters,
 // date tokens and text case. Renames in one IFileOperation, so Ctrl+Z in Explorer undoes it.
 #include "app.h"
+#include "fluent.h"
 #include "theme.h"
 
 #include "../res/resource.h"
@@ -25,13 +26,15 @@ namespace {
 
 constexpr wchar_t kClass[] = L"CaniveteRenamer";
 constexpr wchar_t kTitle[] = L"Canivete Rename";
-constexpr DWORD kStyle = WS_OVERLAPPEDWINDOW;
+constexpr DWORD kStyle = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
 constexpr DWORD kExStyle = WS_EX_CONTROLPARENT | WS_EX_ACCEPTFILES;
 constexpr UINT_PTR kTimerPreview = 1;
 constexpr size_t kMaxItems = 20000;
 // Layout in 96-DPI pixels.
-constexpr int kW = 680, kH = 620, kMinW = 560, kMinH = 440;
-constexpr int kM = 16, kCX = 112, kFooter = 56;
+constexpr int kW = 720, kH = 660, kMinW = 600, kMinH = 480;
+constexpr int kM = 20, kCX = 120, kFooter = 64;
+constexpr int kCtlH = 32;  // buttons, text boxes, drop-down lists
+constexpr int kRowH = 40;  // list rows
 
 enum : int {
     IDC_STATIC = 400,
@@ -95,6 +98,9 @@ struct Ctl {
     int x, y, w, h;  // kRight: x = distance from the right edge; kStretchW: w = right margin (same for y/h)
     int anchor;
     bool bold;
+    int frame = 0;    // 1 = a text box in a painted frame, 2 = the list on a painted card
+    bool combo = false;
+    RECT fr{};        // the frame or card (device pixels), set by Layout
 };
 
 struct Item {
@@ -125,7 +131,8 @@ struct Opts {
 struct UI {
     HWND hwnd = nullptr;
     UINT dpi = 96;
-    HFONT font = nullptr, bold = nullptr;
+    HFONT font = nullptr, bold = nullptr;  // shared, never deleted
+    int lineH = 20;                        // text height of font
     std::vector<Ctl> ctls;
     std::vector<Item> items;
     std::vector<Row> rows;
@@ -637,46 +644,54 @@ HWND Add(const wchar_t* cls, const wchar_t* text, DWORD style, int id, int x, in
     U.ctls.push_back({c, x, y, w, h, anchor, bold});
     return c;
 }
-void Label(const wchar_t* text, int y) { Add(WC_STATICW, text, SS_LEFT | SS_NOPREFIX, IDC_STATIC, kM, y + 4, kCX - kM - 6, 18); }
+void Label(const wchar_t* text, int y) {
+    Add(WC_STATICW, text, SS_LEFT | SS_NOPREFIX, IDC_STATIC, kM, y + 6, kCX - kM - 6, 20);
+}
 HWND Check(const wchar_t* text, int id, int x, int y, int w) {
-    return Add(WC_BUTTONW, text, BS_AUTOCHECKBOX | WS_TABSTOP, id, x, y + 2, w, 20);
+    return Add(WC_BUTTONW, text, BS_AUTOCHECKBOX | WS_TABSTOP, id, x, y + 4, w, 24);
 }
 HWND Combo(int id, int x, int y, int w, std::initializer_list<const wchar_t*> items) {
     HWND c = Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, id, x, y, w, 220);
+    U.ctls.back().combo = true;
     for (const wchar_t* s : items) SendMessageW(c, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s));
     return c;
 }
+// A text box in a Windows 11 frame that stretches with the window.
+HWND Edit(int id, int y, const wchar_t* cue) {
+    HWND e = Add(WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, id, kCX, y, kM + 112, kCtlH, kStretchW);
+    U.ctls.back().frame = 1;
+    Theme_FramedEdit(e);
+    SendMessageW(e, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cue));
+    return e;
+}
 
 void Build() {
-    int y = 14;
+    int y = 16;
     Label(L"Search for", y);
-    HWND s = Add(WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, IDC_SEARCH, kCX, y, kM + 96, 24, kStretchW,
-                 WS_EX_CLIENTEDGE);
-    SendMessageW(s, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"empty = the whole name"));
-    Add(WC_BUTTONW, L"Numbers ▾", BS_PUSHBUTTON | WS_TABSTOP, IDC_NUMBERS, kM + 90, y - 1, 90, 26, kRight);
-    y += 34;
+    Edit(IDC_SEARCH, y, L"empty = the whole name");
+    Add(WC_BUTTONW, L"Numbers ▾", BS_PUSHBUTTON | WS_TABSTOP, IDC_NUMBERS, kM + 104, y, 104, kCtlH, kRight);
+    y += 40;
     Label(L"Replace with", y);
-    HWND r = Add(WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, IDC_REPLACE, kCX, y, kM + 96, 24, kStretchW,
-                 WS_EX_CLIENTEDGE);
-    SendMessageW(r, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"new text (tokens: counter, date …)"));
-    Add(WC_BUTTONW, L"Insert ▾", BS_PUSHBUTTON | WS_TABSTOP, IDC_TOKENS, kM + 90, y - 1, 90, 26, kRight);
-    y += 34;
-    Check(L"Regular expression", IDC_REGEX, kCX, y, 150);
-    Check(L"Every match", IDC_ALL, kCX + 160, y, 110);
-    Check(L"Match case", IDC_MATCHCASE, kCX + 280, y, 110);
-    y += 30;
+    Edit(IDC_REPLACE, y, L"new text (tokens: counter, date …)");
+    Add(WC_BUTTONW, L"Insert ▾", BS_PUSHBUTTON | WS_TABSTOP, IDC_TOKENS, kM + 104, y, 104, kCtlH, kRight);
+    y += 40;
+    Check(L"Regular expression", IDC_REGEX, kCX, y, 160);
+    Check(L"Every match", IDC_ALL, kCX + 170, y, 120);
+    Check(L"Match case", IDC_MATCHCASE, kCX + 300, y, 120);
+    y += 36;
     Label(L"Change", y);
-    Combo(IDC_APPLY, kCX, y, 180, {L"Name only", L"Extension only", L"Name and extension"});
-    Add(WC_STATICW, L"Text case", SS_RIGHT | SS_NOPREFIX, IDC_STATIC, kCX + 190, y + 4, 70, 18);
-    Combo(IDC_CASE, kCX + 268, y, 170, {L"Unchanged", L"lowercase", L"UPPERCASE", L"Title Case", L"Sentence case"});
-    y += 34;
+    Combo(IDC_APPLY, kCX, y, 190, {L"Name only", L"Extension only", L"Name and extension"});
+    Add(WC_STATICW, L"Text case", SS_RIGHT | SS_NOPREFIX, IDC_STATIC, kCX + 196, y + 6, 76, 20);
+    Combo(IDC_CASE, kCX + 280, y, 180, {L"Unchanged", L"lowercase", L"UPPERCASE", L"Title Case", L"Sentence case"});
+    y += 40;
     Label(L"Include", y);
-    Check(L"Files", IDC_FILES, kCX, y, 70);
-    Check(L"Folders", IDC_FOLDERS, kCX + 80, y, 80);
-    Check(L"Everything inside the folders", IDC_SUB, kCX + 170, y, 240);
-    y += 34;
+    Check(L"Files", IDC_FILES, kCX, y, 80);
+    Check(L"Folders", IDC_FOLDERS, kCX + 90, y, 96);
+    Check(L"Everything inside the folders", IDC_SUB, kCX + 196, y, 260);
+    y += 44;
     HWND list = Add(WC_LISTVIEWW, L"", LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | WS_TABSTOP, IDC_LIST, kM, y,
-                    kM, kFooter + 12, kStretchW | kStretchH, WS_EX_CLIENTEDGE);
+                    kM, kFooter + 16, kStretchW | kStretchH);
+    U.ctls.back().frame = 2;
     ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
     const wchar_t* cols[] = {L"Name", L"New name", L"Problem"};
     for (int i = 0; i < 3; ++i) {
@@ -685,21 +700,27 @@ void Build() {
         c.cx = 100;
         ListView_InsertColumn(list, i, &c);
     }
-    Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDC_STATUS, kM, 36, kM + 2 * 90 + 16, 18,
+    Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDC_STATUS, kM, 41, kM + 2 * 104 + 24, 18,
         kBottom | kStretchW);
-    Add(WC_BUTTONW, L"Rename", BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK, kM + 2 * 90 + 8, 42, 90, 28, kRight | kBottom);
-    Add(WC_BUTTONW, L"Close", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL, kM + 90, 42, 90, 28, kRight | kBottom);
+    Add(WC_BUTTONW, L"Rename", BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK, kM + 2 * 104 + 8, 48, 104, kCtlH, kRight | kBottom);
+    Add(WC_BUTTONW, L"Close", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL, kM + 104, 48, 104, kCtlH, kRight | kBottom);
 }
 
 void MakeFonts() {
-    if (U.font) DeleteObject(U.font);
-    if (U.bold) DeleteObject(U.bold);
-    NONCLIENTMETRICSW ncm{sizeof(ncm)};
-    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, U.dpi);
-    LOGFONTW lf = ncm.lfMessageFont;
-    U.font = CreateFontIndirectW(&lf);
-    lf.lfWeight = FW_SEMIBOLD;
-    U.bold = CreateFontIndirectW(&lf);
+    U.font = Fluent_Font(kTypeBody, U.dpi);
+    U.bold = Fluent_Font(kTypeBodyStrong, U.dpi);
+    HDC dc = GetDC(nullptr);
+    HGDIOBJ of = SelectObject(dc, U.font);
+    TEXTMETRICW tm{};
+    GetTextMetricsW(dc, &tm);
+    SelectObject(dc, of);
+    ReleaseDC(nullptr, dc);
+    U.lineH = tm.tmHeight;
+    // Rows kRowH tall: an empty image list of that height (the list destroys it with itself).
+    if (HWND list = Ctrl(IDC_LIST)) {
+        HIMAGELIST old = ListView_SetImageList(list, ImageList_Create(1, Px(kRowH), ILC_COLOR32, 0, 0), LVSIL_SMALL);
+        if (old) ImageList_Destroy(old);
+    }
 }
 
 void Layout() {
@@ -707,14 +728,26 @@ void Layout() {
     GetClientRect(U.hwnd, &rc);
     const int cw = rc.right, ch = rc.bottom;
     HDWP d = BeginDeferWindowPos(static_cast<int>(U.ctls.size()));
-    for (const Ctl& c : U.ctls) {
+    for (Ctl& c : U.ctls) {
         const int x = c.anchor & kRight ? cw - Px(c.x) : Px(c.x);
         const int y = c.anchor & kBottom ? ch - Px(c.y) : Px(c.y);
         const int w = c.anchor & kStretchW ? std::max(Px(20), cw - x - Px(c.w)) : Px(c.w);
         const int h = c.anchor & kStretchH ? std::max(Px(40), ch - y - Px(c.h)) : Px(c.h);
-        if (d) d = DeferWindowPos(d, c.wnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        RECT r{x, y, x + w, y + h};
+        c.fr = r;
+        if (c.frame == 1) {  // the text box inside its frame, one line high and centered
+            const int top = y + (h - U.lineH) / 2;
+            r = {x + Px(11), top, x + w - Px(11), top + U.lineH};
+            SendMessageW(c.wnd, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+        } else if (c.frame == 2) {  // the list inside its card
+            InflateRect(&r, -Px(4), -Px(4));
+        }
+        if (d) d = DeferWindowPos(d, c.wnd, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                                  SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (d) EndDeferWindowPos(d);
+    for (const Ctl& c : U.ctls)
+        if (c.combo) Fluent_ComboHeight(c.wnd, Px(kCtlH));
     HWND list = Ctrl(IDC_LIST);
     RECT lr;
     GetClientRect(list, &lr);
@@ -723,6 +756,30 @@ void Layout() {
     ListView_SetColumnWidth(list, 1, lw * 38 / 100);
     ListView_SetColumnWidth(list, 2, lw - 2 * (lw * 38 / 100));
     InvalidateRect(U.hwnd, nullptr, TRUE);
+}
+
+// The window background: the list's card, the text box frames and the footer.
+void PaintBack(HDC dc, const RECT& rc) {
+    const Palette& p = Pal();
+    FillRect(dc, &rc, Theme_Brush(p.window));
+    HWND focus = GetFocus();
+    for (const Ctl& c : U.ctls) {
+        if (c.frame == 2) Fluent_DrawCard(dc, c.fr, U.dpi);
+        else if (c.frame == 1) Fluent_DrawTextBox(dc, c.fr, U.dpi, focus == c.wnd, IsWindowEnabled(c.wnd) != FALSE);
+    }
+    RECT f = rc;
+    f.top = rc.bottom - Px(kFooter);
+    FillRect(dc, &f, Theme_Brush(p.footer));
+    f.bottom = f.top + std::max(1, Px(1));
+    FillRect(dc, &f, Theme_Brush(p.line));
+}
+
+void InvalidateFrame(HWND w) {
+    for (const Ctl& c : U.ctls)
+        if (c.wnd == w && c.frame == 1) {
+            InvalidateRect(U.hwnd, &c.fr, TRUE);
+            InvalidateRect(w, nullptr, TRUE);
+        }
 }
 
 void ApplyFonts() {
@@ -822,7 +879,7 @@ LRESULT OnNotify(NMHDR* nm) {
             const size_t i = cd->nmcd.dwItemSpec;
             if (i < U.rows.size()) {
                 const Row& r = U.rows[i];
-                cd->clrText = r.problem ? Pal().red : !r.changes ? Pal().grey : Pal().text;
+                cd->clrText = r.problem ? Pal().critical : !r.changes ? Pal().text3 : Pal().text;
                 SelectObject(cd->nmcd.hdc, cd->iSubItem == 1 && r.changes && !r.problem ? U.bold : U.font);
                 return CDRF_NEWFONT;
             }
@@ -843,6 +900,7 @@ LRESULT CALLBACK RenamerProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         U.dpi = GetDpiForWindow(h);
         MakeFonts();
         Build();
+        MakeFonts();  // again, now that the list exists (its row height)
         ApplyFonts();
         return 0;
     case WM_SIZE:
@@ -859,21 +917,32 @@ LRESULT CALLBACK RenamerProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         HDC dc = reinterpret_cast<HDC>(wp);
         RECT rc;
         GetClientRect(h, &rc);
-        const Palette& p = Pal();
-        FillRect(dc, &rc, Theme_Brush(p.window));
-        RECT f = rc;
-        f.top = rc.bottom - Px(kFooter);
-        FillRect(dc, &f, Theme_Brush(p.footer));
-        f.bottom = f.top + 1;
-        FillRect(dc, &f, Theme_Brush(p.line));
+        // Drawn off screen, then copied: the antialiased shapes would flicker otherwise.
+        HDC mem = CreateCompatibleDC(dc);
+        HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
+        HGDIOBJ old = SelectObject(mem, bmp);
+        PaintBack(mem, rc);
+        BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, old);
+        DeleteObject(bmp);
+        DeleteDC(mem);
         return 1;
+    }
+    case WM_LBUTTONDOWN: {  // a click in a text box frame, beside the box itself
+        const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        for (const Ctl& c : U.ctls)
+            if (c.frame == 1 && PtInRect(&c.fr, pt)) {
+                SetFocus(c.wnd);
+                break;
+            }
+        return 0;
     }
     case WM_CTLCOLORSTATIC: {
         HDC dc = reinterpret_cast<HDC>(wp);
         const bool footer = GetDlgCtrlID(reinterpret_cast<HWND>(lp)) == IDC_STATUS;
         const Palette& p = Pal();
         SetBkColor(dc, footer ? p.footer : p.window);
-        SetTextColor(dc, footer ? (U.badRegex ? p.red : p.grey) : p.text);
+        SetTextColor(dc, footer ? (U.badRegex ? p.critical : p.text2) : p.text);
         return reinterpret_cast<LRESULT>(Theme_Brush(footer ? p.footer : p.window));
     }
     case WM_CTLCOLORBTN: {  // push buttons: the corners around their rounded shape
@@ -923,6 +992,7 @@ LRESULT CALLBACK RenamerProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_SEARCH:
         case IDC_REPLACE:
             if (code == EN_CHANGE) SetTimer(h, kTimerPreview, 120, nullptr);
+            else if (code == EN_SETFOCUS || code == EN_KILLFOCUS) InvalidateFrame(reinterpret_cast<HWND>(lp));
             break;
         case IDC_SUB:
             ExpandChosenFolders();
@@ -957,11 +1027,6 @@ LRESULT CALLBACK RenamerProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         U.items.clear();
         U.rows.clear();
         return 0;
-    case WM_NCDESTROY:
-        DeleteObject(U.font);
-        DeleteObject(U.bold);
-        U.font = U.bold = nullptr;
-        break;
     }
     return DefWindowProcW(h, msg, wp, lp);
 }

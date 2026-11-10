@@ -2,6 +2,7 @@
 // Opened from the tray, from Explorer's right-click menu (each selected file arrives through
 // main.cpp and is gathered into one window) or by dropping files on the window.
 #include "app.h"
+#include "fluent.h"
 #include "theme.h"
 
 #include "../res/resource.h"
@@ -21,6 +22,7 @@
 #include <cwctype>
 #include <mutex>
 #include <thread>
+#include <windowsx.h>
 
 using Microsoft::WRL::ComPtr;
 
@@ -29,13 +31,18 @@ namespace {
 constexpr wchar_t kClass[] = L"CaniveteResizer";
 constexpr UINT WM_RS_PROGRESS = WM_APP + 30;
 constexpr UINT WM_RS_FINISHED = WM_APP + 31;
-constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
 constexpr DWORD kExStyle = WS_EX_CONTROLPARENT | WS_EX_ACCEPTFILES;
 // Layout in 96-DPI pixels.
-constexpr int kW = 470;
-constexpr int kM = 16;
-constexpr int kCX = kM + 96;
-constexpr int kCW = kW - kM - kCX;
+// Layout in 96-DPI pixels.
+constexpr int kW = 520;              // client width
+constexpr int kM = 20;               // window margin: cards span kM..kW - kM
+constexpr int kPad = 16;             // padding inside a card
+constexpr int kCX = kM + 120;        // left edge of the controls column (labels to its left)
+constexpr int kCR = kW - kM - kPad;  // right edge of the controls column
+constexpr int kCW = kCR - kCX;
+constexpr int kRow = 40;             // one row of a card
+constexpr int kCtlH = 32;            // buttons, text boxes, drop-down lists
 
 enum : int {
     IDC_STATIC = 300,
@@ -104,17 +111,31 @@ struct Job {
     std::wstring what;  // quick action: "turned right", "converted to PNG", ...
 };
 
+enum FontKind : int { kFontNormal, kFontBold, kFontCaption };
+enum FrameKind : int { kNoFrame, kFrameEdit, kFrameList };
+
 struct Ctl {
     HWND wnd;
-    int x, y, w, h;
-    bool bold;
+    int x, y, w, h;  // 96-DPI pixels; for a framed control, its frame
+    int font;
+    bool card;       // sits on a card
+    int frame;       // drawn inside a painted text box frame
+    bool combo;
+};
+
+struct Card {
+    int y, h;                // 96-DPI pixels (x and width are kM..kW - kM)
+    std::vector<int> lines;  // row separators
 };
 
 struct UI {
     HWND hwnd = nullptr;
     UINT dpi = 96;
-    HFONT font = nullptr, bold = nullptr;
+    HFONT font = nullptr, bold = nullptr, caption = nullptr;  // shared, never deleted
+    int lineH = 20;                                           // text height of font
     std::vector<Ctl> ctls;
+    std::vector<Card> cards;
+    bool inCard = false;
     int footerY = 0, height = 0;
     std::vector<std::wstring> files;
     std::vector<std::wstring> queued;  // arrived while a job was running
@@ -583,120 +604,218 @@ void Worker(std::shared_ptr<Job> j, HWND notify) {
 // ---- window --------------------------------------------------------------------------------
 
 HWND Add(const wchar_t* cls, const wchar_t* text, DWORD style, int id, int x, int y, int w, int h, DWORD ex = 0,
-         bool bold = false) {
+         int font = kFontNormal) {
     HWND c = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0, U.hwnd,
                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hinst, nullptr);
-    U.ctls.push_back({c, x, y, w, h, bold});
+    U.ctls.push_back({c, x, y, w, h, font, U.inCard, kNoFrame, false});
     return c;
 }
+void CardBegin(int y) {
+    U.cards.push_back({y, 0, {}});
+    U.inCard = true;
+}
+void CardEnd(int y) {
+    U.cards.back().h = y - U.cards.back().y;
+    U.inCard = false;
+}
+void RowLine(int y) { U.cards.back().lines.push_back(y); }
 void Heading(const wchar_t* text, int y) {
-    Add(WC_STATICW, text, SS_LEFT | SS_NOPREFIX, IDC_STATIC, kM, y, kW - 2 * kM, 22, 0, true);
+    Add(WC_STATICW, text, SS_LEFT | SS_NOPREFIX, IDC_STATIC, kM + 2, y, kW - 2 * kM, 22, 0, kFontBold);
 }
-void Label(const wchar_t* text, int y, int id = IDC_STATIC) {
-    Add(WC_STATICW, text, SS_LEFT | SS_NOPREFIX, id, kM, y + 4, kCX - kM - 8, 18);
+// A label at the left of a card row.
+void Label(const wchar_t* text, int row, int id = IDC_STATIC) {
+    Add(WC_STATICW, text, SS_LEFT | SS_NOPREFIX, id, kM + kPad, row + (kRow - 20) / 2, kCX - kM - kPad - 8, 20);
 }
-HWND Combo(int id, int x, int y, int w, std::initializer_list<const wchar_t*> items) {
-    HWND c = Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, id, x, y, w, 200);
-    for (const wchar_t* s : items) SendMessageW(c, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s));
+HWND Combo(int id, int x, int row, int w, std::initializer_list<const wchar_t*> items) {
+    HWND c = Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, id, x, row + (kRow - kCtlH) / 2, w, 200);
+    U.ctls.back().combo = true;
+    for (const wchar_t* t : items) SendMessageW(c, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(t));
     return c;
 }
-HWND Edit(int id, int x, int y, int w, DWORD style = 0) {
-    return Add(WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP | style, id, x, y, w, 24, WS_EX_CLIENTEDGE);
+// A text box in a Windows 11 frame (x, w are the frame's).
+HWND Edit(int id, int x, int row, int w, DWORD style = 0) {
+    HWND e = Add(WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP | style, id, x, row + (kRow - kCtlH) / 2, w, kCtlH);
+    U.ctls.back().frame = kFrameEdit;
+    Theme_FramedEdit(e);
+    return e;
+}
+// An on/off option across a whole card row: text at the left, the switch at the right.
+HWND Switch(int id, const wchar_t* text, int row) {
+    HWND b = Add(WC_BUTTONW, text, BS_AUTOCHECKBOX | WS_TABSTOP, id, kM + kPad, row + (kRow - kCtlH) / 2,
+                 kW - 2 * kM - 2 * kPad, kCtlH);
+    Theme_AsSwitch(b);
+    return b;
 }
 
 void Build() {
-    int y = 14;
-    Heading(L"Images", y);
-    Add(WC_BUTTONW, L"Add…", BS_PUSHBUTTON | WS_TABSTOP, IDC_ADD, kW - kM - 84, y - 4, 84, 26);
-    y += 28;
+    int y = 16;
+    Heading(L"Images", y + 6);
+    Add(WC_BUTTONW, L"Add…", BS_PUSHBUTTON | WS_TABSTOP, IDC_ADD, kW - kM - 96, y, 96, kCtlH);
+    y += 44;
     Add(WC_LISTBOXW, L"", LBS_NOINTEGRALHEIGHT | LBS_EXTENDEDSEL | LBS_WANTKEYBOARDINPUT | LBS_NOTIFY | WS_VSCROLL |
                               WS_TABSTOP,
-        IDC_LIST, kM, y, kW - 2 * kM, 96, WS_EX_CLIENTEDGE);
-    y += 100;
-    Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDC_COUNT, kM, y, kW - 2 * kM, 18);
+        IDC_LIST, kM, y, kW - 2 * kM, 84);
+    U.ctls.back().frame = kFrameList;
+    y += 88;
+    Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDC_COUNT, kM + 2, y, kW - 2 * kM, 18, 0, kFontCaption);
     y += 30;
 
     Heading(L"Size", y);
     y += 28;
+    CardBegin(y);
+    y += 8;
     for (int i = 0; i < 3; ++i) {
         wchar_t t[64];
-        Add(WC_BUTTONW, kPresets[i].name, BS_AUTORADIOBUTTON | WS_TABSTOP | (i == 0 ? WS_GROUP : 0), IDC_SIZE0 + i, kM + 4, y,
-            90, 20);
+        Add(WC_BUTTONW, kPresets[i].name, BS_AUTORADIOBUTTON | WS_TABSTOP | (i == 0 ? WS_GROUP : 0), IDC_SIZE0 + i,
+            kM + kPad, y + 2, 110, 24);
         swprintf_s(t, L"%d × %d", kPresets[i].w, kPresets[i].h);
-        Add(WC_STATICW, t, SS_LEFT | SS_NOPREFIX, IDC_STATIC, kM + 100, y + 2, 120, 18);
-        y += 26;
+        Add(WC_STATICW, t, SS_LEFT | SS_NOPREFIX, IDC_STATIC, kCX, y + 4, 140, 20);
+        y += 28;
     }
-    Add(WC_BUTTONW, L"Custom", BS_AUTORADIOBUTTON | WS_TABSTOP, IDC_SIZE0 + kCustom, kM + 4, y + 2, 90, 20);
-    HWND w = Edit(IDC_W, kM + 100, y, 64, ES_NUMBER);
+    Add(WC_BUTTONW, L"Custom", BS_AUTORADIOBUTTON | WS_TABSTOP, IDC_SIZE0 + kCustom, kM + kPad, y + 8, 110, 24);
+    HWND w = Edit(IDC_W, kCX, y, 76, ES_NUMBER);
     SendMessageW(w, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"width"));
-    Add(WC_STATICW, L"×", SS_CENTER | SS_NOPREFIX, IDC_X, kM + 166, y + 4, 18, 18);
-    HWND h = Edit(IDC_H, kM + 186, y, 64, ES_NUMBER);
+    Add(WC_STATICW, L"×", SS_CENTER | SS_NOPREFIX, IDC_X, kCX + 76, y + 10, 20, 20);
+    HWND h = Edit(IDC_H, kCX + 96, y, 76, ES_NUMBER);
     SendMessageW(h, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"height"));
-    Combo(IDC_UNIT, kM + 258, y, 100, {L"pixels", L"percent"});
-    y += 34;
+    Combo(IDC_UNIT, kCX + 182, y, kCR - kCX - 182, {L"pixels", L"percent"});
+    y += kRow + 8;
+    RowLine(y);
     Label(L"Fit", y);
     Combo(IDC_FIT, kCX, y, kCW, {L"Fit inside (keep the whole image)", L"Fill and crop the edges",
                                  L"Stretch to exactly this size"});
-    y += 34;
-    Add(WC_BUTTONW, L"Only make images smaller, never bigger", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_SHRINK, kM, y,
-        kW - 2 * kM, 20);
-    y += 26;
-    Add(WC_BUTTONW, L"Turn the size sideways for tall (portrait) images", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_ORIENT, kM,
-        y, kW - 2 * kM, 20);
-    y += 36;
+    y += kRow;
+    RowLine(y);
+    Switch(IDC_SHRINK, L"Only make images smaller, never bigger", y);
+    y += kRow;
+    RowLine(y);
+    Switch(IDC_ORIENT, L"Turn the size sideways for tall (portrait) images", y);
+    y += kRow;
+    CardEnd(y);
+    y += 16;
 
     Heading(L"Save", y);
     y += 28;
+    CardBegin(y);
     Label(L"Save to", y);
     Combo(IDC_OUTPUT, kCX, y, kCW, {L"New files next to the originals", L"New files in a folder",
                                     L"Replace the originals (old ones go to the Recycle Bin)"});
-    y += 34;
+    y += kRow;
+    RowLine(y);
     Label(L"Folder", y, IDC_FLABEL);
-    HWND folder = Edit(IDC_FOLDER, kCX, y, kCW - 90);
+    HWND folder = Edit(IDC_FOLDER, kCX, y, kCW - 104);
     SHAutoComplete(folder, SHACF_FILESYS_DIRS);
-    Add(WC_BUTTONW, L"Browse…", BS_PUSHBUTTON | WS_TABSTOP, IDC_BROWSE, kCX + kCW - 84, y - 1, 84, 26);
-    y += 34;
+    Add(WC_BUTTONW, L"Browse…", BS_PUSHBUTTON | WS_TABSTOP, IDC_BROWSE, kCR - 96, y + (kRow - kCtlH) / 2, 96, kCtlH);
+    y += kRow;
+    RowLine(y);
     Label(L"Format", y);
     Combo(IDC_FORMAT, kCX, y, 170, {L"Same as the original", L"JPG", L"PNG"});
-    Add(WC_STATICW, L"JPG quality", SS_RIGHT | SS_NOPREFIX, IDC_QLABEL, kCX + 176, y + 4, 80, 18);
-    HWND q = Edit(IDC_QUALITY, kCX + 262, y, 46, ES_NUMBER);
+    Add(WC_STATICW, L"JPG quality", SS_RIGHT | SS_NOPREFIX, IDC_QLABEL, kCX + 174, y + 10, 80, 20);
+    HWND q = Edit(IDC_QUALITY, kCX + 258, y, 58, ES_NUMBER);
     HWND spin = Add(UPDOWN_CLASSW, L"", UDS_SETBUDDYINT | UDS_ARROWKEYS | UDS_NOTHOUSANDS | UDS_HOTTRACK, IDC_QSPIN,
-                    kCX + 308, y, 18, 24);
+                    kCX + 318, y + (kRow - kCtlH) / 2, 20, kCtlH);
     SendMessageW(spin, UDM_SETBUDDY, reinterpret_cast<WPARAM>(q), 0);
     SendMessageW(spin, UDM_SETRANGE32, 1, 100);
-    y += 34;
-    Add(WC_BUTTONW, L"Keep photo info (camera, date, location, color profile)", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_META,
-        kM, y, kW - 2 * kM, 20);
-    y += 34;
+    y += kRow;
+    RowLine(y);
+    Switch(IDC_META, L"Keep photo info (camera, date, location, color profile)", y);
+    y += kRow;
+    CardEnd(y);
+    y += 20;
 
     U.footerY = y;
-    y += 12;
-    Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDC_STATUS, kM, y + 6, kW - 2 * kM - 2 * 84 - 16, 18);
-    Add(WC_BUTTONW, L"Resize", BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK, kW - kM - 2 * 84 - 8, y, 84, 28);
-    Add(WC_BUTTONW, L"Close", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL, kW - kM - 84, y, 84, 28);
-    U.height = y + 28 + 12;
+    y += 16;
+    Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDC_STATUS, kM, y + 8, kW - 2 * kM - 2 * 104 - 16, 18, 0,
+        kFontCaption);
+    Add(WC_BUTTONW, L"Resize", BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK, kW - kM - 2 * 104 - 8, y, 104, kCtlH);
+    Add(WC_BUTTONW, L"Close", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL, kW - kM - 104, y, 104, kCtlH);
+    U.height = y + kCtlH + 16;
 }
 
 void MakeFonts() {
-    if (U.font) DeleteObject(U.font);
-    if (U.bold) DeleteObject(U.bold);
-    NONCLIENTMETRICSW ncm{sizeof(ncm)};
-    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, U.dpi);
-    LOGFONTW lf = ncm.lfMessageFont;
-    U.font = CreateFontIndirectW(&lf);
-    lf.lfWeight = FW_SEMIBOLD;
-    lf.lfHeight = MulDiv(lf.lfHeight, 112, 100);
-    U.bold = CreateFontIndirectW(&lf);
+    U.font = Fluent_Font(kTypeBody, U.dpi);
+    U.bold = Fluent_Font(kTypeBodyStrong, U.dpi);
+    U.caption = Fluent_Font(kTypeCaption, U.dpi);
+    HDC dc = GetDC(nullptr);
+    HGDIOBJ of = SelectObject(dc, U.font);
+    TEXTMETRICW tm{};
+    GetTextMetricsW(dc, &tm);
+    SelectObject(dc, of);
+    ReleaseDC(nullptr, dc);
+    U.lineH = tm.tmHeight;
+}
+
+RECT FrameRect(const Ctl& c) { return {Px(c.x), Px(c.y), Px(c.x + c.w), Px(c.y + c.h)}; }
+
+// Where a framed control goes inside its frame.
+RECT InnerRect(const Ctl& c) {
+    RECT r = FrameRect(c);
+    if (c.frame == kFrameList) {
+        InflateRect(&r, -Px(4), -Px(4));
+        return r;
+    }
+    const int in = Px(c.w <= 80 ? 8 : 11);
+    const int top = r.top + (r.bottom - r.top - U.lineH) / 2;
+    return {r.left + in, top, r.right - in, top + U.lineH};
 }
 
 void Layout() {
     HDWP d = BeginDeferWindowPos(static_cast<int>(U.ctls.size()));
     for (const Ctl& c : U.ctls) {
-        SendMessageW(c.wnd, WM_SETFONT, reinterpret_cast<WPARAM>(c.bold ? U.bold : U.font), FALSE);
-        if (d) d = DeferWindowPos(d, c.wnd, nullptr, Px(c.x), Px(c.y), Px(c.w), Px(c.h), SWP_NOZORDER | SWP_NOACTIVATE);
+        HFONT f = c.font == kFontBold ? U.bold : c.font == kFontCaption ? U.caption : U.font;
+        SendMessageW(c.wnd, WM_SETFONT, reinterpret_cast<WPARAM>(f), FALSE);
+        RECT r = c.frame ? InnerRect(c) : FrameRect(c);
+        if (c.frame == kFrameEdit) SendMessageW(c.wnd, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+        if (d) d = DeferWindowPos(d, c.wnd, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                                  SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (d) EndDeferWindowPos(d);
+    for (const Ctl& c : U.ctls)
+        if (c.combo) Fluent_ComboHeight(c.wnd, Px(kCtlH));
     InvalidateRect(U.hwnd, nullptr, TRUE);
+}
+
+const Ctl* Find(HWND w) {
+    for (const Ctl& c : U.ctls)
+        if (c.wnd == w) return &c;
+    return nullptr;
+}
+
+// The window background: the cards, their row lines, the text box frames and the footer.
+void PaintBack(HDC dc, const RECT& rc) {
+    const Palette& p = Pal();
+    FillRect(dc, &rc, Theme_Brush(p.window));
+    const int one = std::max(1, Px(1));
+    for (const Card& c : U.cards) {
+        const RECT r{Px(kM), Px(c.y), Px(kW - kM), Px(c.y + c.h)};
+        Fluent_DrawCard(dc, r, U.dpi, 6);
+        for (int ly : c.lines) {
+            const RECT l{r.left + one, Px(ly), r.right - one, Px(ly) + one};
+            FillRect(dc, &l, Theme_Brush(p.divider));
+        }
+    }
+    HWND focus = GetFocus();
+    for (const Ctl& c : U.ctls) {
+        if (!c.frame) continue;
+        const bool enabled = IsWindowEnabled(c.wnd) != FALSE;
+        // The list keeps the control fill while focused (its own background doesn't change).
+        Fluent_DrawTextBox(dc, FrameRect(c), U.dpi, focus == c.wnd, enabled,
+                           c.frame == kFrameList && enabled ? p.ctlFill : CLR_INVALID);
+    }
+    RECT f = rc;
+    f.top = Px(U.footerY);
+    FillRect(dc, &f, Theme_Brush(p.footer));
+    f.bottom = f.top + one;
+    FillRect(dc, &f, Theme_Brush(p.line));
+}
+
+void InvalidateFrame(HWND w) {
+    if (const Ctl* c = Find(w)) {
+        if (!c->frame) return;
+        const RECT r = FrameRect(*c);
+        InvalidateRect(U.hwnd, &r, TRUE);
+        InvalidateRect(w, nullptr, TRUE);
+    }
 }
 
 SIZE WindowSize() {
@@ -727,6 +846,7 @@ void UpdateEnable() {
                    int{IDC_SHRINK}, int{IDC_OUTPUT}, int{IDC_FORMAT}, int{IDC_META}})
         EnableWindow(Item(id), !busy);
     SetWindowTextW(Item(IDOK), busy ? L"Stop" : L"Resize");
+    if (U.hwnd) InvalidateRect(U.hwnd, nullptr, TRUE);  // text box frames follow
 }
 
 void ShowFiles() {
@@ -1000,31 +1120,57 @@ LRESULT CALLBACK ResizerProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         HDC dc = reinterpret_cast<HDC>(wp);
         RECT rc;
         GetClientRect(h, &rc);
-        const Palette& p = Pal();
-        FillRect(dc, &rc, Theme_Brush(p.window));
-        RECT f = rc;
-        f.top = Px(U.footerY);
-        FillRect(dc, &f, Theme_Brush(p.footer));
-        f.bottom = f.top + 1;
-        FillRect(dc, &f, Theme_Brush(p.line));
+        // Drawn off screen, then copied: the antialiased cards would flicker otherwise.
+        HDC mem = CreateCompatibleDC(dc);
+        HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
+        HGDIOBJ old = SelectObject(mem, bmp);
+        PaintBack(mem, rc);
+        BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, old);
+        DeleteObject(bmp);
+        DeleteDC(mem);
         return 1;
+    }
+    case WM_LBUTTONDOWN: {  // a click in a text box frame, beside the box itself
+        const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        for (const Ctl& c : U.ctls) {
+            const RECT r = FrameRect(c);
+            if (c.frame && PtInRect(&r, pt) && IsWindowEnabled(c.wnd)) {
+                SetFocus(c.wnd);
+                break;
+            }
+        }
+        return 0;
     }
     case WM_CTLCOLORSTATIC: {
         HDC dc = reinterpret_cast<HDC>(wp);
-        const int id = GetDlgCtrlID(reinterpret_cast<HWND>(lp));
-        const bool footer = id == IDC_STATUS;
+        HWND w = reinterpret_cast<HWND>(lp);
+        const int id = GetDlgCtrlID(w);
         const Palette& p = Pal();
-        SetBkColor(dc, footer ? p.footer : p.window);
-        SetTextColor(dc, id == IDC_COUNT || footer ? p.grey : p.text);
-        return reinterpret_cast<LRESULT>(Theme_Brush(footer ? p.footer : p.window));
+        const Ctl* c = Find(w);
+        COLORREF bg = c && c->card ? p.card : p.window, fg = p.text;
+        if (id == IDC_STATUS) {
+            bg = p.footer;
+            fg = p.text2;
+        } else if (id == IDC_COUNT) {
+            fg = p.text2;
+        } else if (c && c->frame) {  // a disabled text box: the fill of its frame
+            const bool enabled = IsWindowEnabled(w) != FALSE;
+            bg = !enabled ? p.ctlDisabled : GetFocus() == w ? p.ctlFocus : p.ctlFill;
+            if (!enabled) fg = p.textDis;
+        }
+        SetBkColor(dc, bg);
+        SetTextColor(dc, fg);
+        return reinterpret_cast<LRESULT>(Theme_Brush(bg));
     }
     case WM_CTLCOLORBTN: {  // push buttons: the corners around their rounded shape
+        const Ctl* c = Find(reinterpret_cast<HWND>(lp));
         RECT r;
         GetWindowRect(reinterpret_cast<HWND>(lp), &r);
         MapWindowPoints(nullptr, h, reinterpret_cast<POINT*>(&r), 2);
-        RECT rc;
-        GetClientRect(h, &rc);
-        return reinterpret_cast<LRESULT>(Theme_Brush(r.top >= Px(U.footerY) ? Pal().footer : Pal().window));
+        const Palette& p = Pal();
+        return reinterpret_cast<LRESULT>(
+            Theme_Brush(c && c->card ? p.card : r.top >= Px(U.footerY) ? p.footer : p.window));
     }
     case DM_GETDEFID:
         return MAKELRESULT(IDOK, DC_HASDEFID);
@@ -1060,6 +1206,9 @@ LRESULT CALLBACK ResizerProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_COMMAND: {
         const int id = LOWORD(wp), code = HIWORD(wp);
+        if ((id == IDC_LIST && (code == LBN_SETFOCUS || code == LBN_KILLFOCUS)) ||
+            (id != IDC_LIST && (code == EN_SETFOCUS || code == EN_KILLFOCUS)))
+            InvalidateFrame(reinterpret_cast<HWND>(lp));
         switch (id) {
         case IDOK:
             if (Busy()) U.job->cancel = true;
@@ -1110,14 +1259,11 @@ LRESULT CALLBACK ResizerProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         U.job.reset();
         U.hwnd = nullptr;
         U.ctls.clear();
+        U.cards.clear();
+        U.inCard = false;
         U.files.clear();
         U.queued.clear();
         return 0;
-    case WM_NCDESTROY:
-        DeleteObject(U.font);
-        DeleteObject(U.bold);
-        U.font = U.bold = nullptr;
-        break;
     }
     return DefWindowProcW(h, msg, wp, lp);
 }

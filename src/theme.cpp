@@ -301,11 +301,31 @@ void DrawPush(HWND b, HDC dc, const RECT& rc, UINT state, bool enabled) {
     const bool focus = ShowFocus(b);
     RECT br = rc;
     if (focus) InflateRect(&br, -Scale(b, 3), -Scale(b, 3));  // room for the ring inside the control
-    const std::wstring text = TextOf(b);
+    std::wstring text = TextOf(b);
+    // "Insert ▾" (a button that opens a menu): the text, then the Windows 11 chevron.
+    const bool menu = text.size() > 2 && text.compare(text.size() - 2, 2, L" ▾") == 0;
+    if (menu) text.resize(text.size() - 2);
     const LRESULT ui = SendMessageW(b, WM_QUERYUISTATE, 0, 0);
-    Fluent_DrawButton(dc, br, dpi, text.c_str(), reinterpret_cast<HFONT>(SendMessageW(b, WM_GETFONT, 0, 0)), accent,
-                      (state & BST_HOT) != 0, (state & BST_PUSHED) != 0, enabled, false,
-                      (ui & UISF_HIDEACCEL) ? DT_HIDEPREFIX : 0);
+    Fluent_DrawButton(dc, br, dpi, menu ? nullptr : text.c_str(),
+                      reinterpret_cast<HFONT>(SendMessageW(b, WM_GETFONT, 0, 0)), accent, (state & BST_HOT) != 0,
+                      (state & BST_PUSHED) != 0, enabled, false, (ui & UISF_HIDEACCEL) ? DT_HIDEPREFIX : 0);
+    if (menu) {
+        const COLORREF fg = !enabled ? (accent ? g_pal.onAccentDis : g_pal.textDis)
+                            : accent ? g_pal.onAccent
+                                     : g_pal.text;
+        HGDIOBJ of = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(b, WM_GETFONT, 0, 0)));
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, fg);
+        SIZE ts{};
+        GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &ts);
+        const int gap = Scale(b, 8), gw = Scale(b, 12);
+        const int x = (br.left + br.right - (ts.cx + gap + gw)) / 2;
+        RECT tr{x, br.top, x + ts.cx + 1, br.bottom};
+        DrawTextW(dc, text.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | ((ui & UISF_HIDEACCEL) ? DT_HIDEPREFIX : 0));
+        SelectObject(dc, of);
+        RECT gr{tr.right + gap - 1, br.top, tr.right + gap - 1 + gw, br.bottom};
+        Fluent_DrawGlyph(dc, gr, Glyph::ChevronDown, 10, dpi, fg);
+    }
     if (focus) Fluent_DrawFocus(dc, rc, dpi, 7);
 }
 
