@@ -22,12 +22,12 @@ Plan and research notes: [PLAN.md](PLAN.md).
 | Hotkey | Action |
 |---|---|
 | Ctrl+PrtSc | Region: drag a box, or click a highlighted window / monitor. Esc cancels, arrows nudge 1 px (Shift = 10), right-click drops a drag |
-| Alt+PrtSc | Active window |
+| Alt+PrtSc | The window under the mouse (the whole monitor over the desktop or taskbar) |
 | PrtSc | All monitors (or the one under the mouse, see settings) |
 
 Screenshots are saved as PNG (or JPG) to the Windows Screenshots folder and copied to the clipboard
 (as image and PNG). A small preview pops up bottom-right: click opens the image, right-click shows it
-in Explorer. Tray icon right-click: menu, settings, start with Windows.
+in Explorer. Tray icon right-click: capture menu and Settings.
 
 Settings: tray > Settings… opens a window for hotkeys (click a box, press the keys), folder, file
 name (with an Insert menu of tokens and a live example), PNG/JPG and quality, full-screen mode,

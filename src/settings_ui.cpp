@@ -6,7 +6,6 @@
 #include "../res/resource.h"
 
 #include <commctrl.h>
-#include <shellapi.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
 #include <wrl/client.h>
@@ -54,7 +53,6 @@ enum : int {
     IDC_MAGNIFIER,
     IDC_AUTOSTART,
     IDC_APPLY,
-    IDC_OPENINI,
 };
 
 const wchar_t* const kHkNames[3] = {L"Region screenshot", L"Window screenshot", L"Full screenshot"};
@@ -198,7 +196,6 @@ void Build() {
     U.footerY = y;
     y += 12;
     const int bw = 84;
-    Button(IDC_OPENINI, L"Open settings file", kM, y, 130, 28);
     Button(IDOK, L"OK", kW - kM - 3 * bw - 16, y, bw, 28, BS_DEFPUSHBUTTON);
     Button(IDCANCEL, L"Cancel", kW - kM - 2 * bw - 8, y, bw, 28);
     Button(IDC_APPLY, L"Apply", kW - kM - bw, y, bw, 28);
@@ -629,10 +626,6 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case IDC_TOKENS:
             TokenMenu();
-            break;
-        case IDC_OPENINI:
-            ShellExecuteW(nullptr, L"open", L"notepad.exe", (L"\"" + SettingsPath() + L"\"").c_str(), nullptr,
-                          SW_SHOWNORMAL);
             break;
         }
         return 0;

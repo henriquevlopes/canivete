@@ -521,6 +521,21 @@ void Capture_Init() {
 
 bool Capture_IsActive() { return S.active; }
 
+namespace {
+
+// Top-level window under the mouse; nullptr over the desktop, taskbar or Canivete's own windows.
+HWND WindowUnderCursor() {
+    POINT p;
+    GetCursorPos(&p);
+    HWND h = GetAncestor(WindowFromPoint(p), GA_ROOT);
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    if (!h || IsShellBackground(h) || pid == GetCurrentProcessId()) return nullptr;
+    return h;
+}
+
+}  // namespace
+
 void Capture_Start(CaptureMode mode) {
     if (S.active) return;
     HWND fg = GetForegroundWindow();
@@ -529,7 +544,8 @@ void Capture_Start(CaptureMode mode) {
         StartRegion(fg);
         break;
     case CaptureMode::Window:
-        GrabDirect(IsShellBackground(fg) ? MonitorUnderCursor() : WindowBounds(fg), fg);
+        if (HWND w = WindowUnderCursor()) GrabDirect(WindowBounds(w), w);
+        else GrabDirect(MonitorUnderCursor(), nullptr);
         break;
     case CaptureMode::Full:
         GrabDirect(g_settings.fullScreen == L"monitor" ? MonitorUnderCursor() : VirtualScreenRect(), fg);

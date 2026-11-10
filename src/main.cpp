@@ -12,7 +12,7 @@ HWND g_mainWnd = nullptr;
 
 namespace {
 
-enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_OPEN_FOLDER, ID_SETTINGS, ID_AUTOSTART, ID_EXIT };
+enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_OPEN_FOLDER, ID_SETTINGS, ID_EXIT };
 constexpr UINT kCmdAlreadyRunning = 99;
 constexpr UINT kCmdSettings = 98;
 constexpr UINT_PTR kTimerDeferred = 10;
@@ -147,7 +147,6 @@ void ShowMenu() {
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_OPEN_FOLDER, L"Open screenshots folder");
     AppendMenuW(m, MF_STRING, ID_SETTINGS, L"Settings…");
-    AppendMenuW(m, MF_STRING | (AutostartEnabled() ? MF_CHECKED : 0), ID_AUTOSTART, L"Start with Windows");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_EXIT, L"Exit");
     POINT p;
@@ -202,9 +201,6 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case ID_SETTINGS:
             SettingsUI_Show();
-            break;
-        case ID_AUTOSTART:
-            SetAutostart(!AutostartEnabled());
             break;
         case ID_EXIT:
             DestroyWindow(h);
