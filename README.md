@@ -68,7 +68,8 @@ Recent colors live in `%APPDATA%\Canivete\colors.txt`.
 Settings: tray > Settings… opens a small window with a tab per feature on the left (General,
 Screenshots, Color picker, GIF recording, Video recording, Image tools, Renamer, Maintenance; Ctrl+Tab switches).
 General has the folder, file name (with an Insert menu of tokens and a live example), PNG/JPG and
-quality, and start with Windows; each feature tab has its hotkey (click the box, press the keys) and
+quality, start with Windows and Appearance (Follow Windows, Light or Dark: every Canivete window, its title bar and the
+tray menu switch at once, and Follow Windows tracks the Windows app mode live); each feature tab has its hotkey (click the box, press the keys) and
 options. Each feature also has an On/Off switch next to its name in the list: a feature that is off loses its hotkeys, its
 tray menu entries and its Explorer right-click and Send to entries (its tab is greyed out).
 Everything is stored in
@@ -224,6 +225,7 @@ and publishes it with its SHA256 on `henriquevlopes/canivete-releases`; running 
 - `src/alpha.cpp` — Make alpha window: freehand mask, detail/background picks, threshold engine, square power-of-two output
 - `src/maint.cpp` — Computer maintenance window: Overview, Updates, Installed apps, Cleanup, Startup apps, Health tabs; worker threads; elevated jobs report back with WM_COPYDATA; daily background check
 - `src/maint_info.cpp` — Overview checks: antivirus (Security Center + Defender WMI), device problems, battery wear, last Windows Update, installed apps
+- `src/theme.cpp` — dark/light theme: palette shared by every window, dark title bars, control themes (DarkMode_Explorer/CFD/ItemsView), dark check boxes, dark tray menu, live switch on `ImmersiveColorSet`
 - `src/update.cpp` — Canivete self-update: GitHub releases API (WinHTTP), SHA256 check (BCrypt), silent setup run
 - `src/maint_ops.cpp` — the checks and jobs: Windows Update agent (COM), winget, GPU driver info, cleanup whitelist, startup entries (StartupApproved), restore point, DISM/sfc, defrag
 - `src/shell.cpp` — Explorer right-click Canivete submenu (image actions, Rename), Send to shortcuts, Start menu Computer Maintenance

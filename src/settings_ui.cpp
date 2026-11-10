@@ -4,6 +4,7 @@
 // any monitor DPI. Hotkey boxes record keys through a low-level keyboard hook that is only installed
 // while one of them has focus, so Win and PrintScreen combinations can be picked too.
 #include "app.h"
+#include "theme.h"
 
 #include "../res/resource.h"
 
@@ -32,12 +33,6 @@ constexpr wchar_t kClass[] = L"CaniveteSettings";
 constexpr UINT WM_HK_CHANGED = WM_APP + 20;  // posted by the keyboard hook; wParam 1 = a hotkey changed
 constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
 constexpr DWORD kExStyle = WS_EX_CONTROLPARENT;
-constexpr COLORREF kFocusBg = RGB(255, 236, 236);  // hotkey box waiting for keys
-constexpr COLORREF kGrey = RGB(105, 105, 105);
-constexpr COLORREF kRed = RGB(200, 30, 40);
-constexpr COLORREF kNavBg = RGB(243, 243, 243);
-constexpr COLORREF kNavSel = RGB(226, 226, 226);
-constexpr COLORREF kAccent = RGB(0, 95, 184);
 // Layout in 96-DPI pixels.
 constexpr int kW = 684;              // client width
 constexpr int kM = 16;               // outer margin
@@ -85,6 +80,7 @@ enum : int {
     IDC_MAINTDAILY,
     IDC_CHECKUPD,
     IDC_UPDNOW,
+    IDC_THEME,
     IDC_OFFNOTE0 = 300,  // "Turned off" notes 300..305, one per Feature
 };
 
@@ -129,7 +125,6 @@ struct UI {
     HWND hwnd = nullptr, nav = nullptr;
     UINT dpi = 96;
     HFONT font = nullptr, bold = nullptr, title = nullptr;
-    HBRUSH focusBrush = nullptr, navBrush = nullptr;
     std::vector<Ctl> ctls;
     int buildTab = -1;
     bool buildHeader = false;
@@ -267,6 +262,11 @@ void Build() {
     y += 44;
     Heading(L"Windows", y);
     y += 28;
+    Label(L"Appearance", y);
+    HWND theme = Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, IDC_THEME, kCX, y, 150, 200);
+    for (const wchar_t* t : {L"Follow Windows", L"Light", L"Dark"})
+        SendMessageW(theme, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(t));
+    y += 36;
     Check(IDC_AUTOSTART, L"Start Canivete with Windows", y);
     y += 26;
     Check(IDC_CHECKUPD, L"Tell me when a new version of Canivete is out", y);
@@ -631,6 +631,7 @@ void Populate() {
     SetCheck(IDC_AUTOSTART, AutostartEnabled());
     SetCheck(IDC_CHECKUPD, s.checkUpdates);
     SetCheck(IDC_MAINTDAILY, s.maintDaily);
+    SendMessageW(Item(IDC_THEME), CB_SETCURSEL, s.theme == L"light" ? 1 : s.theme == L"dark" ? 2 : 0, 0);
     CheckHotkeys();
     UpdateEnable();
     UpdateExample();
@@ -740,32 +741,34 @@ void DrawSwitch(HDC dc, const RECT& pill, bool on) {
     const Gdiplus::RectF r = ToRectF(pill);
     const float h = r.Height;
     const float line = std::max(1.0f, Px(10) / 10.0f);
-    if (on) RoundShape(s.g, r, h / 2, kAccent, kAccent, 0);
-    else RoundShape(s.g, r, h / 2, kNavBg, RGB(110, 110, 110), line);
+    const Palette& p = Pal();
+    if (on) RoundShape(s.g, r, h / 2, p.accent, p.accent, 0);
+    else RoundShape(s.g, r, h / 2, p.nav, p.switchLine, line);
     // Knob like Windows 11: a bit bigger when on.
     const float k = on ? h - Px(8) : h - Px(9);
     const float pad = (h - k) / 2;
     const float kx = on ? r.X + r.Width - pad - k : r.X + pad;
-    Gdiplus::SolidBrush kb(GpColor(on ? RGB(255, 255, 255) : RGB(90, 90, 90)));
+    Gdiplus::SolidBrush kb(GpColor(on ? p.onAccent : p.switchKnob));
     s.g.FillEllipse(&kb, kx, r.Y + pad, k, k);
 }
 
 void DrawNavItem(const DRAWITEMSTRUCT& d) {
     if (d.itemID == static_cast<UINT>(-1)) return;
     HDC dc = d.hDC;
-    FillColor(dc, d.rcItem, kNavBg);
+    const Palette& p = Pal();
+    FillColor(dc, d.rcItem, p.nav);
     RECT b = d.rcItem;
     InflateRect(&b, -Px(2), -Px(2));
     if (d.itemState & ODS_SELECTED) {
-        RoundFill(dc, b, Px(8), kNavSel, kNavSel);
+        RoundFill(dc, b, Px(8), p.navSel, p.navSel);
         RECT bar{b.left, b.top + Px(9), b.left + Px(3), b.bottom - Px(9)};
-        FillColor(dc, bar, kAccent);
+        FillColor(dc, bar, p.accent);
     }
     const TabDef& t = kTabs[d.itemID];
     const bool off = t.feature >= 0 && !U.on[t.feature];
     HGDIOBJ of = SelectObject(dc, U.font);
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, off ? kGrey : GetSysColor(COLOR_WINDOWTEXT));
+    SetTextColor(dc, off ? p.grey : p.text);
     RECT tr = b;
     tr.left += Px(14);
     tr.right -= Px(10);
@@ -776,7 +779,11 @@ void DrawNavItem(const DRAWITEMSTRUCT& d) {
     }
     DrawTextW(dc, t.name, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
     SelectObject(dc, of);
-    if ((d.itemState & ODS_FOCUS) && !(d.itemState & ODS_NOFOCUSRECT)) DrawFocusRect(dc, &b);
+    if ((d.itemState & ODS_FOCUS) && !(d.itemState & ODS_NOFOCUSRECT)) {
+        SetTextColor(dc, p.text);
+        SetBkColor(dc, p.nav);
+        DrawFocusRect(dc, &b);
+    }
 }
 
 // Click a switch in the tab list to turn its feature on or off; Space does it for the selected tab.
@@ -882,8 +889,6 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CREATE:
         U.dpi = GetDpiForWindow(h);
         MakeFonts();
-        U.focusBrush = CreateSolidBrush(kFocusBg);
-        U.navBrush = CreateSolidBrush(kNavBg);
         Build();
         Layout();
         return 0;
@@ -891,14 +896,15 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         HDC dc = reinterpret_cast<HDC>(wp);
         RECT rc;
         GetClientRect(h, &rc);
-        FillRect(dc, &rc, GetSysColorBrush(COLOR_WINDOW));
+        const Palette& p = Pal();
+        FillColor(dc, rc, p.window);
         RECT nav{0, 0, Px(kNavW), Px(U.footerY)};
-        FillColor(dc, nav, kNavBg);
+        FillColor(dc, nav, p.nav);
         RECT f = rc;
         f.top = Px(U.footerY);
-        FillRect(dc, &f, GetSysColorBrush(COLOR_BTNFACE));
+        FillColor(dc, f, p.footer);
         f.bottom = f.top + 1;
-        FillColor(dc, f, RGB(220, 220, 220));
+        FillColor(dc, f, p.line);
         return 1;
     }
     case WM_MEASUREITEM: {
@@ -912,27 +918,34 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return TRUE;
     }
     case WM_CTLCOLORLISTBOX:
-        return reinterpret_cast<LRESULT>(U.navBrush);
+        return reinterpret_cast<LRESULT>(Theme_Brush(Pal().nav));
     case WM_CTLCOLORSTATIC: {
         HDC dc = reinterpret_cast<HDC>(wp);
         const int id = GetDlgCtrlID(reinterpret_cast<HWND>(lp));
-        COLORREF bg = GetSysColor(COLOR_WINDOW), fg = GetSysColor(COLOR_WINDOWTEXT);
-        HBRUSH br = GetSysColorBrush(COLOR_WINDOW);
-        if (id >= IDC_HK0 && id < IDC_HK0 + kHotkeyCount && U.capturing == id - IDC_HK0) {
-            bg = kFocusBg;
-            br = U.focusBrush;
+        const Palette& p = Pal();
+        const bool hotkeyBox = id >= IDC_HK0 && id < IDC_HK0 + kHotkeyCount;
+        COLORREF bg = hotkeyBox ? p.edit : p.window, fg = p.text;
+        if (hotkeyBox && U.capturing == id - IDC_HK0) {
+            bg = p.focusBg;
+        } else if (hotkeyBox && !IsWindowEnabled(reinterpret_cast<HWND>(lp))) {
+            bg = p.window;
+            fg = p.grey;
         } else if (id >= IDC_HKST0 && id < IDC_HKST0 + kHotkeyCount) {
-            fg = U.bad[id - IDC_HKST0] ? kRed : kGrey;
+            fg = U.bad[id - IDC_HKST0] ? p.red : p.grey;
         } else if (id == IDC_HINT || id == IDC_EXAMPLE || id == IDC_DESC ||
                    (id >= IDC_OFFNOTE0 && id < IDC_OFFNOTE0 + static_cast<int>(kFeatCount))) {
-            fg = kGrey;
+            fg = p.grey;
         }
         SetBkColor(dc, bg);
         SetTextColor(dc, fg);
-        return reinterpret_cast<LRESULT>(br);
+        return reinterpret_cast<LRESULT>(Theme_Brush(bg));
     }
-    case WM_CTLCOLORBTN:
-        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+    case WM_CTLCOLORBTN: {  // push buttons: the corners around their rounded shape
+        RECT r;
+        GetWindowRect(reinterpret_cast<HWND>(lp), &r);
+        MapWindowPoints(nullptr, h, reinterpret_cast<POINT*>(&r), 2);
+        return reinterpret_cast<LRESULT>(Theme_Brush(r.top >= Px(U.footerY) ? Pal().footer : Pal().window));
+    }
     case WM_HK_CHANGED:
         if (U.capturing >= 0) ShowHotkey(U.capturing);
         if (wp) CheckHotkeys();
@@ -1000,6 +1013,14 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_UPDNOW:
             Update_Check(true);
             break;
+        case IDC_THEME:  // applies at once, to every open window
+            if (code == CBN_SELCHANGE) {
+                const LRESULT i = SendMessageW(Item(IDC_THEME), CB_GETCURSEL, 0, 0);
+                g_settings.theme = i == 1 ? L"light" : i == 2 ? L"dark" : L"system";
+                SaveSettingValue(L"General", L"Theme", g_settings.theme);
+                Theme_Update();
+            }
+            break;
         }
         return 0;
     }
@@ -1023,11 +1044,9 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         U.maxY = 0;
         return 0;
     case WM_NCDESTROY:
-        for (HGDIOBJ o : {static_cast<HGDIOBJ>(U.font), static_cast<HGDIOBJ>(U.bold), static_cast<HGDIOBJ>(U.title),
-                          static_cast<HGDIOBJ>(U.focusBrush), static_cast<HGDIOBJ>(U.navBrush)})
+        for (HGDIOBJ o : {static_cast<HGDIOBJ>(U.font), static_cast<HGDIOBJ>(U.bold), static_cast<HGDIOBJ>(U.title)})
             if (o) DeleteObject(o);
         U.font = U.bold = U.title = nullptr;
-        U.focusBrush = U.navBrush = nullptr;
         break;
     }
     return DefWindowProcW(h, msg, wp, lp);
@@ -1083,6 +1102,7 @@ void SettingsUI_Show() {
     SetWindowPos(h, nullptr, x, y, sz.cx, sz.cy, SWP_NOZORDER | SWP_NOACTIVATE);
     Populate();
     ShowTab(g_lastTab);
+    Theme_Window(h);
     ShowWindow(h, SW_SHOW);
     SetForegroundWindow(h);
 }

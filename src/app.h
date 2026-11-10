@@ -56,6 +56,7 @@ struct Settings {
     std::wstring videoPreset; // last video choice: a kVideoPresets key
     bool maintDaily = true;   // Maintenance: check once a day in the background and tell me what needs doing
     bool checkUpdates = true; // General: tell me when a new version of Canivete is out
+    std::wstring theme;       // General: "system" (follow Windows), "light" or "dark"
 };
 
 extern Settings g_settings;

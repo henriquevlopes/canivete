@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(Canivete VERSION 0.2.0 LANGUAGES CXX RC)
+project(Canivete VERSION 0.3.0 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,6 +26,7 @@ add_executable(Canivete WIN32
     src/maint_ops.cpp
     src/maint_info.cpp
     src/update.cpp
+    src/theme.cpp
     res/canivete.rc
     res/app.manifest
 )

@@ -1,6 +1,7 @@
 // File and folder renamer: search and replace (plain or regex) with a live preview, counters,
 // date tokens and text case. Renames in one IFileOperation, so Ctrl+Z in Explorer undoes it.
 #include "app.h"
+#include "theme.h"
 
 #include "../res/resource.h"
 
@@ -28,8 +29,6 @@ constexpr DWORD kStyle = WS_OVERLAPPEDWINDOW;
 constexpr DWORD kExStyle = WS_EX_CONTROLPARENT | WS_EX_ACCEPTFILES;
 constexpr UINT_PTR kTimerPreview = 1;
 constexpr size_t kMaxItems = 20000;
-constexpr COLORREF kGrey = RGB(120, 120, 120);
-constexpr COLORREF kRed = RGB(200, 30, 30);
 // Layout in 96-DPI pixels.
 constexpr int kW = 680, kH = 620, kMinW = 560, kMinH = 440;
 constexpr int kM = 16, kCX = 112, kFooter = 56;
@@ -823,7 +822,7 @@ LRESULT OnNotify(NMHDR* nm) {
             const size_t i = cd->nmcd.dwItemSpec;
             if (i < U.rows.size()) {
                 const Row& r = U.rows[i];
-                cd->clrText = r.problem ? kRed : !r.changes ? kGrey : GetSysColor(COLOR_WINDOWTEXT);
+                cd->clrText = r.problem ? Pal().red : !r.changes ? Pal().grey : Pal().text;
                 SelectObject(cd->nmcd.hdc, cd->iSubItem == 1 && r.changes && !r.problem ? U.bold : U.font);
                 return CDRF_NEWFONT;
             }
@@ -860,24 +859,31 @@ LRESULT CALLBACK RenamerProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         HDC dc = reinterpret_cast<HDC>(wp);
         RECT rc;
         GetClientRect(h, &rc);
-        FillRect(dc, &rc, GetSysColorBrush(COLOR_WINDOW));
+        const Palette& p = Pal();
+        FillRect(dc, &rc, Theme_Brush(p.window));
         RECT f = rc;
         f.top = rc.bottom - Px(kFooter);
-        FillRect(dc, &f, GetSysColorBrush(COLOR_BTNFACE));
+        FillRect(dc, &f, Theme_Brush(p.footer));
         f.bottom = f.top + 1;
-        SetDCBrushColor(dc, RGB(220, 220, 220));
-        FillRect(dc, &f, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+        FillRect(dc, &f, Theme_Brush(p.line));
         return 1;
     }
     case WM_CTLCOLORSTATIC: {
         HDC dc = reinterpret_cast<HDC>(wp);
         const bool footer = GetDlgCtrlID(reinterpret_cast<HWND>(lp)) == IDC_STATUS;
-        SetBkColor(dc, GetSysColor(footer ? COLOR_BTNFACE : COLOR_WINDOW));
-        SetTextColor(dc, footer ? (U.badRegex ? kRed : kGrey) : GetSysColor(COLOR_WINDOWTEXT));
-        return reinterpret_cast<LRESULT>(GetSysColorBrush(footer ? COLOR_BTNFACE : COLOR_WINDOW));
+        const Palette& p = Pal();
+        SetBkColor(dc, footer ? p.footer : p.window);
+        SetTextColor(dc, footer ? (U.badRegex ? p.red : p.grey) : p.text);
+        return reinterpret_cast<LRESULT>(Theme_Brush(footer ? p.footer : p.window));
     }
-    case WM_CTLCOLORBTN:
-        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE));
+    case WM_CTLCOLORBTN: {  // push buttons: the corners around their rounded shape
+        RECT r;
+        GetWindowRect(reinterpret_cast<HWND>(lp), &r);
+        MapWindowPoints(nullptr, h, reinterpret_cast<POINT*>(&r), 2);
+        RECT rc;
+        GetClientRect(h, &rc);
+        return reinterpret_cast<LRESULT>(Theme_Brush(r.top >= rc.bottom - Px(kFooter) ? Pal().footer : Pal().window));
+    }
     case DM_GETDEFID:
         return MAKELRESULT(IDOK, DC_HASDEFID);
     case WM_NOTIFY:
@@ -1001,6 +1007,7 @@ void Renamer_Open(const std::vector<std::wstring>& paths) {
     Populate();
     AddPaths(paths);
     Recompute();
+    Theme_Window(h);
     ShowWindow(h, SW_SHOW);
     SetForegroundWindow(h);
     HWND search = Ctrl(IDC_SEARCH);

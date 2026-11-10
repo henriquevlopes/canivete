@@ -2,6 +2,7 @@
 // on top of a capture, then copy / save. Shapes stay editable (undo / redo) until the window closes.
 // Shape coordinates are image pixels; the window shows the image scaled down to fit.
 #include "app.h"
+#include "theme.h"
 
 #include "../res/resource.h"
 
@@ -657,7 +658,7 @@ void RoundFill(G::Graphics& g, const RECT& r, const G::Color& c, float rad) {
 
 void ToolIcon(Editor& e, G::Graphics& g, HDC dc, Tool t, const RECT& r) {
     const float cx = (r.left + r.right) / 2.f, cy = (r.top + r.bottom) / 2.f, s = static_cast<float>(e.Px(8));
-    const G::Color fg(255, 225, 225, 225);
+    const G::Color fg = GC(Pal().icon);
     G::Pen pen(fg, static_cast<float>(e.Px(2)) * 0.8f);
     pen.SetLineJoin(G::LineJoinRound);
     pen.SetStartCap(G::LineCapRound);
@@ -686,7 +687,7 @@ void ToolIcon(Editor& e, G::Graphics& g, HDC dc, Tool t, const RECT& r) {
         break;
     case Tool::Text: {
         HGDIOBJ old = SelectObject(dc, e.bold);
-        SetTextColor(dc, RGB(225, 225, 225));
+        SetTextColor(dc, Pal().icon);
         RECT rr = r;
         DrawTextW(dc, L"T", 1, &rr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         SelectObject(dc, old);
@@ -699,7 +700,7 @@ void ToolIcon(Editor& e, G::Graphics& g, HDC dc, Tool t, const RECT& r) {
         G::StringFormat sf;
         sf.SetAlignment(G::StringAlignmentCenter);
         sf.SetLineAlignment(G::StringAlignmentCenter);
-        G::SolidBrush tb(G::Color(255, 40, 40, 40));
+        G::SolidBrush tb(GC(Pal().numText));
         g.DrawString(L"1", -1, &f, G::RectF(cx - s, cy - s + s * 0.08f, 2 * s, 2 * s), &sf, &tb);
         break;
     }
@@ -724,7 +725,7 @@ void ToolIcon(Editor& e, G::Graphics& g, HDC dc, Tool t, const RECT& r) {
 
 void Glyph(Editor& e, HDC dc, const wchar_t* glyph, const RECT& r, bool enabled) {
     HGDIOBJ old = SelectObject(dc, e.icons);
-    SetTextColor(dc, enabled ? RGB(225, 225, 225) : RGB(100, 100, 100));
+    SetTextColor(dc, enabled ? Pal().icon : Pal().iconOff);
     RECT rr = r;
     DrawTextW(dc, glyph, -1, &rr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(dc, old);
@@ -750,7 +751,7 @@ const wchar_t* Tip(const Editor& e, int i) {
 void Paint(Editor& e, HDC hdc) {
     HDC b = e.back.dc;
     RECT rc{0, 0, e.back.w, e.back.h};
-    Fill(b, rc, RGB(38, 38, 38));
+    Fill(b, rc, Pal().canvas);
 
     // image + the shape being drawn
     const int vw = static_cast<int>(std::lround(e.ImgW() * e.zoom)), vh = static_cast<int>(std::lround(e.ImgH() * e.zoom));
@@ -819,8 +820,8 @@ void Paint(Editor& e, HDC hdc) {
     }
 
     // toolbar
-    Fill(b, {0, 0, rc.right, e.Px(kToolbarH)}, RGB(28, 28, 28));
-    Fill(b, {0, e.Px(kToolbarH) - 1, rc.right, e.Px(kToolbarH)}, RGB(60, 60, 60));
+    Fill(b, {0, 0, rc.right, e.Px(kToolbarH)}, Pal().bar);
+    Fill(b, {0, e.Px(kToolbarH) - 1, rc.right, e.Px(kToolbarH)}, Pal().barLine);
     SetBkMode(b, TRANSPARENT);
     {
         G::Graphics g(b);
@@ -837,9 +838,9 @@ void Paint(Editor& e, HDC hdc) {
             if (it.kind == Item::Done) {
                 RoundFill(g, inner, i == e.hover ? GC(RGB(245, 70, 80)) : GC(kAccent), static_cast<float>(e.Px(4)));
             } else if (selected) {
-                RoundFill(g, inner, G::Color(255, 72, 72, 72), static_cast<float>(e.Px(4)));
+                RoundFill(g, inner, GC(Pal().toolSel), static_cast<float>(e.Px(4)));
             } else if (i == e.hover) {
-                RoundFill(g, inner, G::Color(255, 54, 54, 54), static_cast<float>(e.Px(4)));
+                RoundFill(g, inner, GC(Pal().toolHover), static_cast<float>(e.Px(4)));
             }
             const float cx = (r.left + r.right) / 2.f, cy = (r.top + r.bottom) / 2.f;
             switch (it.kind) {
@@ -850,13 +851,13 @@ void Paint(Editor& e, HDC hdc) {
                 const float d = static_cast<float>(e.Px(16));
                 G::SolidBrush br(GC(kColors[it.index]));
                 g.FillEllipse(&br, cx - d / 2, cy - d / 2, d, d);
-                G::Pen ring(G::Color(255, 110, 110, 110), 1);
+                G::Pen ring(GC(Pal().ring), 1);
                 g.DrawEllipse(&ring, cx - d / 2, cy - d / 2, d, d);
                 break;
             }
             case Item::Size: {
                 const float d = static_cast<float>(e.Px(it.index == 0 ? 4 : it.index == 1 ? 8 : 13));
-                G::SolidBrush br(G::Color(255, 225, 225, 225));
+                G::SolidBrush br(GC(Pal().icon));
                 g.FillEllipse(&br, cx - d / 2, cy - d / 2, d, d);
                 break;
             }
@@ -874,7 +875,7 @@ void Paint(Editor& e, HDC hdc) {
                 break;
             case Item::Alpha: {
                 HGDIOBJ old = SelectObject(b, e.bold);
-                SetTextColor(b, RGB(225, 225, 225));
+                SetTextColor(b, Pal().icon);
                 RECT rr = r;
                 DrawTextW(b, L"\x03B1", 1, &rr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
                 SelectObject(b, old);
@@ -894,13 +895,14 @@ void Paint(Editor& e, HDC hdc) {
 
     // status bar
     RECT sb{0, rc.bottom - e.Px(kStatusH), rc.right, rc.bottom};
-    Fill(b, sb, RGB(28, 28, 28));
+    Fill(b, sb, Pal().bar);
+    Fill(b, {0, sb.top, rc.right, sb.top + 1}, Pal().barLine);
     HGDIOBJ old = SelectObject(b, e.ui);
     wchar_t right[64];
     swprintf_s(right, L"%d × %d   %d%%", e.ImgW(), e.ImgH(), static_cast<int>(std::lround(e.zoom * 100)));
     RECT rr = sb;
     rr.right -= e.Px(10);
-    SetTextColor(b, RGB(150, 150, 150));
+    SetTextColor(b, Pal().status);
     DrawTextW(b, right, -1, &rr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     std::wstring left;
     if (const wchar_t* t = Tip(e, e.hover)) left = t;
@@ -915,7 +917,7 @@ void Paint(Editor& e, HDC hdc) {
     RECT lr = sb;
     lr.left += e.Px(10);
     lr.right -= e.Px(150);
-    SetTextColor(b, e.status.empty() || e.hover >= 0 ? RGB(190, 190, 190) : RGB(120, 220, 130));
+    SetTextColor(b, e.status.empty() || e.hover >= 0 ? Pal().hint : Pal().statusOk);
     DrawTextW(b, left.c_str(), -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
     SelectObject(b, old);
 
@@ -1559,8 +1561,7 @@ void Editor_Open(std::shared_ptr<CaptureResult> r, const std::wstring& path) {
         return;
     }
     ++g_open;
-    BOOL dark = TRUE;
-    DwmSetWindowAttribute(hw, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    Theme_Window(hw);
     e->dpi = GetDpiForWindow(hw);
     MakeFonts(*e);
     Layout(*e);

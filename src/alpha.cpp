@@ -6,12 +6,14 @@
 // Colors are compared mostly by hue: brightness counts less, so light and shadow across one painted surface
 // stay "background" while a differently colored detail on it stands out.
 #include "app.h"
+#include "theme.h"
 
 #include "../res/resource.h"
 
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shellscalingapi.h>
+#include <uxtheme.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -567,11 +569,11 @@ void PaintLevels(Win& w, HDC b) {
     const int W = L.right - L.left;
     if (W < 20) return;
     const RECT hr{L.left, L.top, L.right, L.top + w.Px(kHistH)};
-    Fill(b, hr, RGB(22, 22, 22));
+    Fill(b, hr, Pal().hist);
     for (int i = 0; i < kHistBins; ++i) {
         const int x0 = L.left + i * W / kHistBins, x1 = L.left + (i + 1) * W / kHistBins;
         const int h = static_cast<int>(std::lround(w.score.hist[i] * (hr.bottom - hr.top - w.Px(4))));
-        if (h > 0) Fill(b, {x0, hr.bottom - h, std::max(x0 + 1, x1 - 1), hr.bottom}, RGB(105, 105, 105));
+        if (h > 0) Fill(b, {x0, hr.bottom - h, std::max(x0 + 1, x1 - 1), hr.bottom}, Pal().histBar);
     }
     // the curve: what each score turns into
     std::vector<POINT> curve;
@@ -606,7 +608,7 @@ void PaintLevels(Win& w, HDC b) {
     wchar_t t[160];
     swprintf_s(t, L"Levels   black %.2f   mid %.2f   white %.2f      double-click resets", w.p.black, w.p.gamma, w.p.white);
     RECT tr{L.left, L.bottom + w.Px(2), L.right, L.bottom + w.Px(22)};
-    SetTextColor(b, RGB(150, 150, 150));
+    SetTextColor(b, Pal().status);
     DrawTextW(b, t, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 }
 
@@ -689,11 +691,12 @@ void Marker(Win& w, HDC b, POINT ip, bool detail) {
 void Paint(Win& w, HDC hdc) {
     HDC b = w.back.dc;
     RECT rc{0, 0, w.back.w, w.back.h};
-    Fill(b, rc, RGB(38, 38, 38));
+    Fill(b, rc, Pal().canvas);
     SetBkMode(b, TRANSPARENT);
 
     // hint
-    Fill(b, {0, 0, rc.right, w.Px(kHintH)}, RGB(28, 28, 28));
+    Fill(b, {0, 0, rc.right, w.Px(kHintH)}, Pal().bar);
+    Fill(b, {0, w.Px(kHintH) - 1, rc.right, w.Px(kHintH)}, Pal().barLine);
     const wchar_t* drag = w.tool == T_RECT ? L"Drag a box around the part you want" : L"Drag around the part you want";
     std::wstring hint;
     if (w.p.detail.empty())
@@ -703,7 +706,7 @@ void Paint(Win& w, HDC hdc) {
                (w.p.detail.size() == 1 ? L" detail color picked." : L" detail colors picked.") +
                L"  Click to add more, right-click the background. " + drag + L".  Ctrl+Z undoes.";
     HGDIOBJ oldFont = SelectObject(b, w.ui);
-    SetTextColor(b, RGB(200, 200, 200));
+    SetTextColor(b, Pal().hint);
     RECT hr{w.Px(kGap), 0, rc.right - w.Px(kGap), w.Px(kHintH)};
     DrawTextW(b, hint.c_str(), -1, &hr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
@@ -739,7 +742,7 @@ void Paint(Win& w, HDC hdc) {
     {
         RECT fr = w.resArea;
         InflateRect(&fr, 1, 1);
-        HBRUSH br = CreateSolidBrush(RGB(80, 80, 80));
+        HBRUSH br = CreateSolidBrush(Pal().frame);
         FrameRect(b, &fr, br);
         DeleteObject(br);
     }
@@ -750,13 +753,14 @@ void Paint(Win& w, HDC hdc) {
         const uint32_t s = w.surfaceUsed;
         Fill(b, {w.resArea.left, y, w.resArea.left + sw, y + sw}, RGB((s >> 16) & 255, (s >> 8) & 255, s & 255));
         RECT tr{w.resArea.left + sw + w.Px(8), y - w.Px(4), w.resArea.right, y + sw + w.Px(4)};
-        SetTextColor(b, RGB(150, 150, 150));
+        SetTextColor(b, Pal().status);
         const wchar_t* t = w.p.hasSurface ? L"Background (picked)" : L"Background (most common color)";
         DrawTextW(b, t, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
     }
 
     // buttons
-    Fill(b, {0, rc.bottom - w.Px(kBarH), rc.right, rc.bottom}, RGB(28, 28, 28));
+    Fill(b, {0, rc.bottom - w.Px(kBarH), rc.right, rc.bottom}, Pal().bar);
+    Fill(b, {0, rc.bottom - w.Px(kBarH), rc.right, rc.bottom - w.Px(kBarH) + 1}, Pal().barLine);
     SelectObject(b, GetStockObject(NULL_PEN));
     SelectObject(b, GetStockObject(DC_BRUSH));
     for (int i = 0; i < static_cast<int>(w.btns.size()); ++i) {
@@ -764,13 +768,14 @@ void Paint(Win& w, HDC hdc) {
         const bool hov = i == w.hover;
         const bool on = (bt.id == B_INVERT && w.p.invert) || (bt.id == B_LASSO && w.tool == T_LASSO) ||
                         (bt.id == B_RECT && w.tool == T_RECT);
-        COLORREF c = hov ? RGB(66, 66, 66) : RGB(50, 50, 50);
+        const Palette& p = Pal();
+        COLORREF c = hov ? p.btnHover : p.btn;
         if (bt.id == B_SAVE) c = hov ? RGB(245, 70, 80) : kAccent;
-        else if (on) c = hov ? RGB(96, 96, 96) : RGB(84, 84, 84);
+        else if (on) c = hov ? p.btnOnHover : p.btnOn;
         SetDCBrushColor(b, c);
         RoundRect(b, bt.r.left, bt.r.top, bt.r.right + 1, bt.r.bottom + 1, w.Px(8), w.Px(8));
         SelectObject(b, bt.id == B_SAVE ? w.bold : w.ui);
-        SetTextColor(b, RGB(235, 235, 235));
+        SetTextColor(b, bt.id == B_SAVE ? RGB(255, 255, 255) : p.btnText);
         RECT tr = bt.r;
         DrawTextW(b, bt.label.c_str(), -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
@@ -1193,8 +1198,7 @@ void Alpha_Open(const Image& img, const CaptureResult& meta) {
         return;
     }
     g_win = w;
-    BOOL dark = TRUE;
-    DwmSetWindowAttribute(hw, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    Theme_Window(hw);
     w->dpi = GetDpiForWindow(hw);
     MakeFonts(*w);
     Layout(*w);
@@ -1207,6 +1211,7 @@ void Alpha_Open(const Image& img, const CaptureResult& meta) {
         ti.uId = 1;
         ti.lpszText = const_cast<wchar_t*>(L"");
         SendMessageW(g_tip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+        SetWindowTheme(g_tip, Theme_Dark() ? L"DarkMode_Explorer" : nullptr, nullptr);
     }
     ShowWindow(hw, SW_SHOWNORMAL);
     SetForegroundWindow(hw);

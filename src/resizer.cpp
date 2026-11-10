@@ -2,6 +2,7 @@
 // Opened from the tray, from Explorer's right-click menu (each selected file arrives through
 // main.cpp and is gathered into one window) or by dropping files on the window.
 #include "app.h"
+#include "theme.h"
 
 #include "../res/resource.h"
 
@@ -30,7 +31,6 @@ constexpr UINT WM_RS_PROGRESS = WM_APP + 30;
 constexpr UINT WM_RS_FINISHED = WM_APP + 31;
 constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
 constexpr DWORD kExStyle = WS_EX_CONTROLPARENT | WS_EX_ACCEPTFILES;
-constexpr COLORREF kGrey = RGB(105, 105, 105);
 // Layout in 96-DPI pixels.
 constexpr int kW = 470;
 constexpr int kM = 16;
@@ -1000,25 +1000,32 @@ LRESULT CALLBACK ResizerProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         HDC dc = reinterpret_cast<HDC>(wp);
         RECT rc;
         GetClientRect(h, &rc);
-        FillRect(dc, &rc, GetSysColorBrush(COLOR_WINDOW));
+        const Palette& p = Pal();
+        FillRect(dc, &rc, Theme_Brush(p.window));
         RECT f = rc;
         f.top = Px(U.footerY);
-        FillRect(dc, &f, GetSysColorBrush(COLOR_BTNFACE));
+        FillRect(dc, &f, Theme_Brush(p.footer));
         f.bottom = f.top + 1;
-        SetDCBrushColor(dc, RGB(220, 220, 220));
-        FillRect(dc, &f, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+        FillRect(dc, &f, Theme_Brush(p.line));
         return 1;
     }
     case WM_CTLCOLORSTATIC: {
         HDC dc = reinterpret_cast<HDC>(wp);
         const int id = GetDlgCtrlID(reinterpret_cast<HWND>(lp));
         const bool footer = id == IDC_STATUS;
-        SetBkColor(dc, GetSysColor(footer ? COLOR_BTNFACE : COLOR_WINDOW));
-        SetTextColor(dc, id == IDC_COUNT || footer ? kGrey : GetSysColor(COLOR_WINDOWTEXT));
-        return reinterpret_cast<LRESULT>(GetSysColorBrush(footer ? COLOR_BTNFACE : COLOR_WINDOW));
+        const Palette& p = Pal();
+        SetBkColor(dc, footer ? p.footer : p.window);
+        SetTextColor(dc, id == IDC_COUNT || footer ? p.grey : p.text);
+        return reinterpret_cast<LRESULT>(Theme_Brush(footer ? p.footer : p.window));
     }
-    case WM_CTLCOLORBTN:
-        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE));
+    case WM_CTLCOLORBTN: {  // push buttons: the corners around their rounded shape
+        RECT r;
+        GetWindowRect(reinterpret_cast<HWND>(lp), &r);
+        MapWindowPoints(nullptr, h, reinterpret_cast<POINT*>(&r), 2);
+        RECT rc;
+        GetClientRect(h, &rc);
+        return reinterpret_cast<LRESULT>(Theme_Brush(r.top >= Px(U.footerY) ? Pal().footer : Pal().window));
+    }
     case DM_GETDEFID:
         return MAKELRESULT(IDOK, DC_HASDEFID);
     case WM_VKEYTOITEM:
@@ -1325,6 +1332,7 @@ void Resizer_Open(const std::vector<std::wstring>& files) {
     SetWindowPos(h, nullptr, x, y, sz.cx, sz.cy, SWP_NOZORDER | SWP_NOACTIVATE);
     Populate();
     AddPaths(files);
+    Theme_Window(h);
     ShowWindow(h, SW_SHOW);
     SetForegroundWindow(h);
     SetFocus(Item(IDOK));

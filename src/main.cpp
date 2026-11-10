@@ -1,5 +1,6 @@
 // Canivete - a small tray toolbox. Entry point: tray icon, global hotkeys, menu, settings reload.
 #include "app.h"
+#include "theme.h"
 
 #include "../res/resource.h"
 
@@ -744,6 +745,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     // A hidden top-level window (not message-only) so it also gets broadcasts like TaskbarCreated.
     g_mainWnd = CreateWindowExW(WS_EX_TOOLWINDOW, kMainClass, kAppName, WS_POPUP, 0, 0, 0, 0, nullptr, nullptr,
                                 hinst, nullptr);
+    Theme_Init(g_mainWnd);
     g_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     LoadTrayIcon();
 

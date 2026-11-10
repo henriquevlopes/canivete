@@ -1,5 +1,6 @@
 // Settings (INI file in %APPDATA%\Canivete), hotkey text parsing and a tiny log.
 #include "app.h"
+#include "theme.h"
 
 #include <shlobj.h>
 
@@ -180,12 +181,15 @@ void LoadSettings() {
     s.videoMic = ReadBool(L"Video", L"Microphone", false);
     s.maintDaily = ReadBool(L"Maintenance", L"DailyCheck", true);
     s.checkUpdates = ReadBool(L"General", L"CheckUpdates", true);
+    s.theme = Lower(Trim(ReadStr(L"General", L"Theme", L"system")));
+    if (s.theme != L"light" && s.theme != L"dark") s.theme = L"system";
     s.format = Lower(Trim(ReadStr(L"Screenshot", L"Format", L"png")));
     if (s.format == L"jpeg") s.format = L"jpg";
     if (s.format != L"jpg") s.format = L"png";
     s.jpegQuality = GetPrivateProfileIntW(L"Screenshot", L"JpegQuality", 90, path.c_str());
     s.jpegQuality = s.jpegQuality < 1 ? 1 : s.jpegQuality > 100 ? 100 : s.jpegQuality;
     g_settings = s;
+    Theme_SettingsLoaded();
 }
 
 void SaveSettings(const Settings& s) {
@@ -213,6 +217,7 @@ void SaveSettings(const Settings& s) {
     WriteBool(L"Video", L"Microphone", s.videoMic);
     WriteBool(L"Maintenance", L"DailyCheck", s.maintDaily);
     WriteBool(L"General", L"CheckUpdates", s.checkUpdates);
+    WriteStr(L"General", L"Theme", s.theme);
 }
 
 std::wstring HotkeyText(const Hotkey& hk) {
