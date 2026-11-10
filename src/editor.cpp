@@ -75,7 +75,10 @@ struct Editor {
     bool drawing = false, typing = false;
     Shape live;
     float zoom = 1;
-    POINT origin{};  // image top-left, client coords
+    bool fit = true;  // zoom follows the window size until the user zooms by hand
+    POINT origin{};   // image top-left, client coords
+    bool space = false, panning = false;  // Space held = hand tool; dragging the view
+    POINT panFrom{}, panOrigin{};
     RECT imageArea{};
     UINT dpi = 96;
     std::vector<ItemRect> items;
@@ -331,6 +334,51 @@ int ToolbarWidth(const Editor& e) {
            e.Px(6) + e.Px(78) + e.Px(8);
 }
 
+// ---- zoom and pan ---------------------------------------------------------------------------
+
+constexpr float kMinZoom = 0.02f, kMaxZoom = 16.f;
+
+float FitZoom(const Editor& e) {
+    const int aw = e.imageArea.right - e.imageArea.left - 2 * e.Px(10);
+    const int ah = e.imageArea.bottom - e.imageArea.top - 2 * e.Px(10);
+    const float z = std::min({1.f, static_cast<float>(aw) / e.ImgW(), static_cast<float>(ah) / e.ImgH()});
+    return std::max(kMinZoom, z);
+}
+
+// An image smaller than the view is centred; a bigger one can't be dragged past its edges.
+void ClampOrigin(Editor& e) {
+    const int m = e.Px(10);
+    auto axis = [m](LONG& o, LONG lo, LONG hi, int v) {
+        if (v <= hi - lo - 2 * m) o = lo + (hi - lo - v) / 2;
+        else o = std::clamp<LONG>(o, hi - m - v, lo + m);
+    };
+    axis(e.origin.x, e.imageArea.left, e.imageArea.right, static_cast<int>(std::lround(e.ImgW() * e.zoom)));
+    axis(e.origin.y, e.imageArea.top, e.imageArea.bottom, static_cast<int>(std::lround(e.ImgH() * e.zoom)));
+}
+
+// Zoom keeping the image point under `anchor` (client coords) where it is.
+void SetZoom(Editor& e, float zoom, POINT anchor) {
+    zoom = std::clamp(zoom, kMinZoom, kMaxZoom);
+    const float ix = (anchor.x - e.origin.x) / e.zoom, iy = (anchor.y - e.origin.y) / e.zoom;
+    const bool changed = std::fabs(zoom - e.zoom) > 1e-4f || (zoom < 0.999f && !e.view.dc);
+    e.fit = false;
+    e.zoom = zoom;
+    e.origin = {anchor.x - std::lround(ix * zoom), anchor.y - std::lround(iy * zoom)};
+    ClampOrigin(e);
+    if (changed) UpdateView(e);
+}
+
+POINT AreaCenter(const Editor& e) {
+    return {(e.imageArea.left + e.imageArea.right) / 2, (e.imageArea.top + e.imageArea.bottom) / 2};
+}
+
+// Steps of 25 %, stopping once at 100 % on the way through.
+void ZoomStep(Editor& e, int steps, POINT anchor) {
+    float z = e.zoom * std::pow(1.25f, static_cast<float>(steps));
+    if ((e.zoom < 0.999f && z > 1.001f) || (e.zoom > 1.001f && z < 0.999f)) z = 1;
+    SetZoom(e, z, anchor);
+}
+
 void Layout(Editor& e) {
     RECT rc;
     GetClientRect(e.hwnd, &rc);
@@ -356,16 +404,15 @@ void Layout(Editor& e) {
     add(Item::Done, 0, e.Px(78));
 
     e.imageArea = {0, e.Px(kToolbarH), rc.right, std::max<LONG>(e.Px(kToolbarH) + 1, rc.bottom - e.Px(kStatusH))};
-    const int aw = e.imageArea.right - e.imageArea.left - 2 * e.Px(10);
-    const int ah = e.imageArea.bottom - e.imageArea.top - 2 * e.Px(10);
-    const float z = std::min({1.f, static_cast<float>(aw) / e.ImgW(), static_cast<float>(ah) / e.ImgH()});
-    const float zoom = std::max(0.02f, z);
-    const bool changed = std::fabs(zoom - e.zoom) > 1e-4f || !e.view.dc;
-    e.zoom = zoom;
-    const int vw = static_cast<int>(std::lround(e.ImgW() * e.zoom)), vh = static_cast<int>(std::lround(e.ImgH() * e.zoom));
-    e.origin = {e.imageArea.left + (e.imageArea.right - e.imageArea.left - vw) / 2,
-                e.imageArea.top + (e.imageArea.bottom - e.imageArea.top - vh) / 2};
-    if (changed) UpdateView(e);
+    if (e.fit) {
+        const float zoom = FitZoom(e);
+        const bool changed = std::fabs(zoom - e.zoom) > 1e-4f || !e.view.dc;
+        e.zoom = zoom;
+        ClampOrigin(e);
+        if (changed) UpdateView(e);
+    } else {
+        ClampOrigin(e);
+    }
     if (e.back.w != rc.right || e.back.h != rc.bottom) e.back.Create(std::max<LONG>(1, rc.right), std::max<LONG>(1, rc.bottom));
 }
 
@@ -492,8 +539,24 @@ void Paint(Editor& e, HDC hdc) {
 
     // image + the shape being drawn
     const int vw = static_cast<int>(std::lround(e.ImgW() * e.zoom)), vh = static_cast<int>(std::lround(e.ImgH() * e.zoom));
-    if (e.view.dc) BitBlt(b, e.origin.x, e.origin.y, vw, vh, e.view.dc, 0, 0, SRCCOPY);
-    else BitBlt(b, e.origin.x, e.origin.y, vw, vh, e.committed.dc, 0, 0, SRCCOPY);
+    if (e.view.dc) {
+        BitBlt(b, e.origin.x, e.origin.y, vw, vh, e.view.dc, 0, 0, SRCCOPY);
+    } else {  // 100 % and up: only the visible part, hard pixels
+        const RECT img{e.origin.x, e.origin.y, e.origin.x + vw, e.origin.y + vh};
+        RECT vis;
+        if (IntersectRect(&vis, &img, &e.imageArea)) {
+            const int x0 = std::max(0, static_cast<int>(std::floor((vis.left - e.origin.x) / e.zoom)));
+            const int y0 = std::max(0, static_cast<int>(std::floor((vis.top - e.origin.y) / e.zoom)));
+            const int x1 = std::min(e.ImgW(), static_cast<int>(std::ceil((vis.right - e.origin.x) / e.zoom)));
+            const int y1 = std::min(e.ImgH(), static_cast<int>(std::ceil((vis.bottom - e.origin.y) / e.zoom)));
+            const int dx0 = e.origin.x + static_cast<int>(std::lround(x0 * e.zoom));
+            const int dy0 = e.origin.y + static_cast<int>(std::lround(y0 * e.zoom));
+            const int dx1 = e.origin.x + static_cast<int>(std::lround(x1 * e.zoom));
+            const int dy1 = e.origin.y + static_cast<int>(std::lround(y1 * e.zoom));
+            SetStretchBltMode(b, COLORONCOLOR);
+            StretchBlt(b, dx0, dy0, dx1 - dx0, dy1 - dy0, e.committed.dc, x0, y0, x1 - x0, y1 - y0, SRCCOPY);
+        }
+    }
     {
         G::Graphics g(b);
         g.SetSmoothingMode(G::SmoothingModeAntiAlias);
@@ -599,7 +662,7 @@ void Paint(Editor& e, HDC hdc) {
     if (const wchar_t* t = Tip(e, e.hover)) left = t;
     else if (!e.status.empty()) left = e.status;
     else if (e.typing) left = L"Type your text. Enter finishes, Shift+Enter starts a new line, Esc cancels.";
-    else left = L"Drag on the image to draw.  Enter = copy, save and close.  Ctrl+Z = undo.  Esc = close.";
+    else left = L"Drag to draw.  Space+drag = move.  Ctrl+wheel = zoom (Ctrl+0 fit).  Enter = copy, save, close.  Esc = close.";
     RECT lr = sb;
     lr.left += e.Px(10);
     lr.right -= e.Px(150);
@@ -739,6 +802,19 @@ int HitItem(const Editor& e, int x, int y) {
     return -1;
 }
 
+void StartPan(Editor& e, int x, int y) {
+    e.panning = true;
+    e.panFrom = {x, y};
+    e.panOrigin = e.origin;
+    SetCapture(e.hwnd);
+}
+
+void EndPan(Editor& e) {
+    if (!e.panning) return;
+    e.panning = false;
+    if (GetCapture() == e.hwnd) ReleaseCapture();
+}
+
 void OnLButtonDown(Editor& e, int x, int y) {
     if (const int i = HitItem(e, x, y); i >= 0) {
         Click(e, e.items[i]);
@@ -746,6 +822,10 @@ void OnLButtonDown(Editor& e, int x, int y) {
     }
     const POINT cp{x, y};
     if (!PtInRect(&e.imageArea, cp)) return;
+    if (e.space) {
+        StartPan(e, x, y);
+        return;
+    }
     const G::PointF p = ToImage(e, x, y);
     const bool wasTyping = e.typing;
     FinishText(e);
@@ -781,6 +861,12 @@ void OnMouseMove(Editor& e, int x, int y, WPARAM keys) {
         Redraw(e);
         TRACKMOUSEEVENT t{sizeof(t), TME_LEAVE, e.hwnd, 0};
         TrackMouseEvent(&t);
+    }
+    if (e.panning) {
+        e.origin = {e.panOrigin.x + x - e.panFrom.x, e.panOrigin.y + y - e.panFrom.y};
+        ClampOrigin(e);
+        Redraw(e);
+        return;
     }
     if (!e.drawing) return;
     G::PointF p = ToImage(e, x, y);
@@ -833,6 +919,17 @@ void OnKey(Editor& e, UINT vk) {
         else if (vk == 'Y' || (vk == 'Z' && shift)) Redo(e);
         else if (vk == 'C') CopyNow(e);
         else if (vk == 'S') SaveNow(e);
+        else if (vk == '0' || vk == VK_NUMPAD0) {  // fit to window
+            e.fit = true;
+            Layout(e);
+            Redraw(e);
+        } else if (vk == '1' || vk == VK_NUMPAD1) {  // 100 %
+            SetZoom(e, 1, AreaCenter(e));
+            Redraw(e);
+        } else if (vk == VK_OEM_PLUS || vk == VK_ADD || vk == VK_OEM_MINUS || vk == VK_SUBTRACT) {
+            ZoomStep(e, vk == VK_OEM_PLUS || vk == VK_ADD ? 1 : -1, AreaCenter(e));
+            Redraw(e);
+        }
         return;
     }
     if (vk == VK_ESCAPE) {
@@ -907,7 +1004,11 @@ LRESULT CALLBACK EditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             GetCursorPos(&p);
             ScreenToClient(h, &p);
             const bool img = PtInRect(&e.imageArea, p) && HitItem(e, p.x, p.y) < 0;
-            SetCursor(LoadCursorW(nullptr, !img ? IDC_ARROW : e.tool == Tool::Text ? IDC_IBEAM : IDC_CROSS));
+            const wchar_t* cur = e.panning || (img && e.space) ? IDC_SIZEALL
+                                 : !img                        ? IDC_ARROW
+                                 : e.tool == Tool::Text        ? IDC_IBEAM
+                                                               : IDC_CROSS;
+            SetCursor(LoadCursorW(nullptr, cur));
             return TRUE;
         }
         break;
@@ -924,7 +1025,21 @@ LRESULT CALLBACK EditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_LBUTTONUP:
-        OnLButtonUp(e);
+        if (e.panning) EndPan(e);
+        else OnLButtonUp(e);
+        return 0;
+    case WM_MBUTTONDOWN:  // middle-drag pans too
+        if (!e.drawing) StartPan(e, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        return 0;
+    case WM_MBUTTONUP:
+        EndPan(e);
+        return 0;
+    case WM_CAPTURECHANGED:
+        e.panning = false;
+        return 0;
+    case WM_KILLFOCUS:
+        e.space = false;
+        EndPan(e);
         return 0;
     case WM_RBUTTONUP:  // right-click cancels the shape being drawn
         if (e.drawing) {
@@ -934,13 +1049,36 @@ LRESULT CALLBACK EditorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_MOUSEWHEEL:
+        if (GET_KEYSTATE_WPARAM(wp) & MK_CONTROL) {  // Ctrl+wheel zooms at the mouse
+            POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ScreenToClient(h, &p);
+            if (!PtInRect(&e.imageArea, p)) p = AreaCenter(e);
+            ZoomStep(e, GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA, p);
+            Redraw(e);
+            return 0;
+        }
         e.size = std::clamp(e.size + (GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 1 : -1), 0, 2);
         if (e.typing) e.live.size = e.size;
         Redraw(e);
         return 0;
     case WM_KEYDOWN:
+        if (wp == VK_SPACE && !e.typing) {  // hold Space to drag the view
+            if (!e.space && !e.drawing) {
+                e.space = true;
+                SendMessageW(h, WM_SETCURSOR, reinterpret_cast<WPARAM>(h), MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
+            }
+            return 0;
+        }
         OnKey(e, static_cast<UINT>(wp));
         return 0;
+    case WM_KEYUP:
+        if (wp == VK_SPACE && e.space) {
+            e.space = false;
+            EndPan(e);
+            SendMessageW(h, WM_SETCURSOR, reinterpret_cast<WPARAM>(h), MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
+            return 0;
+        }
+        break;
     case WM_CHAR:
         OnChar(e, static_cast<wchar_t>(wp));
         return 0;

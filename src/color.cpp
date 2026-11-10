@@ -51,11 +51,6 @@ std::wstring Num(double v) {
     return b;
 }
 
-double Linear(int c) {
-    const double s = c / 255.0;
-    return s <= 0.04045 ? s / 12.92 : std::pow((s + 0.055) / 1.055, 2.4);
-}
-
 bool CopyText(const std::wstring& t) {
     bool open = false;
     for (int i = 0; i < 10 && !(open = OpenClipboard(g_mainWnd)); ++i) Sleep(15);
@@ -95,10 +90,6 @@ std::wstring FormatColor(COLORREF c, const std::wstring& key) {
         }
         swprintf_s(buf, L"hsl(%d, %d%%, %d%%)", static_cast<int>(std::lround(h)) % 360,
                    static_cast<int>(std::lround(s * 100)), static_cast<int>(std::lround(l * 100)));
-    } else if (key == L"float") {
-        return Num(r / 255.0) + L", " + Num(g / 255.0) + L", " + Num(b / 255.0);
-    } else if (key == L"linear") {
-        return Num(Linear(r)) + L", " + Num(Linear(g)) + L", " + Num(Linear(b));
     } else {  // gray: brightness 0-1 (equals each channel for a gray pixel)
         return Num((0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0);
     }

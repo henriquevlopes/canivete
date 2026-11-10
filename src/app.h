@@ -61,8 +61,6 @@ inline constexpr ColorFormatDef kColorFormats[] = {
     {L"hex", L"HEX   1e90ff"},
     {L"rgb", L"RGB   rgb(30, 144, 255)"},
     {L"hsl", L"HSL   hsl(210, 100%, 56%)"},
-    {L"float", L"Float 0-1   0.118, 0.565, 1.000"},
-    {L"linear", L"Linear 0-1   0.013, 0.279, 1.000"},
 };
 
 // ---- color.cpp -----------------------------------------------------------------------------

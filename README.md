@@ -33,7 +33,7 @@ the file in Explorer. Settings can open the editor right after every capture ins
 copy it again) and Settings.
 
 After a pick, a small menu lists the color in every format: Gray 0-1 (brightness like Substance's
-linear grayscale value), HEX, RGB, HSL, Float 0-1 and Linear 0-1. The default format from Settings
+linear grayscale value), HEX, RGB and HSL. The default format from Settings
 sits on top, so Enter takes it; Esc copies nothing. Windows reserves Win+C,
 so Win-key hotkeys it refuses are caught with a keyboard hook instead (the Start menu stays closed).
 Recent colors live in `%APPDATA%\Canivete\colors.txt`.
@@ -46,7 +46,8 @@ Log: `%APPDATA%\Canivete\canivete.log`.
 
 Editor: tools Rectangle (R), Ellipse (E), Arrow (A), Line (L), Text (T), Number (N, counts up),
 Highlighter (H) and Pixelate (P); colors 1-8; size with `[` `]` or the mouse wheel; Shift draws
-squares, circles and 45° lines. Ctrl+Z / Ctrl+Y undo/redo, Ctrl+C copies, Ctrl+S saves (over the
+squares, circles and 45° lines. Ctrl+wheel zooms at the mouse (Ctrl+0 fits, Ctrl+1 = 100 %, Ctrl +/-);
+hold Space and drag (or drag with the middle button) to move around. Ctrl+Z / Ctrl+Y undo/redo, Ctrl+C copies, Ctrl+S saves (over the
 capture's file). Enter or Done copies, saves and closes; Esc cancels a shape or closes (asks if there
 are unsaved edits). Text: click, type, Enter finishes, Shift+Enter new line, Ctrl+V pastes.
 
