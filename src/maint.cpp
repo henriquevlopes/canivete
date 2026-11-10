@@ -4,13 +4,13 @@
 // rights run in an elevated copy of Canivete (one Windows prompt per job) that reports back here
 // with WM_COPYDATA. Built in code so it lays out again at any monitor DPI.
 #include "maint.h"
+#include "fluent.h"
 #include "theme.h"
 
 #include "../res/resource.h"
 
 #include <commctrl.h>
 #include <objbase.h>
-#include <objidl.h>  // GDI+ needs IStream, which WIN32_LEAN_AND_MEAN leaves out
 #include <shellapi.h>
 #include <shobjidl.h>
 #include <uxtheme.h>
@@ -18,11 +18,6 @@
 
 #include <algorithm>
 #include <climits>
-namespace Gdiplus {
-using std::max;
-using std::min;
-}  // namespace Gdiplus
-#include <gdiplus.h>
 #include <cmath>
 #include <ctime>
 #include <map>
@@ -34,7 +29,7 @@ using namespace maint;
 
 namespace {
 
-constexpr DWORD kStyle = WS_OVERLAPPEDWINDOW;
+constexpr DWORD kStyle = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
 constexpr DWORD kExStyle = WS_EX_CONTROLPARENT;
 constexpr UINT WM_M_SCAN = WM_APP + 30;      // wp = MAKEWPARAM(tab, gen), lp = new'd ScanResult
 constexpr UINT WM_M_PROGRESS = WM_APP + 31;  // wp = MAKEWPARAM(tab, gen), lp = new'd Progress
@@ -42,8 +37,10 @@ constexpr UINT WM_M_DONE = WM_APP + 32;      // wp = MAKEWPARAM(tab, gen), lp = 
 constexpr LPARAM kDeclined = -1000, kNoStart = -1001;
 constexpr COLORREF kDotColors[4] = {RGB(16, 137, 62), RGB(222, 145, 0), RGB(196, 43, 28), RGB(160, 160, 160)};
 // Layout in 96-DPI pixels.
-constexpr int kW = 940, kH = 640, kMinW = 760, kMinH = 520;
-constexpr int kNavW = 180, kNavItem = 34;
+constexpr int kW = 1000, kH = 680, kMinW = 800, kMinH = 560;
+constexpr int kNavW = 220, kNavItem = 40;
+constexpr int kCtlH = 32;  // buttons and the search box
+constexpr int kRowH = 40;  // list rows
 
 constexpr int kOverview = 0, kUpdates = 1, kApps = 2, kCleanup = 3, kStartup = 4, kHealth = 5, kTabCount = 6;
 constexpr int kOk = 0, kWarn = 1, kBad = 2, kInfo = 3;  // Overview row levels (dot colors)
@@ -99,10 +96,10 @@ enum : int {
     IDC_JOBCANCEL,
 };
 constexpr int kPanel = -2;     // Ctl::tab of the job panel's controls: shown on the job's tab
-constexpr int kPanelH = 52;    // its height (96-DPI pixels), taken from the bottom of the tab's content
+constexpr int kPanelH = 60;    // its height (96-DPI pixels), taken from the bottom of the tab's content
 constexpr wchar_t kBarClass[] = L"CaniveteMaintBar";
 
-enum FontKind : int { kFontNormal, kFontBold, kFontTitle };
+enum FontKind : int { kFontNormal, kFontBold, kFontTitle, kFontCaption };
 
 struct Ctl {
     HWND wnd;
@@ -166,8 +163,12 @@ struct Progress {
 struct UI {
     HWND hwnd = nullptr, nav = nullptr;
     UINT dpi = 96;
-    HFONT font = nullptr, bold = nullptr, title = nullptr;
+    HFONT font = nullptr, bold = nullptr, title = nullptr, caption = nullptr;  // shared, never deleted
+    int lineH = 20;  // text height of font
     std::vector<Ctl> ctls;
+    std::vector<std::pair<int, RECT>> cards;  // tab, rectangle (device pixels) of the cards behind lists
+    RECT searchFrame{};                       // the search box's frame (device pixels)
+    int navHot = -1;                          // tab under the mouse
     int tab = 0;
     WORD gen = 0;  // a new number each time the window opens: results for an older window are dropped
     bool busy[kTabCount]{};  // a check (scan) is running for the tab; jobs are in J
@@ -186,6 +187,7 @@ struct UI {
     std::vector<InstalledApp> apps;
     std::vector<int> appRows;  // list row -> apps index (the search filters)
     HIMAGELIST dots = nullptr;
+    HIMAGELIST rows = nullptr;  // an empty image list that makes the other lists' rows kRowH tall
     bool waitBg = false;  // Updates waits for the background check that is already running
     HWND lastFocus = nullptr;
 } U;
@@ -220,7 +222,7 @@ HWND MakeList(int t, std::initializer_list<std::pair<const wchar_t*, int>> cols,
     HWND lv = Add(WC_LISTVIEWW, L"",
                   LVS_REPORT | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER | LVS_SHAREIMAGELISTS | WS_TABSTOP |
                       (checks ? 0 : LVS_SINGLESEL),
-                  IDC_LIST0 + t, t, WS_EX_CLIENTEDGE);
+                  IDC_LIST0 + t, t);
     SetWindowTheme(lv, L"Explorer", nullptr);
     ListView_SetExtendedListViewStyle(
         lv, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP | (checks ? LVS_EX_CHECKBOXES : 0));
@@ -241,13 +243,15 @@ void Build() {
     for (const TabDef& d : kTabs) SendMessageW(U.nav, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(d.name));
     Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX, IDC_TITLE, -1, 0, kFontTitle);
     Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX, IDC_DESC, -1);
-    for (int t = 0; t < kTabCount; ++t) Static(IDC_STATUS0 + t, L"", t, SS_LEFT | SS_ENDELLIPSIS);
+    for (int t = 0; t < kTabCount; ++t)
+        Add(WC_STATICW, L"", SS_LEFT | SS_ENDELLIPSIS | SS_NOPREFIX, IDC_STATUS0 + t, t, 0, kFontCaption);
 
     MakeList(kOverview, {{L"What", LVCFMT_LEFT}, {L"State", LVCFMT_LEFT}, {L"To do", LVCFMT_LEFT}}, false);
     Button(IDC_OVCHECK, L"Check everything", kOverview);
     Button(IDC_OVDO, L"Do it", kOverview, BS_DEFPUSHBUTTON);
 
-    HWND search = Add(WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, IDC_APSEARCH, kApps, WS_EX_CLIENTEDGE);
+    HWND search = Add(WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, IDC_APSEARCH, kApps);
+    Theme_FramedEdit(search);
     SendMessageW(search, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Search by name or publisher"));
     MakeList(kApps, {{L"Name", LVCFMT_LEFT}, {L"Publisher", LVCFMT_LEFT}, {L"Version", LVCFMT_LEFT},
                      {L"Size", LVCFMT_RIGHT}, {L"Installed", LVCFMT_LEFT}},
@@ -289,7 +293,7 @@ void Build() {
     Button(IDC_HERESTORE, L"Make a restore point", kHealth);
     Button(IDC_HESCAN, L"Quick virus scan", kHealth);
     HWND log = Add(WC_EDITW, L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_TABSTOP, IDC_HELOG,
-                   kHealth, WS_EX_CLIENTEDGE);
+                   kHealth);
     SendMessageW(log, EM_SETLIMITTEXT, 1 << 20, 0);
 
     Static(IDC_JOBTEXT, L"", kPanel, SS_LEFT | SS_ENDELLIPSIS);
@@ -299,27 +303,27 @@ void Build() {
 
 // Round colored dots for the Overview rows, drawn smooth at this DPI.
 void MakeDots() {
-    const int s = Px(16);
-    HIMAGELIST il = ImageList_Create(s, s, ILC_COLOR32, 4, 0);
+    const int s = Px(16), H = Px(kRowH);
+    HIMAGELIST il = ImageList_Create(s, H, ILC_COLOR32, 4, 0);
     for (COLORREF c : kDotColors) {
         BITMAPINFO bi{};
         bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
         bi.bmiHeader.biWidth = s;
-        bi.bmiHeader.biHeight = -s;
+        bi.bmiHeader.biHeight = -H;
         bi.bmiHeader.biPlanes = 1;
         bi.bmiHeader.biBitCount = 32;
         void* bits = nullptr;
         HBITMAP color = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
         if (!color) continue;
         auto* px = static_cast<uint32_t*>(bits);
-        const double rad = s * 0.3, mid = s / 2.0;
-        for (int y = 0; y < s; ++y)
+        const double rad = s * 0.3, mid = s / 2.0, midY = H / 2.0;
+        for (int y = 0; y < H; ++y)
             for (int x = 0; x < s; ++x) {
-                const double a = std::clamp(rad + 0.5 - std::hypot(x + 0.5 - mid, y + 0.5 - mid), 0.0, 1.0);
+                const double a = std::clamp(rad + 0.5 - std::hypot(x + 0.5 - mid, y + 0.5 - midY), 0.0, 1.0);
                 px[y * s + x] = (static_cast<uint32_t>(a * 255 + 0.5) << 24) | (GetRValue(c) << 16) | (GetGValue(c) << 8) |
                                 GetBValue(c);
             }
-        HBITMAP mask = CreateBitmap(s, s, 1, 1, nullptr);
+        HBITMAP mask = CreateBitmap(s, H, 1, 1, nullptr);
         ICONINFO ii{TRUE, 0, 0, mask, color};
         if (HICON ic = CreateIconIndirect(&ii)) {
             ImageList_ReplaceIcon(il, -1, ic);
@@ -331,24 +335,33 @@ void MakeDots() {
     ListView_SetImageList(List(kOverview), il, LVSIL_SMALL);
     if (U.dots) ImageList_Destroy(U.dots);
     U.dots = il;
+    // The other lists: a 1 px wide image list with no images, only there for the row height.
+    HIMAGELIST rows = ImageList_Create(1, H, ILC_COLOR32, 0, 0);
+    for (int t : {kUpdates, kApps, kCleanup, kStartup}) ListView_SetImageList(List(t), rows, LVSIL_SMALL);
+    if (U.rows) ImageList_Destroy(U.rows);
+    U.rows = rows;
 }
 
 void MakeFonts() {
-    for (HFONT f : {U.font, U.bold, U.title})
-        if (f) DeleteObject(f);
-    NONCLIENTMETRICSW ncm{sizeof(ncm)};
-    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, U.dpi);
-    LOGFONTW lf = ncm.lfMessageFont;
-    U.font = CreateFontIndirectW(&lf);
-    const LONG h = lf.lfHeight;
-    lf.lfWeight = FW_SEMIBOLD;
-    lf.lfHeight = MulDiv(h, 112, 100);
-    U.bold = CreateFontIndirectW(&lf);
-    lf.lfHeight = MulDiv(h, 160, 100);
-    U.title = CreateFontIndirectW(&lf);
-    for (const Ctl& c : U.ctls)
-        SendMessageW(c.wnd, WM_SETFONT,
-                     reinterpret_cast<WPARAM>(c.font == kFontTitle ? U.title : c.font == kFontBold ? U.bold : U.font), FALSE);
+    U.font = Fluent_Font(kTypeBody, U.dpi);
+    U.bold = Fluent_Font(kTypeBodyStrong, U.dpi);
+    U.title = Fluent_Font(kTypeTitle, U.dpi);
+    U.caption = Fluent_Font(kTypeCaption, U.dpi);
+    HDC dc = GetDC(U.hwnd);
+    HGDIOBJ of = SelectObject(dc, U.font);
+    TEXTMETRICW tm{};
+    GetTextMetricsW(dc, &tm);
+    SelectObject(dc, of);
+    ReleaseDC(U.hwnd, dc);
+    U.lineH = tm.tmHeight;
+    for (const Ctl& c : U.ctls) {
+        HFONT f = c.font == kFontTitle    ? U.title
+                  : c.font == kFontBold    ? U.bold
+                  : c.font == kFontCaption ? U.caption
+                                           : U.font;
+        SendMessageW(c.wnd, WM_SETFONT, reinterpret_cast<WPARAM>(f), FALSE);
+    }
+    SendMessageW(Item(IDC_APSEARCH), EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
     MakeDots();
 }
 
@@ -357,67 +370,81 @@ void Layout() {
     RECT rc;
     GetClientRect(U.hwnd, &rc);
     const int W = MulDiv(rc.right, 96, static_cast<int>(U.dpi)), H = MulDiv(rc.bottom, 96, static_cast<int>(U.dpi));
-    const int L = kNavW + 20, R = W - 16, CW = R - L, top = 82;
-    const int by = H - 14 - 28;  // footer buttons
+    const int L = kNavW + 12, R = W - 24, CW = R - L, top = 100;
+    const int by = H - 20 - kCtlH;  // footer buttons
     HDWP d = BeginDeferWindowPos(static_cast<int>(U.ctls.size()));
     auto put = [&](int id, int x, int y, int w, int h) {
         if (d) d = DeferWindowPos(d, Item(id), nullptr, Px(x), Px(y), Px(std::max(w, 0)), Px(std::max(h, 0)),
                                   SWP_NOZORDER | SWP_NOACTIVATE);
     };
-    put(IDC_NAV, 8, 12, kNavW - 16, kTabCount * kNavItem + 4);
-    put(IDC_TITLE, L, 14, CW, 32);
-    put(IDC_DESC, L, 50, CW, 20);
+    // A card (painted by the window) with a control inside it.
+    U.cards.clear();
+    auto card = [&](int t, int id, int x, int y, int w, int h, int inset) {
+        U.cards.push_back({t, RECT{Px(x), Px(y), Px(x + w), Px(y + h)}});
+        put(id, x + inset, y + inset, w - 2 * inset, h - 2 * inset);
+    };
+    put(IDC_NAV, 8, 8, kNavW - 12, kTabCount * kNavItem + 4);
+    put(IDC_TITLE, L, 14, CW, 44);
+    put(IDC_DESC, L, 62, CW, 22);
     // Footer: status on the left, buttons on the right (widths in order from the right edge).
     auto footer = [&](int t, std::initializer_list<std::pair<int, int>> buttons) {
         int x = R;
         for (const auto& [id, w] : buttons) {
             x -= w;
-            put(id, x, by, w, 28);
+            put(id, x, by, w, kCtlH);
             x -= 8;
         }
-        put(IDC_STATUS0 + t, L, by + 5, x - L - 8, 20);
+        put(IDC_STATUS0 + t, L, by + 8, x - L - 8, 18);
     };
     // The job panel sits above the footer of its tab; that tab's content ends higher.
     auto ph = [](int t) { return J.tab == t ? kPanelH : 0; };
+    const int end = by - 16;  // bottom of a tab's content
     if (J.tab >= 0) {
-        const int P = by - kPanelH;
+        const int P = end - kPanelH + 12;
         const bool btn = !J.running || J.cancellable;
-        const int tw = btn ? CW - 120 : CW;
-        put(IDC_JOBTEXT, L, P + 2, tw, 20);
-        put(IDC_JOBBAR, L, P + 28, tw, 10);
-        put(IDC_JOBCANCEL, R - 108, P + 8, 108, 28);
+        const int tw = btn ? CW - 128 : CW;
+        put(IDC_JOBTEXT, L, P, tw, 22);
+        put(IDC_JOBBAR, L, P + 26, tw, 12);
+        put(IDC_JOBCANCEL, R - 112, P + 2, 112, kCtlH);
     }
     // Overview, Installed apps
-    footer(kOverview, {{IDC_OVDO, 170}, {IDC_OVCHECK, 140}});
-    put(IDC_LIST0 + kOverview, L, top, CW, by - 12 - top - ph(kOverview));
-    footer(kApps, {{IDC_APUNINSTALL, 110}, {IDC_APSETTINGS, 170}, {IDC_APREFRESH, 100}});
-    put(IDC_APSEARCH, L, top, 280, 24);
-    put(IDC_LIST0 + kApps, L, top + 32, CW, by - 12 - top - 32 - ph(kApps));
+    footer(kOverview, {{IDC_OVDO, 140}, {IDC_OVCHECK, 160}});
+    card(kOverview, IDC_LIST0 + kOverview, L, top, CW, end - top - ph(kOverview), 4);
+    footer(kApps, {{IDC_APUNINSTALL, 120}, {IDC_APSETTINGS, 190}, {IDC_APREFRESH, 110}});
+    U.searchFrame = {Px(L), Px(top), Px(L + 320), Px(top + kCtlH)};
+    {
+        const int x = U.searchFrame.left + Px(11), y = U.searchFrame.top + (Px(kCtlH) - U.lineH) / 2;
+        if (d) d = DeferWindowPos(d, Item(IDC_APSEARCH), nullptr, x, y, U.searchFrame.right - Px(11) - x, U.lineH,
+                                  SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    card(kApps, IDC_LIST0 + kApps, L, top + kCtlH + 12, CW, end - top - kCtlH - 12 - ph(kApps), 4);
     // Updates
-    footer(kUpdates, {{IDC_UPINSTALL, 130}, {IDC_UPSTORE, 180}, {IDC_UPCHECK, 110}});
-    const int rowY = by - 38 - ph(kUpdates);
-    put(IDC_UPRESTORE, L, rowY + 3, 240, 22);
-    put(IDC_UPREBOOTBTN, R - 128, rowY, 128, 28);
-    put(IDC_UPREBOOT, L + 250, rowY + 5, R - 136 - L - 250 - 8, 20);
-    const int gpuY = rowY - 46;
-    put(IDC_UPGPUBTN, R - 170, gpuY + 6, 170, 28);
-    put(IDC_UPGPU, L, gpuY, CW - 180, 40);
-    put(IDC_LIST0 + kUpdates, L, top, CW, gpuY - 8 - top);
+    footer(kUpdates, {{IDC_UPINSTALL, 140}, {IDC_UPSTORE, 200}, {IDC_UPCHECK, 120}});
+    const int rowY = end - kCtlH - ph(kUpdates);
+    put(IDC_UPRESTORE, L, rowY + 4, 260, 24);
+    put(IDC_UPREBOOTBTN, R - 140, rowY, 140, kCtlH);
+    put(IDC_UPREBOOT, L + 270, rowY + 6, R - 148 - L - 270 - 8, 20);
+    const int gpuY = rowY - 56;
+    put(IDC_UPGPUBTN, R - 180, gpuY + 6, 180, kCtlH);
+    put(IDC_UPGPU, L, gpuY, CW - 196, 44);
+    card(kUpdates, IDC_LIST0 + kUpdates, L, top, CW, gpuY - 12 - top, 4);
     // Cleanup, Startup
-    footer(kCleanup, {{IDC_CLRUN, 130}, {IDC_CLSTORAGE, 190}, {IDC_CLMEASURE, 130}});
-    put(IDC_LIST0 + kCleanup, L, top, CW, by - 12 - top - ph(kCleanup));
-    footer(kStartup, {{IDC_STAPPLY, 130}, {IDC_STTASKMGR, 150}, {IDC_STREFRESH, 100}});
-    put(IDC_LIST0 + kStartup, L, top, CW, by - 12 - top - ph(kStartup));
+    footer(kCleanup, {{IDC_CLRUN, 140}, {IDC_CLSTORAGE, 210}, {IDC_CLMEASURE, 140}});
+    card(kCleanup, IDC_LIST0 + kCleanup, L, top, CW, end - top - ph(kCleanup), 4);
+    footer(kStartup, {{IDC_STAPPLY, 140}, {IDC_STTASKMGR, 170}, {IDC_STREFRESH, 110}});
+    card(kStartup, IDC_LIST0 + kStartup, L, top, CW, end - top - ph(kStartup), 4);
     // Health
     footer(kHealth, {});
-    put(IDC_HEINFO, L, top, CW, 96);
+    U.cards.push_back({kHealth, RECT{Px(L), Px(top), Px(R), Px(top + 144)}});
+    put(IDC_HEINFO, L + 16, top + 12, CW - 32, 120);
     int x = L;
-    for (const auto& [id, w] : {std::pair{IDC_HERESTART, 110}, {IDC_HEREPAIR, 150}, {IDC_HEOPT, 120}, {IDC_HERESTORE, 160},
-                                {IDC_HESCAN, 130}}) {
-        put(id, x, top + 104, w, 28);
+    for (const auto& [id, w] : {std::pair{IDC_HERESTART, 112}, {IDC_HEREPAIR, 152}, {IDC_HEOPT, 124}, {IDC_HERESTORE, 160},
+                                {IDC_HESCAN, 136}}) {
+        put(id, x, top + 156, w, kCtlH);
         x += w + 8;
     }
-    put(IDC_HELOG, L, top + 144, CW, by - 12 - top - 144 - ph(kHealth));
+    const int logY = top + 156 + kCtlH + 12;
+    card(kHealth, IDC_HELOG, L, logY, CW, end - logY - ph(kHealth), 6);
     if (d) EndDeferWindowPos(d);
     SendMessageW(U.nav, LB_SETITEMHEIGHT, 0, Px(kNavItem));
 
@@ -433,7 +460,9 @@ void Layout() {
             used += Px(w);
             ++i;
         }
-        ListView_SetColumnWidth(lv, fill, std::max(Px(120), static_cast<int>(lr.right) - used - 2));
+        // Room for the vertical scroll bar even before it shows, so no sideways one comes with it.
+        const int sb = (GetWindowLongW(lv, GWL_STYLE) & WS_VSCROLL) ? 0 : GetSystemMetricsForDpi(SM_CXVSCROLL, U.dpi);
+        ListView_SetColumnWidth(lv, fill, std::max(Px(120), static_cast<int>(lr.right) - sb - used - 2));
     };
     cols(kOverview, {170, 200}, 1);
     cols(kApps, {170, 110, 80, 90}, 0);
@@ -488,6 +517,7 @@ void ShowTab(int t) {
     HWND f = GetFocus();
     if (f && IsChild(U.hwnd, f) && !IsWindowVisible(f)) SetFocus(U.nav);
     InvalidateRect(U.nav, nullptr, FALSE);
+    InvalidateRect(U.hwnd, nullptr, TRUE);  // the cards of this tab
 }
 
 void StartScan(int t);
@@ -1417,20 +1447,7 @@ void OnDone(int t, LPARAM code) {
 
 // ---- the progress bar (a small custom control) ---------------------------------------------
 
-Gdiplus::Color GpColor(COLORREF c) { return Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)); }
-
-void AddRound(Gdiplus::GraphicsPath& p, Gdiplus::RectF r, float radius) {
-    radius = std::min({radius, r.Width / 2, r.Height / 2});
-    const float d = std::max(radius * 2, 0.01f);
-    p.AddArc(r.X, r.Y, d, d, 180, 90);
-    p.AddArc(r.X + r.Width - d, r.Y, d, d, 270, 90);
-    p.AddArc(r.X + r.Width - d, r.Y + r.Height - d, d, d, 0, 90);
-    p.AddArc(r.X, r.Y + r.Height - d, d, d, 90, 90);
-    p.CloseFigure();
-}
-
 void PaintBar(HWND h, HDC dc) {
-    Gdiplus_Ensure();
     RECT rc;
     GetClientRect(h, &rc);
     if (rc.right <= 0 || rc.bottom <= 0) return;
@@ -1438,37 +1455,9 @@ void PaintBar(HWND h, HDC dc) {
     HDC mem = CreateCompatibleDC(dc);
     HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
     HGDIOBJ old = SelectObject(mem, bmp);
-    FillColor(mem, rc, p.window);
-    {
-        Gdiplus::Graphics g(mem);
-        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-        const Gdiplus::RectF track(0.5f, 0.5f, static_cast<float>(rc.right) - 1, static_cast<float>(rc.bottom) - 1);
-        const float rad = track.Height / 2;
-        Gdiplus::GraphicsPath tp;
-        AddRound(tp, track, rad);
-        Gdiplus::SolidBrush tb(GpColor(p.nav));
-        g.FillPath(&tb, &tp);
-        const COLORREF fill = J.running || J.outcome == 0 ? p.accent : J.outcome == 1 ? kDotColors[kWarn] : p.grey;
-        Gdiplus::SolidBrush fb(GpColor(fill));
-        if (J.running && J.pct < 0) {
-            // No number known: a segment slides along the track.
-            g.SetClip(&tp);
-            const float seg = track.Width * 0.28f, span = track.Width + seg;
-            const float x = static_cast<float>(GetTickCount64() % 1600) / 1600.0f * span - seg;
-            Gdiplus::GraphicsPath sp;
-            AddRound(sp, Gdiplus::RectF(track.X + x, track.Y, seg, track.Height), rad);
-            g.FillPath(&fb, &sp);
-            g.ResetClip();
-        } else if (J.pct > 0) {
-            const float w = std::max(track.Width * static_cast<float>(J.pct) / 1000.0f, track.Height);
-            Gdiplus::GraphicsPath fp;
-            AddRound(fp, Gdiplus::RectF(track.X, track.Y, w, track.Height), rad);
-            g.FillPath(&fb, &fp);
-        }
-        Gdiplus::Pen pen(GpColor(p.line), 1);
-        g.DrawPath(&pen, &tp);
-    }
+    const COLORREF fill = J.running || J.outcome == 0 ? p.accent : J.outcome == 1 ? p.caution : p.text3;
+    const int pos = J.running && J.pct < 0 ? -1 : std::max(J.pct, 0);
+    Fluent_DrawProgress(mem, rc, U.dpi, pos, GetTickCount64(), fill, p.window);
     BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
     SelectObject(mem, old);
     DeleteObject(bmp);
@@ -1676,45 +1665,74 @@ void DoRow(int row) {
 
 // ---- drawing the tab list ----------------------------------------------------------------
 
+constexpr wchar_t kTabGlyphs[kTabCount] = {Glyph::Home, Glyph::Sync, Glyph::AllApps,
+                                           Glyph::Delete, Glyph::Power, Glyph::Health};
+
 void DrawNavItem(const DRAWITEMSTRUCT& d) {
     if (d.itemID == static_cast<UINT>(-1)) return;
     HDC dc = d.hDC;
     const Palette& p = Pal();
-    FillColor(dc, d.rcItem, p.nav);
-    RECT b = d.rcItem;
-    InflateRect(&b, -Px(2), -Px(2));
-    if (d.itemState & ODS_SELECTED) {
-        SetDCBrushColor(dc, p.navSel);
-        SetDCPenColor(dc, p.navSel);
-        HGDIOBJ ob = SelectObject(dc, GetStockObject(DC_BRUSH));
-        HGDIOBJ op = SelectObject(dc, GetStockObject(DC_PEN));
-        RoundRect(dc, b.left, b.top, b.right, b.bottom, Px(8), Px(8));
-        SelectObject(dc, ob);
-        SelectObject(dc, op);
-        RECT bar{b.left, b.top + Px(9), b.left + Px(3), b.bottom - Px(9)};
-        FillColor(dc, bar, p.accent);
-    }
+    const int i = static_cast<int>(d.itemID);
+    const bool focus = (d.itemState & ODS_FOCUS) && !(d.itemState & ODS_NOFOCUSRECT);
+    Fluent_DrawNavItem(dc, d.rcItem, U.dpi, (d.itemState & ODS_SELECTED) != 0, U.navHot == i, focus, p.nav);
+    RECT ir{d.rcItem.left + Px(16), d.rcItem.top, d.rcItem.left + Px(36), d.rcItem.bottom};
+    Fluent_DrawGlyph(dc, ir, kTabGlyphs[i], 16, U.dpi, p.text);
     HGDIOBJ of = SelectObject(dc, U.font);
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, p.text);
-    RECT tr = b;
-    tr.left += Px(14);
-    tr.right -= Px(10);
-    DrawTextW(dc, kTabs[d.itemID].name, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-    if (J.running && J.tab == static_cast<int>(d.itemID)) {  // the job's progress
-        SetTextColor(dc, p.accent);
+    RECT tr{d.rcItem.left + Px(48), d.rcItem.top, d.rcItem.right - Px(16), d.rcItem.bottom};
+    DrawTextW(dc, kTabs[i].name, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+    if (J.running && J.tab == i) {  // the job's progress
+        SetTextColor(dc, p.accentText);
         const std::wstring pc = J.pct >= 0 ? std::to_wstring(J.pct / 10) + L"%" : L"…";
         DrawTextW(dc, pc.c_str(), -1, &tr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-    } else if (U.busy[d.itemID]) {
-        SetTextColor(dc, p.grey);
+    } else if (U.busy[i]) {
+        SetTextColor(dc, p.text2);
         DrawTextW(dc, L"…", -1, &tr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
     SelectObject(dc, of);
-    if ((d.itemState & ODS_FOCUS) && !(d.itemState & ODS_NOFOCUSRECT)) {
-        SetTextColor(dc, p.text);
-        SetBkColor(dc, p.nav);
-        DrawFocusRect(dc, &b);
+}
+
+void InvalidateNavItem(int i) {
+    RECT r;
+    if (i >= 0 && SendMessageW(U.nav, LB_GETITEMRECT, i, reinterpret_cast<LPARAM>(&r)) != LB_ERR)
+        InvalidateRect(U.nav, &r, FALSE);
+}
+
+// The tab under the mouse gets the hover color.
+LRESULT CALLBACK NavProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    if (m == WM_MOUSEMOVE) {
+        const LRESULT hit = SendMessageW(h, LB_ITEMFROMPOINT, 0, lp);
+        const int i = HIWORD(hit) ? -1 : LOWORD(hit);
+        if (i != U.navHot) {
+            InvalidateNavItem(U.navHot);
+            U.navHot = i;
+            InvalidateNavItem(i);
+            TRACKMOUSEEVENT t{sizeof(t), TME_LEAVE, h, 0};
+            TrackMouseEvent(&t);
+        }
+    } else if (m == WM_MOUSELEAVE) {
+        InvalidateNavItem(U.navHot);
+        U.navHot = -1;
     }
+    return DefSubclassProc(h, m, wp, lp);
+}
+
+// The window background: the cards of the open tab and the search box frame.
+void PaintBack(HDC dc, const RECT& rc) {
+    const Palette& p = Pal();
+    FillColor(dc, rc, p.window);
+    for (const auto& [t, r] : U.cards)
+        if (t == U.tab) Fluent_DrawCard(dc, r, U.dpi);
+    if (U.tab == kApps) {
+        HWND s = Item(IDC_APSEARCH);
+        Fluent_DrawTextBox(dc, U.searchFrame, U.dpi, GetFocus() == s, IsWindowEnabled(s) != FALSE);
+    }
+}
+
+void InvalidateSearch() {
+    InvalidateRect(U.hwnd, &U.searchFrame, TRUE);
+    InvalidateRect(Item(IDC_APSEARCH), nullptr, TRUE);
 }
 
 // ---- window ------------------------------------------------------------------------------
@@ -1754,6 +1772,7 @@ void OnCommand(int id, int code) {
         break;
     case IDC_APSEARCH:
         if (code == EN_CHANGE) FillApps();
+        else if (code == EN_SETFOCUS || code == EN_KILLFOCUS) InvalidateSearch();
         break;
     case IDC_APREFRESH:
         StartScan(kApps);
@@ -1826,6 +1845,7 @@ LRESULT CALLBACK MaintProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CREATE:
         U.dpi = GetDpiForWindow(h);
         Build();
+        SetWindowSubclass(U.nav, NavProc, 1, 0);
         MakeFonts();
         if (SUCCEEDED(CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&U.taskbar))) &&
             FAILED(U.taskbar->HrInit())) {
@@ -1855,10 +1875,21 @@ LRESULT CALLBACK MaintProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         HDC dc = reinterpret_cast<HDC>(wp);
         RECT rc;
         GetClientRect(h, &rc);
-        FillColor(dc, rc, Pal().window);
-        RECT nav{0, 0, Px(kNavW), rc.bottom};
-        FillColor(dc, nav, Pal().nav);
+        // Drawn off screen, then copied: the antialiased cards would flicker otherwise.
+        HDC mem = CreateCompatibleDC(dc);
+        HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
+        HGDIOBJ old = SelectObject(mem, bmp);
+        PaintBack(mem, rc);
+        BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, old);
+        DeleteObject(bmp);
+        DeleteDC(mem);
         return 1;
+    }
+    case WM_LBUTTONDOWN: {  // a click in the search box frame, beside the box itself
+        const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (U.tab == kApps && PtInRect(&U.searchFrame, pt)) SetFocus(Item(IDC_APSEARCH));
+        return 0;
     }
     case WM_MEASUREITEM: {
         auto* m = reinterpret_cast<MEASUREITEMSTRUCT*>(lp);
@@ -1877,11 +1908,12 @@ LRESULT CALLBACK MaintProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         const int id = GetDlgCtrlID(reinterpret_cast<HWND>(lp));
         const Palette& p = Pal();
         COLORREF fg = p.text;
-        if (id == IDC_DESC || id == IDC_UPGPU || (id >= IDC_STATUS0 && id < IDC_STATUS0 + kTabCount)) fg = p.grey;
-        if (id == IDC_UPREBOOT) fg = p.red;
-        SetBkColor(dc, p.window);
+        if (id == IDC_DESC || id == IDC_UPGPU || (id >= IDC_STATUS0 && id < IDC_STATUS0 + kTabCount)) fg = p.text2;
+        if (id == IDC_UPREBOOT) fg = p.critical;
+        const COLORREF bg = id == IDC_HEINFO || id == IDC_HELOG ? p.card : p.window;  // on a card
+        SetBkColor(dc, bg);
         SetTextColor(dc, fg);
-        return reinterpret_cast<LRESULT>(Theme_Brush(p.window));
+        return reinterpret_cast<LRESULT>(Theme_Brush(bg));
     }
     case WM_CTLCOLORBTN:
         return reinterpret_cast<LRESULT>(Theme_Brush(Pal().window));
@@ -1963,6 +1995,8 @@ LRESULT CALLBACK MaintProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         U.hwnd = U.nav = nullptr;
         U.ctls.clear();
+        U.cards.clear();
+        U.navHot = -1;
         U.lastFocus = nullptr;
         for (bool& b : U.busy) b = false;
         for (bool& b : U.scanned) b = false;
@@ -1970,11 +2004,9 @@ LRESULT CALLBACK MaintProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         U.waitBg = false;
         return 0;
     case WM_NCDESTROY:
-        for (HGDIOBJ o : {static_cast<HGDIOBJ>(U.font), static_cast<HGDIOBJ>(U.bold), static_cast<HGDIOBJ>(U.title)})
-            if (o) DeleteObject(o);
-        U.font = U.bold = U.title = nullptr;
         if (U.dots) ImageList_Destroy(U.dots);
-        U.dots = nullptr;
+        if (U.rows) ImageList_Destroy(U.rows);
+        U.dots = U.rows = nullptr;
         break;
     }
     return DefWindowProcW(h, msg, wp, lp);
