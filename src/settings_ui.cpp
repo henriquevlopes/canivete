@@ -1178,7 +1178,11 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             HWND f = GetFocus();
             if (f && IsChild(h, f)) U.lastFocus = f;
         } else {
-            const bool ok = U.lastFocus && IsWindow(U.lastFocus) && IsWindowVisible(U.lastFocus) &&
+            // Never come back into a hotkey box: that switches every hotkey off while Settings is in
+            // front, so a capture hotkey pressed after returning to Settings would silently do nothing.
+            const int lastId = U.lastFocus ? GetDlgCtrlID(U.lastFocus) : 0;
+            const bool hkBox = lastId >= IDC_HK0 && lastId < IDC_HK0 + kHotkeyCount;
+            const bool ok = U.lastFocus && !hkBox && IsWindow(U.lastFocus) && IsWindowVisible(U.lastFocus) &&
                             IsWindowEnabled(U.lastFocus);
             SetFocus(ok ? U.lastFocus : U.nav);
         }

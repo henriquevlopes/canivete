@@ -105,20 +105,34 @@ bool IsShellBackground(HWND h) {
            !wcscmp(cls, L"Shell_SecondaryTrayWnd");
 }
 
-BOOL CALLBACK EnumWindowsProc(HWND h, LPARAM) {
-    if (!IsWindowVisible(h) || IsIconic(h)) return TRUE;
-    DWORD pid = 0;
-    GetWindowThreadProcessId(h, &pid);
-    if (pid == GetCurrentProcessId()) return TRUE;
-    DWORD cloaked = 0;
+// A window the user can see and would want to capture by clicking it. Canivete's own windows
+// (Settings, editor, maintenance...) count like any other; only the capture overlay, the recording
+// bar/border and the screenshot preview (caption-less tool windows) are left out.
+bool Capturable(HWND h, bool allowTaskbar) {
+    if (!h || h == S.hwnd || !IsWindowVisible(h) || IsIconic(h)) return false;
+    DWORD cloaked = 0;  // on another virtual desktop, or a hidden Store app
     DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
-    if (cloaked) return TRUE;
+    if (cloaked) return false;
     wchar_t cls[64] = {};
     GetClassNameW(h, cls, 64);
-    if (!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"CEF-OSC-WIDGET")) return TRUE;
-    const LONG ex = GetWindowLongW(h, GWL_EXSTYLE);
+    if (!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"CEF-OSC-WIDGET")) return false;
     const bool taskbar = !wcscmp(cls, L"Shell_TrayWnd") || !wcscmp(cls, L"Shell_SecondaryTrayWnd");
-    if (!taskbar && (ex & (WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT))) return TRUE;
+    if (taskbar) return allowTaskbar;
+    const LONG ex = GetWindowLongW(h, GWL_EXSTYLE), style = GetWindowLongW(h, GWL_STYLE);
+    if (ex & WS_EX_TRANSPARENT) return false;  // click-through overlays
+    // Tool windows: keep floating panels with a title bar (3ds Max floaters, palettes), drop the rest.
+    if ((ex & WS_EX_TOOLWINDOW) && (style & WS_CAPTION) != WS_CAPTION) return false;
+    if (ex & WS_EX_LAYERED) {  // fully see-through layered windows
+        BYTE alpha = 255;
+        DWORD flags = 0;
+        if (GetLayeredWindowAttributes(h, nullptr, &alpha, &flags) && (flags & LWA_ALPHA) && alpha == 0) return false;
+    }
+    RECT r = WindowBounds(h);
+    return r.right - r.left >= 8 && r.bottom - r.top >= 8;
+}
+
+BOOL CALLBACK EnumWindowsProc(HWND h, LPARAM) {
+    if (!Capturable(h, true)) return TRUE;
     RECT r = WindowBounds(h);
     if (!IntersectRect(&r, &r, &S.vr)) return TRUE;
     if (r.right - r.left < 8 || r.bottom - r.top < 8) return TRUE;
@@ -589,15 +603,34 @@ bool Capture_IsActive() { return S.active; }
 
 namespace {
 
-// Top-level window under the mouse; nullptr over the desktop, taskbar or Canivete's own windows.
+// Top-level window under the mouse (Canivete's own included); nullptr over the desktop or taskbar.
+// Walks the windows top to bottom with the same rules as region mode, so a tooltip, an invisible
+// overlay or the preview popup under the mouse doesn't hide the real window behind it.
 HWND WindowUnderCursor() {
-    POINT p;
-    GetCursorPos(&p);
-    HWND h = GetAncestor(WindowFromPoint(p), GA_ROOT);
-    DWORD pid = 0;
-    GetWindowThreadProcessId(h, &pid);
-    if (!h || IsShellBackground(h) || pid == GetCurrentProcessId()) return nullptr;
-    return h;
+    struct Find {
+        POINT p;
+        HWND hit = nullptr;
+    } f;
+    GetCursorPos(&f.p);
+    if (TestMode()) {  // test copy on a hidden desktop (no real mouse there): "x,y" in cursor.txt
+        FILE* fp = nullptr;
+        if (_wfopen_s(&fp, (AppDataDir() + L"\\cursor.txt").c_str(), L"r") == 0 && fp) {
+            fscanf_s(fp, "%ld,%ld", &f.p.x, &f.p.y);
+            fclose(fp);
+        }
+    }
+    EnumWindows(
+        [](HWND h, LPARAM lp) -> BOOL {
+            auto* f = reinterpret_cast<Find*>(lp);
+            if (!Capturable(h, true)) return TRUE;
+            RECT r = WindowBounds(h);
+            if (!PtInRect(&r, f->p)) return TRUE;
+            f->hit = h;
+            return FALSE;
+        },
+        reinterpret_cast<LPARAM>(&f));
+    if (!f.hit || IsShellBackground(f.hit)) return nullptr;
+    return f.hit;
 }
 
 }  // namespace
