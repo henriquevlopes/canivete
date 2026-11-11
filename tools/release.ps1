@@ -1,14 +1,14 @@
 # Publishes a new Canivete version: builds the setup, then makes a GitHub release on the public
-# henriquevlopes/canivete-releases repo (installer only, no source). Running copies find it there
+# henriquevlopes/canivete repo (public, source and installers). Running copies find it there
 # (update.cpp) and check the file against the SHA256 line in the release notes, and that line against
 # the SIG line (signed here with the offline key, %APPDATA%\Canivete-release\update_key.bin).
 #   powershell -ExecutionPolicy Bypass -File tools\release.ps1 [-Notes "What changed"]
 # Bump the version in CMakeLists.txt first: copies only offer versions newer than their own.
-param([string]$Notes = "", [switch]$NoBuild)
+param([string]$Notes = "", [switch]$NoBuild, [string]$Repo = 'henriquevlopes/canivete')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
-$repo = 'henriquevlopes/canivete-releases'
+$repo = $Repo
 
 $m = Select-String -Path CMakeLists.txt -Pattern 'project\(\s*Canivete\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)'
 $version = $m.Matches[0].Groups[1].Value

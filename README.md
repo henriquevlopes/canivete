@@ -262,7 +262,7 @@ Windows user (DPAPI, `%APPDATA%\Canivete\secrets.ini`), never in settings.ini.
   address" in front (CloudFront or your own domain), or tick "Private bucket" for signed links
   that work for 7 days. Up to 5 GB a file.
 
-Updates of Canivete itself: it checks the public `henriquevlopes/canivete-releases` GitHub releases
+Updates of Canivete itself: it checks the public `henriquevlopes/canivete` GitHub releases
 (no token, about once a day, Settings > General can turn it off), shows a notice and a tray menu item
 when a newer version is out, downloads the setup, checks its SHA256 against the release notes and
 installs it silently. Only a release whose `SIG:` line (an ECDSA P-256 signature of
@@ -330,7 +330,7 @@ menu entry and an uninstaller in Windows' app list. `/TESTRUN` makes it leave th
 
 Release: bump the version in `CMakeLists.txt`, then
 `powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Notes "What changed"`. It builds the setup
-and publishes it with its SHA256 and signature on `henriquevlopes/canivete-releases`; running copies pick it up.
+and publishes it with its SHA256 and signature on `henriquevlopes/canivete`; running copies pick it up.
 Signing needs the private update key, `%APPDATA%\Canivete-release\update_key.bin` (DPAPI, this Windows
 user only; made once by `tools\make_update_key.ps1`). Keep an offline backup:
 `tools\sign_update.ps1 -ExportBackup <file>` (asks for a password); `-ImportBackup <file>` puts it back on

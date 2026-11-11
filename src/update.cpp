@@ -1,4 +1,4 @@
-// Canivete's own updates: asks GitHub for the latest release of the public releases repo, and when it
+// Canivete's own updates: asks GitHub for the latest release of the public canivete repo, and when it
 // is newer, downloads its setup, checks the file's SHA-256 against the one written in the release
 // notes ("SHA256: <hex>"), runs it silently and exits. The installer replaces the files and starts
 // Canivete again. Checked once a day (General: "Tell me when a new version is out") and on request.
@@ -26,8 +26,8 @@
 namespace {
 
 constexpr wchar_t kHost[] = L"api.github.com";
-constexpr wchar_t kLatest[] = L"/repos/henriquevlopes/canivete-releases/releases/latest";
-constexpr wchar_t kDownloadPrefix[] = L"https://github.com/henriquevlopes/canivete-releases/releases/download/";
+constexpr wchar_t kLatest[] = L"/repos/henriquevlopes/canivete/releases/latest";
+constexpr wchar_t kDownloadPrefix[] = L"https://github.com/henriquevlopes/canivete/releases/download/";
 constexpr ULONGLONG kMaxSetup = 64ull << 20;  // a bigger "setup" is not ours
 
 // BCRYPT_ECCPUBLIC_BLOB (ECDSA P-256) of the update signing key, made by tools/make_update_key.ps1.
