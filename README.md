@@ -40,14 +40,3 @@ Updates: a green dot appears on the tray icon when a new version is ready. Right
 | Ctrl+Shift+PrtSc | Record a GIF (press again to stop) |
 | Shift+PrtSc | Record a video (press again to stop) |
 | Ctrl+Alt+PrtSc | Pause / resume the recording |
-
-## Build
-
-Needs Visual Studio 2026 (C++ desktop workload) and CMake.
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools\deploy.ps1
-```
-
-Builds Release, installs to `%LOCALAPPDATA%\Programs\Canivete` and restarts it. Release: bump the
-version in `CMakeLists.txt`, then `tools\release.ps1 -Notes "..."`.
