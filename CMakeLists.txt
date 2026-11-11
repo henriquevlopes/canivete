@@ -33,6 +33,7 @@ add_executable(Canivete WIN32
     src/rmbg_model.cpp
     src/overlay.cpp
     src/trim.cpp
+    src/ocr.cpp
     res/canivete.rc
     res/app.manifest
 )
@@ -45,7 +46,7 @@ target_link_options(Canivete PRIVATE $<$<CONFIG:Release>:/LTCG /OPT:REF /OPT:ICF
 target_link_libraries(Canivete PRIVATE
     user32 gdi32 shell32 ole32 windowscodecs dwmapi shcore shlwapi comctl32 advapi32
     mfplat mfreadwrite mfuuid mf wuguid oleaut32 setupapi uxtheme
-    wbemuuid cfgmgr32 winhttp bcrypt crypt32 ws2_32 dxgi version delayimp)
+    runtimeobject wbemuuid cfgmgr32 winhttp bcrypt crypt32 ws2_32 dxgi version delayimp)
 # DLLs only some features need are loaded the first time they are used, not at start: the copy that
 # sits in the tray maps less.
 target_link_options(Canivete PRIVATE /DELAYLOAD:mfplat.dll /DELAYLOAD:mfreadwrite.dll

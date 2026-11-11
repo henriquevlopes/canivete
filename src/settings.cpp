@@ -161,6 +161,7 @@ void LoadSettings() {
     s.hkColor = ReadStr(L"Hotkeys", L"ColorPicker", L"Win+C");
     s.hkGif = ReadStr(L"Hotkeys", L"RecordGif", L"Ctrl+Shift+PrintScreen");
     s.hkVideo = ReadStr(L"Hotkeys", L"RecordVideo", L"Shift+PrintScreen");
+    s.hkText = ReadStr(L"Hotkeys", L"ExtractText", L"Win+Shift+T");
     s.hkGifPause = ReadStr(L"Hotkeys", L"PauseGif", L"Ctrl+Alt+PrintScreen");
     s.hkVideoPause = ReadStr(L"Hotkeys", L"PauseVideo", L"Ctrl+Alt+PrintScreen");
     for (int f = 0; f < kFeatCount; ++f) s.features[f] = ReadBool(L"Features", kFeatureKeys[f], true);
@@ -223,6 +224,7 @@ void SaveSettings(const Settings& s) {
     WriteStr(L"Hotkeys", L"ColorPicker", s.hkColor);
     WriteStr(L"Hotkeys", L"RecordGif", s.hkGif);
     WriteStr(L"Hotkeys", L"RecordVideo", s.hkVideo);
+    WriteStr(L"Hotkeys", L"ExtractText", s.hkText);
     WriteStr(L"Hotkeys", L"PauseGif", s.hkGifPause);
     WriteStr(L"Hotkeys", L"PauseVideo", s.hkVideoPause);
     WriteStr(L"ColorPicker", L"CopyFormat", s.colorFormat);

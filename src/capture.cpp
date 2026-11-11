@@ -23,6 +23,7 @@ struct State {
     bool picking = false;      // color picker: no dimming, no selection, click picks the pixel
     bool forGif = false;       // the area is for a GIF recording, not a screenshot
     bool forVideo = false;     // ... for an MP4 recording
+    bool forText = false;      // the area is read with OCR (Extract text)
     RECT vr{};                 // virtual desktop, screen coords
     Dib frozen, dim, back, mag;
     std::vector<RECT> windows;   // top-level windows, z-order (topmost first), screen coords
@@ -372,6 +373,20 @@ void Finish() {
         Recorder_Start(r, video);
         return;
     }
+    if (S.forText) {
+        auto img = std::make_unique<Image>();
+        img->w = r.right - r.left;
+        img->h = r.bottom - r.top;
+        img->px.resize(static_cast<size_t>(img->w) * img->h);
+        const int tx = r.left - S.vr.left, ty = r.top - S.vr.top;
+        for (int y = 0; y < img->h; ++y)
+            memcpy(&img->px[static_cast<size_t>(y) * img->w],
+                   &S.frozen.bits[static_cast<size_t>(ty + y) * S.frozen.w + tx], img->w * sizeof(uint32_t));
+        Log(L"Text area %dx%d at %d,%d", img->w, img->h, r.left, r.top);
+        Close();
+        Ocr_Image(std::move(img));
+        return;
+    }
     auto res = std::make_unique<CaptureResult>();
     res->screenRect = r;
     res->processName = S.proc;
@@ -644,10 +659,12 @@ void Capture_Start(CaptureMode mode) {
     HWND fg = GetForegroundWindow();
     S.forGif = mode == CaptureMode::Gif || mode == CaptureMode::Video;
     S.forVideo = mode == CaptureMode::Video;
+    S.forText = mode == CaptureMode::Text;
     switch (mode) {
     case CaptureMode::Region:
     case CaptureMode::Gif:
     case CaptureMode::Video:
+    case CaptureMode::Text:
         StartRegion(fg, false);
         break;
     case CaptureMode::Color:

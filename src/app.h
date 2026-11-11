@@ -20,9 +20,10 @@ constexpr UINT WM_APP_MAINT = WM_APP + 4;         // lParam = background mainten
 constexpr UINT WM_APP_UPDATE = WM_APP + 5;        // Canivete update check / download finished (update.cpp)
 constexpr UINT WM_APP_UPLOAD = WM_APP + 6;        // upload started / progress / finished (upload.cpp)
 constexpr UINT WM_APP_NOBG = WM_APP + 7;          // to the editor: lParam = new std::wstring, Remove background's result
+constexpr UINT WM_APP_TEXT = WM_APP + 8;          // lParam = new std::wstring: a toast to show (Extract text result)
 
-enum class CaptureMode { Region = 1, Window = 2, Full = 3, Color = 4, Gif = 5, Video = 6 };  // also the hotkey ids
-constexpr int kHotkeyCount = 6;
+enum class CaptureMode { Region = 1, Window = 2, Full = 3, Color = 4, Gif = 5, Video = 6, Text = 7 };  // also the hotkey ids
+constexpr int kHotkeyCount = 7;
 
 // ---- settings.cpp --------------------------------------------------------------------------
 struct Hotkey {
@@ -41,7 +42,7 @@ inline constexpr const wchar_t* kFeatureKeys[kFeatCount] = {L"Screenshots", L"Co
 
 struct Settings {
     bool features[kFeatCount] = {true, true, true, true, true, true, true, true};
-    std::wstring hkRegion, hkWindow, hkFull, hkColor, hkGif, hkVideo;
+    std::wstring hkRegion, hkWindow, hkFull, hkColor, hkGif, hkVideo, hkText;
     std::wstring folder;    // empty = Windows "Screenshots" folder
     std::wstring fileName;  // pattern with %tokens
     std::wstring fullScreen;  // "all" or "monitor"
@@ -270,6 +271,9 @@ bool Capture_IsActive();
 RECT VirtualScreenRect();
 bool GrabScreen(const RECT& r, Image& out, bool withCursor);
 void DrawCursorAt(HDC dc, int ox, int oy);  // the mouse pointer, for a grab whose top-left is ox, oy
+
+// ---- ocr.cpp: Text extractor (Windows' own OCR, nothing downloaded) -------------------------
+void Ocr_Image(std::unique_ptr<Image> img);  // async: read the text, copy it, show a toast
 
 // ---- output.cpp ----------------------------------------------------------------------------
 void Output_Init();

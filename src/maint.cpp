@@ -94,6 +94,7 @@ enum : int {
     IDC_JOBTEXT = 200,  // the job panel: one line of text, the progress bar, Cancel / Close
     IDC_JOBBAR,
     IDC_JOBCANCEL,
+    IDC_SCANBAR,  // thin moving bar under the description while the tab's check runs
 };
 constexpr int kPanel = -2;     // Ctl::tab of the job panel's controls: shown on the job's tab
 constexpr int kPanelH = 60;    // its height (96-DPI pixels), taken from the bottom of the tab's content
@@ -299,6 +300,7 @@ void Build() {
     Static(IDC_JOBTEXT, L"", kPanel, SS_LEFT | SS_ENDELLIPSIS);
     Add(kBarClass, L"", 0, IDC_JOBBAR, kPanel);
     Button(IDC_JOBCANCEL, L"Cancel", kPanel);
+    Add(kBarClass, L"", 0, IDC_SCANBAR, -1);
 }
 
 // Round colored dots for the Overview rows, drawn smooth at this DPI.
@@ -386,6 +388,7 @@ void Layout() {
     put(IDC_NAV, 8, 8, kNavW - 12, kTabCount * kNavItem + 4);
     put(IDC_TITLE, L, 14, CW, 44);
     put(IDC_DESC, L, 62, CW, 22);
+    put(IDC_SCANBAR, L, 88, CW, 6);
     // Footer: status on the left, buttons on the right (widths in order from the right edge).
     auto footer = [&](int t, std::initializer_list<std::pair<int, int>> buttons) {
         int x = R;
@@ -509,6 +512,11 @@ void ShowTab(int t) {
         if ((id == IDC_UPREBOOT || id == IDC_UPREBOOTBTN) && !U.rebootNeeded) show = false;
         if ((id == IDC_UPGPU || id == IDC_UPGPUBTN) && U.up.gpus.empty()) show = false;
         if (id == IDC_UPGPUBTN && (U.up.gpus.empty() || U.up.gpus[0].open.empty())) show = false;
+        if (id == IDC_SCANBAR) {
+            show = U.busy[U.tab];
+            if (show) SetTimer(c.wnd, 1, 30, nullptr);
+            else KillTimer(c.wnd, 1);
+        }
         ShowWindow(c.wnd, show ? SW_SHOWNA : SW_HIDE);
     }
     SetText(IDC_TITLE, kTabs[U.tab].name);
@@ -521,6 +529,17 @@ void ShowTab(int t) {
 }
 
 void StartScan(int t);
+
+// The moving bar under the description follows whether the shown tab is checking.
+void SyncScanBar() {
+    HWND bar = Item(IDC_SCANBAR);
+    if (!bar) return;
+    const bool show = U.busy[U.tab];
+    if (show) SetTimer(bar, 1, 30, nullptr);
+    else KillTimer(bar, 1);
+    ShowWindow(bar, show ? SW_SHOWNA : SW_HIDE);
+    InvalidateRect(bar, nullptr, FALSE);
+}
 
 void OpenTab(int t) {
     ShowTab(t);
@@ -956,11 +975,13 @@ void StartScan(int t) {
     if (t == kUpdates && g_bgBusy) {  // the daily check is running: its results come here too
         U.busy[t] = U.waitBg = true;
         UpdateButtons();
+        SyncScanBar();
         SetStatus(t, L"Checking for updates…");
         return;
     }
     U.busy[t] = true;
     UpdateButtons();
+    SyncScanBar();
     SetStatus(t, t == kUpdates    ? L"Checking for updates…"
                  : t == kCleanup  ? L"Measuring…"
                  : t == kStartup  ? L"Reading startup apps…"
@@ -1025,6 +1046,7 @@ void OnScan(int t, std::unique_ptr<ScanResult> r) {
     }
     FillOverview();
     UpdateButtons();
+    SyncScanBar();
 }
 
 void FillColor(HDC dc, const RECT& r, COLORREF c) {
@@ -1455,8 +1477,9 @@ void PaintBar(HWND h, HDC dc) {
     HDC mem = CreateCompatibleDC(dc);
     HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
     HGDIOBJ old = SelectObject(mem, bmp);
-    const COLORREF fill = J.running || J.outcome == 0 ? p.accent : J.outcome == 1 ? p.caution : p.text3;
-    const int pos = J.running && J.pct < 0 ? -1 : std::max(J.pct, 0);
+    const bool scan = GetDlgCtrlID(h) == IDC_SCANBAR;
+    const COLORREF fill = scan || J.running || J.outcome == 0 ? p.accent : J.outcome == 1 ? p.caution : p.text3;
+    const int pos = scan || (J.running && J.pct < 0) ? -1 : std::max(J.pct, 0);
     Fluent_DrawProgress(mem, rc, U.dpi, pos, GetTickCount64(), fill, p.window);
     BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
     SelectObject(mem, old);

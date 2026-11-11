@@ -17,7 +17,7 @@ HWND g_mainWnd = nullptr;
 
 namespace {
 
-enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_COLOR, ID_GIF, ID_OPEN_FOLDER, ID_SETTINGS, ID_EXIT, ID_RESIZE, ID_RENAME, ID_VIDEO, ID_MAINT, ID_UPDATE };
+enum : UINT { ID_REGION = 100, ID_WINDOW, ID_FULL, ID_COLOR, ID_GIF, ID_OPEN_FOLDER, ID_SETTINGS, ID_EXIT, ID_RESIZE, ID_RENAME, ID_VIDEO, ID_MAINT, ID_UPDATE, ID_TEXT };
 constexpr UINT ID_RECENT0 = 200;  // .. 209: recent colors in the tray menu
 constexpr UINT kCmdAlreadyRunning = 99;
 constexpr UINT kCmdSettings = 98;
@@ -211,6 +211,7 @@ std::wstring RegisterHotkeys() {
         {CaptureMode::Color, &g_settings.hkColor, L"Color picker", kFeatColor},
         {CaptureMode::Gif, &g_settings.hkGif, L"Record GIF", kFeatGif},
         {CaptureMode::Video, &g_settings.hkVideo, L"Record video", kFeatVideo},
+        {CaptureMode::Text, &g_settings.hkText, L"Extract text", kFeatShots},
     };
     std::wstring failed;
     for (const Entry& e : list) UnregisterHotKey(g_mainWnd, static_cast<int>(e.mode));
@@ -342,6 +343,7 @@ void ShowMenu() {
     if (FeatureOn(kFeatShots)) {
         item(ID_REGION, L"Region screenshot", g_settings.hkRegion);
         item(ID_FULL, L"Full screenshot", g_settings.hkFull);
+        item(ID_TEXT, L"Extract text", g_settings.hkText);
     }
     if (Recorder_Active()) {
         item(ID_GIF, L"Stop recording", L"");
@@ -456,6 +458,11 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         Maint_OnBackground(lp);
         ScheduleChecks();
         return 0;
+    case WM_APP_TEXT: {
+        std::unique_ptr<std::wstring> t(reinterpret_cast<std::wstring*>(lp));
+        if (t) Tray_Notify(L"Extract text", *t);
+        return 0;
+    }
     case WM_APP_UPDATE:
         Update_OnMessage(wp, lp);
         ScheduleChecks();
@@ -525,12 +532,13 @@ LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_COLOR:
         case ID_GIF:
         case ID_VIDEO:
+        case ID_TEXT:
             if ((LOWORD(wp) == ID_GIF || LOWORD(wp) == ID_VIDEO) && Recorder_Active()) {
                 Recorder_Stop();
                 break;
             }
             // Wait for the menu to fade out so it isn't in the screenshot.
-            g_deferredMode = LOWORD(wp) == ID_VIDEO ? CaptureMode::Video
+            g_deferredMode = LOWORD(wp) == ID_TEXT ? CaptureMode::Text : LOWORD(wp) == ID_VIDEO ? CaptureMode::Video
                                                     : static_cast<CaptureMode>(LOWORD(wp) - ID_REGION + 1);
             SetTimer(h, kTimerDeferred, 250, nullptr);
             break;
@@ -786,6 +794,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
         else if (!_wcsicmp(argv[1], L"--window")) cmd = static_cast<UINT>(CaptureMode::Window);
         else if (!_wcsicmp(argv[1], L"--full")) cmd = static_cast<UINT>(CaptureMode::Full);
         else if (!_wcsicmp(argv[1], L"--color")) cmd = static_cast<UINT>(CaptureMode::Color);
+        else if (!_wcsicmp(argv[1], L"--text")) cmd = static_cast<UINT>(CaptureMode::Text);
         else if (!_wcsicmp(argv[1], L"--gif")) cmd = static_cast<UINT>(CaptureMode::Gif);
         else if (!_wcsicmp(argv[1], L"--mp4")) cmd = static_cast<UINT>(CaptureMode::Video);
         else if ((!_wcsicmp(argv[1], L"--mp4-test") || !_wcsicmp(argv[1], L"--mp4-bench")) && argc >= 7) {

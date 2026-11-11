@@ -111,9 +111,10 @@ constexpr int kHkSlots = kHotkeyCount + 2;
 constexpr int kHkGifPause = kHotkeyCount, kHkVideoPause = kHotkeyCount + 1;
 const wchar_t* const kHkNames[kHkSlots] = {L"Region screenshot", L"Window screenshot", L"Full screenshot",
                                            L"Color picker",      L"Record GIF",        L"Record video",
+                                           L"Extract text",
                                            L"Pause / resume",    L"Pause / resume"};
-constexpr Feature kHkFeature[kHkSlots] = {kFeatShots, kFeatShots, kFeatShots, kFeatColor,
-                                          kFeatGif,   kFeatVideo, kFeatGif,   kFeatVideo};
+constexpr Feature kHkFeature[kHkSlots] = {kFeatShots, kFeatShots, kFeatShots, kFeatColor, kFeatGif,
+                                          kFeatVideo, kFeatShots, kFeatGif,   kFeatVideo};
 constexpr bool IsPauseKey(int i) { return i >= kHotkeyCount; }
 
 struct TabDef {
@@ -373,6 +374,9 @@ void Build() {
     y += kRow;
     RowLine(y);
     HotkeyRow(2, y);
+    y += kRow;
+    RowLine(y);
+    HotkeyRow(6, y);
     y = HotkeyHint(CardEnd(y + kRow));
     CardBegin(y);
     Label(L"Full screenshot of", y);
@@ -644,6 +648,7 @@ void CheckHotkeys() {
     const std::wstring* saved[kHkSlots] = {&g_settings.hkRegion, nullptr,
                                            &g_settings.hkFull,   &g_settings.hkColor,
                                            &g_settings.hkGif,    &g_settings.hkVideo,
+                                           &g_settings.hkText,
                                            &g_settings.hkGifPause, &g_settings.hkVideoPause};
     for (int i = 0; i < kHkSlots; ++i)
         if (saved[i] && FeatureOn(kHkFeature[i])) ParseHotkey(*saved[i], owned[i]);
@@ -929,6 +934,7 @@ void Populate() {
     ParseHotkey(s.hkColor, U.hk[3]);
     ParseHotkey(s.hkGif, U.hk[4]);
     ParseHotkey(s.hkVideo, U.hk[5]);
+    ParseHotkey(s.hkText, U.hk[6]);
     ParseHotkey(s.hkGifPause, U.hk[kHkGifPause]);
     ParseHotkey(s.hkVideoPause, U.hk[kHkVideoPause]);
     for (int i = 0; i < kHkSlots; ++i)
@@ -983,7 +989,8 @@ void Apply() {
     Settings s = g_settings;
     for (int f = 0; f < kFeatCount; ++f) s.features[f] = U.on[f];
     std::wstring* hks[kHkSlots] = {&s.hkRegion, &s.hkWindow, &s.hkFull,     &s.hkColor,
-                                   &s.hkGif,    &s.hkVideo,  &s.hkGifPause, &s.hkVideoPause};
+                                   &s.hkGif,    &s.hkVideo,  &s.hkText,     &s.hkGifPause,
+                                   &s.hkVideoPause};
     for (int i = 0; i < kHkSlots; ++i) *hks[i] = U.hk[i].vk ? HotkeyText(U.hk[i]) : L"None";
     s.saveToFile = Checked(IDC_SAVE);
     s.folder = Trim(GetText(IDC_FOLDER));
@@ -1062,9 +1069,30 @@ RECT SwitchRect(const RECT& item) {
     return {right - s.cx, top, right, top + s.cy};
 }
 
+void DrawNavItemDirect(const DRAWITEMSTRUCT& d, HDC dc);
+
+// Drawn off screen and copied in one go, so hovering never shows a half-painted item.
 void DrawNavItem(const DRAWITEMSTRUCT& d) {
     if (d.itemID == static_cast<UINT>(-1)) return;
-    HDC dc = d.hDC;
+    const int w = d.rcItem.right - d.rcItem.left, h = d.rcItem.bottom - d.rcItem.top;
+    HDC mem = CreateCompatibleDC(d.hDC);
+    HBITMAP bmp = mem ? CreateCompatibleBitmap(d.hDC, w, h) : nullptr;
+    if (!bmp) {
+        if (mem) DeleteDC(mem);
+        DrawNavItemDirect(d, d.hDC);
+        return;
+    }
+    HGDIOBJ old = SelectObject(mem, bmp);
+    SetViewportOrgEx(mem, -d.rcItem.left, -d.rcItem.top, nullptr);
+    DrawNavItemDirect(d, mem);
+    SetViewportOrgEx(mem, 0, 0, nullptr);
+    BitBlt(d.hDC, d.rcItem.left, d.rcItem.top, w, h, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+}
+
+void DrawNavItemDirect(const DRAWITEMSTRUCT& d, HDC dc) {
     const Palette& p = Pal();
     const int i = static_cast<int>(d.itemID);
     const bool focus = (d.itemState & ODS_FOCUS) && !(d.itemState & ODS_NOFOCUSRECT);
