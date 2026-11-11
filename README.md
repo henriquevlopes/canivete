@@ -1,7 +1,39 @@
 # Canivete
 
-Henri's personal Windows tray toolbox (Portuguese *canivete* = pocket knife). One small native exe,
-no runtimes, nothing to install. Personal use only, not for sale or distribution.
+A small toolbox for Windows that lives in the tray (Portuguese *canivete* = pocket knife). One light
+native app, no runtimes: press a hotkey, get the job done, back to work.
+
+## Install
+
+Open PowerShell (no admin needed) and run:
+
+```powershell
+irm https://henriquevlopes.github.io/canivete/get.txt | iex
+```
+
+It downloads the latest release and installs it silently for the current user. Canivete starts by
+itself: look for its icon in the tray. Or download `Canivete-Setup-<version>.exe` from the
+[releases page](https://github.com/henriquevlopes/canivete/releases/latest) and run it.
+
+Updates: Canivete checks once a day. A green dot appears on the tray icon when a new version is
+ready; right-click the icon and choose **Update to X and restart**. Only releases signed by the
+author are installed.
+
+## What it does
+
+- **Screenshots**: region, window, monitor or all screens, with a magnifier, the mouse pointer on
+  request, and a preview in the corner that you can drag straight into a chat.
+- **Editor**: arrows, shapes, text, numbered steps, blur, store-page frame, transparent background.
+- **Screen recording**: GIF and MP4 (with sound and a keys-and-clicks overlay), pause, trim, and a
+  choice of smaller or smoother file at the end.
+- **Extract text** (OCR): select an area and the text is copied to the clipboard.
+- **Color picker**: freeze the screen, magnifier, copy the color in the format you like.
+- **Image tools**: resize, remove background (offline AI), rename files in bulk.
+- **Uploads**: send a picture, GIF or video to Google Drive or Amazon S3 and copy the link.
+- **Computer maintenance**: updates, cleanup, startup apps, installed apps and health in one window.
+
+The tools below are all configurable in Settings (hotkeys, formats, folders, how long the preview
+stays on screen).
 
 Plan and research notes: [PLAN.md](PLAN.md).
 
@@ -20,6 +52,7 @@ Plan and research notes: [PLAN.md](PLAN.md).
 | 7 | Computer maintenance (overview, updates, installed apps, cleanup, startup apps, health, daily check) | done |
 | 8 | Installer and self-update | done |
 | 9 | Uploads (Google Drive, Amazon S3) | done |
+| 10 | Extract text (OCR), draggable preview, one-click update | done |
 
 ## Use
 
@@ -30,6 +63,7 @@ Plan and research notes: [PLAN.md](PLAN.md).
 | Win+C | Color picker: the screen freezes, a magnifier follows the mouse. Click, Enter or Space copies the color; Esc or right-click cancels; arrows nudge |
 | Ctrl+Shift+PrtSc | Record a GIF: pick an area like a region screenshot; press again (or Stop) to finish |
 | Shift+PrtSc | Record a video (MP4): pick an area the same way; press again (or Stop) to finish |
+| Win+Shift+T | Extract text: pick an area like a region screenshot; the text in it is copied to the clipboard (Windows OCR, offline) |
 | Ctrl+Alt+PrtSc | Pause / resume the GIF or video being recorded (set separately for GIF and video in Settings) |
 
 GIF recording: a red border marks the area and a small bar shows the time with Stop and Cancel
