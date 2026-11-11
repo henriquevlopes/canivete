@@ -7,5 +7,6 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp .build/release/Canivete "$APP/Contents/MacOS/Canivete"
 cp Info.plist "$APP/Contents/Info.plist"
-codesign --force --sign - "$APP"
+BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Contents/Info.plist")
+codesign --force --sign - --identifier "$BUNDLE_ID" --requirements "=designated => identifier \"$BUNDLE_ID\"" "$APP"
 echo "Built $APP"

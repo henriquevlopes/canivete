@@ -1,12 +1,15 @@
 import AppKit
 import ApplicationServices
 import ServiceManagement
+import Carbon.HIToolbox
 
 final class CaniveteMacApp: NSObject, NSApplicationDelegate {
     private let switcher = WindowSwitcher()
     private let dockMinimize = DockMinimizeModule()
     private var statusItem: NSStatusItem?
     private var settingsWindow: NSWindow?
+    private weak var shortcutRecorder: NSButton?
+    private var shortcutRecordingMonitor: Any?
     private let defaults = UserDefaults.standard
     private var accessibilityTimer: Timer?
 
@@ -22,7 +25,7 @@ final class CaniveteMacApp: NSObject, NSApplicationDelegate {
         if defaults.bool(forKey: "switcherEnabled") { switcher.enabled = true; switcher.start() }
         dockMinimize.enabled = defaults.bool(forKey: "dockMinimizeEnabled")
         updateLoginItem()
-        requestAccessibilityIfNeeded()
+        if CommandLine.arguments.contains("--settings") { DispatchQueue.main.async { self.openSettings() } }
     }
 
     private func requestAccessibilityIfNeeded() {
@@ -43,7 +46,7 @@ final class CaniveteMacApp: NSObject, NSApplicationDelegate {
         guard let item = statusItem else { return }
         item.button?.image = NSImage(systemSymbolName: "wrench.and.screwdriver", accessibilityDescription: "Canivete")
         let menu = NSMenu()
-        menu.addItem(moduleItem("Alt+Tab window switcher", action: #selector(toggleSwitcher), enabled: defaults.bool(forKey: "switcherEnabled")))
+        menu.addItem(moduleItem("Window switcher (\(switcher.shortcutDisplayName()))", action: #selector(toggleSwitcher), enabled: defaults.bool(forKey: "switcherEnabled")))
         menu.addItem(moduleItem("Dock Minimize", action: #selector(toggleDockMinimize), enabled: defaults.bool(forKey: "dockMinimizeEnabled")))
         menu.addItem(.separator())
         let login = menu.addItem(withTitle: "Start at Login", action: #selector(toggleLogin), keyEquivalent: "")
@@ -92,26 +95,78 @@ final class CaniveteMacApp: NSObject, NSApplicationDelegate {
     }
 
     private func makeSettingsWindow() -> NSWindow {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 290), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 580, height: 410), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Canivete Settings"
         window.center()
         let content = NSView(frame: window.contentView?.bounds ?? .zero)
         window.contentView = content
         let heading = NSTextField(labelWithString: "Tools")
         heading.font = .systemFont(ofSize: 20, weight: .semibold)
-        heading.frame = NSRect(x: 24, y: 236, width: 380, height: 28)
+        heading.frame = NSRect(x: 24, y: 356, width: 520, height: 28)
         content.addSubview(heading)
-        addSetting("Alt+Tab window switcher", key: "switcherEnabled", y: 190, to: content)
-        addSetting("Dock Minimize", key: "dockMinimizeEnabled", y: 150, to: content)
-        addSetting("Start Canivete when macOS starts", key: "startAtLogin", y: 110, to: content)
+        addSetting("Alt+Tab window switcher", key: "switcherEnabled", y: 315, to: content)
+        let recorder = NSButton(title: "Record Shortcut…", target: self, action: #selector(beginShortcutRecording(_:)))
+        recorder.frame = NSRect(x: 24, y: 242, width: 300, height: 34)
+        recorder.bezelStyle = .rounded
+        shortcutRecorder = recorder
+        content.addSubview(recorder)
+        let activeShortcut = NSTextField(labelWithString: "Current: \(switcher.shortcutDisplayName())")
+        activeShortcut.frame = NSRect(x: 24, y: 212, width: 400, height: 20)
+        activeShortcut.tag = 301
+        content.addSubview(activeShortcut)
+        addSetting("Dock Minimize", key: "dockMinimizeEnabled", y: 174, to: content)
+        addSetting("Start Canivete when macOS starts", key: "startAtLogin", y: 134, to: content)
         let help = NSTextField(wrappingLabelWithString: "Window switching and Dock Minimize need Accessibility permission.")
-        help.frame = NSRect(x: 24, y: 58, width: 270, height: 38)
+        help.frame = NSRect(x: 24, y: 80, width: 520, height: 36)
         content.addSubview(help)
+        let requestAccess = NSButton(title: "Request Accessibility Permission", target: self, action: #selector(requestAccessibilityPermission))
+        requestAccess.bezelStyle = .rounded
+        requestAccess.frame = NSRect(x: 24, y: 30, width: 270, height: 30)
+        content.addSubview(requestAccess)
         let access = NSButton(title: "Accessibility Settings…", target: self, action: #selector(openAccessibilitySettings))
         access.bezelStyle = .rounded
-        access.frame = NSRect(x: 225, y: 22, width: 190, height: 30)
+        access.frame = NSRect(x: 326, y: 30, width: 220, height: 30)
         content.addSubview(access)
         return window
+    }
+
+    @objc private func beginShortcutRecording(_ sender: NSButton) {
+        if let shortcutRecordingMonitor { NSEvent.removeMonitor(shortcutRecordingMonitor) }
+        switcher.suspendShortcutForRecording()
+        sender.title = "Press the shortcut… (Esc cancels)"
+        shortcutRecordingMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak sender] event in
+            guard let self, let sender else { return event }
+            if event.keyCode == UInt16(kVK_Escape) {
+                sender.title = "Record Shortcut…"
+                if let monitor = self.shortcutRecordingMonitor { NSEvent.removeMonitor(monitor); self.shortcutRecordingMonitor = nil }
+                self.switcher.updateShortcut()
+                return nil
+            }
+            let modifiers: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
+            guard !event.modifierFlags.intersection(modifiers).isEmpty else {
+                sender.title = "Add a modifier, then press a key…"
+                return nil
+            }
+            self.saveShortcut(keyCode: event.keyCode, name: event.charactersIgnoringModifiers ?? "Key", flags: event.modifierFlags)
+            sender.title = "Record Shortcut…"
+            if let monitor = self.shortcutRecordingMonitor { NSEvent.removeMonitor(monitor); self.shortcutRecordingMonitor = nil }
+            self.switcher.updateShortcut()
+            return nil
+        }
+        settingsWindow?.makeFirstResponder(settingsWindow?.contentView)
+    }
+
+    private func saveShortcut(keyCode: UInt16, name: String, flags: NSEvent.ModifierFlags) {
+        let map: [(NSEvent.ModifierFlags, CGEventFlags)] = [(.command, .maskCommand), (.option, .maskAlternate), (.control, .maskControl), (.shift, .maskShift)]
+        var modifiers: CGEventFlags = []
+        for (cocoa, cg) in map where flags.contains(cocoa) { modifiers.insert(cg) }
+        defaults.set(UInt64(modifiers.rawValue), forKey: "switcherShortcutModifiers")
+        defaults.set(0, forKey: "switcherShortcutPhysicalModifierCode")
+        defaults.set(Int(keyCode), forKey: "switcherShortcutKeyCode")
+        defaults.set(name, forKey: "switcherShortcutKeyName")
+        settingsWindow?.contentView?.viewWithTag(301).flatMap { $0 as? NSTextField }?.stringValue = "Current: \(switcher.shortcutDisplayName())"
+        switcher.updateShortcut()
+        rebuildMenu()
     }
 
     private func addSetting(_ title: String, key: String, y: CGFloat, to view: NSView) {
@@ -140,6 +195,15 @@ final class CaniveteMacApp: NSObject, NSApplicationDelegate {
     @objc private func openAccessibilitySettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    @objc private func requestAccessibilityPermission() {
+        guard !AXIsProcessTrusted() else {
+            switcher.start()
+            dockMinimize.enabled = defaults.bool(forKey: "dockMinimizeEnabled")
+            return
+        }
+        requestAccessibilityIfNeeded()
     }
 
     private func updateLoginItem() {

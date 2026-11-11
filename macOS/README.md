@@ -2,21 +2,21 @@
 
 Native Swift app that begins the macOS port of Canivete with two independently switchable modules:
 
-The app stays in the menu bar. Its menu provides tool toggles, a Settings entry for Accessibility help, a Start at Login toggle, and Quit. Start at Login is on by default at first launch and can be disabled at any time.
+The app stays in the menu bar. Its menu provides tool toggles, a Settings entry for Accessibility help and shortcut configuration, a Start at Login toggle, and Quit. Start at Login is on by default at first launch and can be disabled at any time. In Settings, use **Record Shortcut…** and press the desired modifier-plus-key combination.
 
-- **Alt+Tab window switcher:** hold Option and tap Tab to cycle windows; add Shift to cycle backwards; release Option to activate the selected window.
+- **Window switcher:** hold the configurable shortcut to cycle windows; add Shift to cycle backwards; release its modifiers to activate the selected window. The centered switcher shows up to four titled window previews at once with a blue selection outline.
 - **Dock Minimize:** click the Dock icon of the frontmost app to minimize its normal windows. The behavior is based on the author's existing Dock Minimize tool in `henriquevlopes/mac-tools`, adapted to run as an optional Canivete module.
 
 ## Build
 
-Requires macOS 13 or newer and Apple's Command Line Tools with Swift. Run `./build.sh` to build the release binary and create `build/Canivete.app`. XCTest is not currently available in the Command Line Tools-only environment used for this initial build; the release build, app bundle, code signature, plist, and process launch are checked manually.
+Requires macOS 13 or newer and Apple's Command Line Tools with Swift. Run `./build.sh` to build the release binary and create `build/Canivete.app`. The ad-hoc signature uses a stable designated requirement based on the bundle identifier, so the app remains identifiable across local rebuilds. XCTest is not currently available in the Command Line Tools-only environment; the release build, app bundle, code signature, plist, and process launch are checked manually.
 
 ## Permissions
 
-The switcher needs **Accessibility** permission to capture Option+Tab before macOS handles it, inspect hidden/minimized windows, and raise a selected window. Dock Minimize also needs **Accessibility** to recognize Dock icon clicks and minimize windows. Grant permission to Canivete in System Settings > Privacy & Security > Accessibility, then reopen the app. Use the Settings item in the menu bar to open Accessibility settings.
+The switcher and Dock Minimize need **Accessibility** permission. Canivete asks only when **Request Accessibility Permission** is pressed in Settings; once granted, enabled modules start automatically. The **Accessibility Settings…** button opens System Settings if the permission needs to be toggled manually.
 
 ## Initial limitations
 
-The initial window catalog uses public CoreGraphics APIs. It takes one snapshot when the switcher opens and sorts by descending WindowServer window ID, an approximation of recent window order. It filters nonstandard layers, transparent windows and very small surfaces; private macOS APIs for accurate Spaces enumeration/focus are not used. A window without an available capture still appears with its app title and icon. These choices keep capture and navigation direct, but exact AltTab parity across Spaces, Secure Input, Mission Control and every app requires additional work and manual validation.
+The window catalog uses public CoreGraphics enumeration and Accessibility window roles. It includes standard windows from running GUI apps, retains minimized windows where Accessibility exposes them, and uses WindowServer front-to-back order for navigation; transient panels, menus, popovers, and non-GUI helpers are filtered out. Private Spaces APIs are excluded, so Space-specific focus and some edge cases still differ from upstream.
 
 See [AltTab behavior and research notes](docs/alt-tab-reference.md). No AltTab source code was copied; that project is GPL-3.0.

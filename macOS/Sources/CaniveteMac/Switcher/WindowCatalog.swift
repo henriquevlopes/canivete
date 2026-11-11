@@ -21,26 +21,62 @@ final class WindowCatalog {
     func snapshot() -> [SwitcherWindow] {
         let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
         guard let rows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return [] }
+        let runningApps = Dictionary(uniqueKeysWithValues: NSWorkspace.shared.runningApplications
+            .filter { !$0.isTerminated && $0.activationPolicy == .regular }
+            .compactMap { app -> (pid_t, NSRunningApplication)? in
+                guard let bundleID = app.bundleIdentifier, !excludedBundleIDs.contains(bundleID) else { return nil }
+                return (app.processIdentifier, app)
+            })
+
+        // AX subrole is the reliable distinction between real app windows and transient surfaces
+        // (menus, popovers, tooltips, panels) that WindowServer also reports at layer zero.
+        var axWindows: [pid_t: [CGWindowID: (title: String, minimized: Bool)]] = [:]
+        for (pid, _) in runningApps {
+            let application = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(application, 0.25)
+            var list: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &list) == .success,
+                  let elements = list as? [AXUIElement] else { continue }
+            for element in elements {
+                guard (attribute(element, kAXSubroleAttribute) as? String) == (kAXStandardWindowSubrole as String),
+                      let number = attribute(element, "AXWindowNumber") as? NSNumber else { continue }
+                let id = CGWindowID(number.uint32Value)
+                let title = (attribute(element, kAXTitleAttribute) as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let minimized = (attribute(element, kAXMinimizedAttribute) as? Bool) ?? false
+                axWindows[pid, default: [:]][id] = (title, minimized)
+            }
+        }
+
         var seen = Set<CGWindowID>()
-        var minimizedByProcess: [pid_t: [CGWindowID: Bool]] = [:]
-        let windows = rows.compactMap { row -> SwitcherWindow? in
+        var result: [SwitcherWindow] = []
+        // CGWindowListCopyWindowInfo is front-to-back, which gives the switcher a useful recency order.
+        for row in rows {
             guard let number = row[kCGWindowNumber as String] as? NSNumber,
                   let ownerPID = row[kCGWindowOwnerPID as String] as? NSNumber,
-                  let layer = row[kCGWindowLayer as String] as? NSNumber, layer.intValue == 0,
-                  let alpha = row[kCGWindowAlpha as String] as? NSNumber, alpha.doubleValue > 0,
-                  let rect = row[kCGWindowBounds as String] as? [String: CGFloat],
-                  let width = rect["Width"], let height = rect["Height"], width >= 32, height >= 24 else { return nil }
-            let id = CGWindowID(number.uint32Value)
-            guard seen.insert(id).inserted, let app = NSRunningApplication(processIdentifier: ownerPID.int32Value), !app.isTerminated,
-                  let bundleID = app.bundleIdentifier, !excludedBundleIDs.contains(bundleID) else { return nil }
-            let title = (row[kCGWindowName as String] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let appName = app.localizedName ?? bundleID
+                  let layer = row[kCGWindowLayer as String] as? NSNumber, layer.intValue == 0 else { continue }
             let pid = ownerPID.int32Value
-            if minimizedByProcess[pid] == nil { minimizedByProcess[pid] = minimizedWindows(pid: pid) }
-            let minimized = minimizedByProcess[pid]?[id] ?? false
-            return SwitcherWindow(id: id, pid: pid, title: title.isEmpty ? appName : title, appName: appName, appIcon: app.icon, image: nil, minimized: minimized, bounds: CGRect(x: rect["X"] ?? 0, y: rect["Y"] ?? 0, width: width, height: height))
+            let id = CGWindowID(number.uint32Value)
+            guard seen.insert(id).inserted, let app = runningApps[pid],
+                  let ax = axWindows[pid]?[id] else { continue }
+            let rect = row[kCGWindowBounds as String] as? [String: CGFloat] ?? [:]
+            let width = rect["Width"] ?? 0
+            let height = rect["Height"] ?? 0
+            let alpha = (row[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1
+            if !ax.minimized && (alpha <= 0 || width < 80 || height < 60) { continue }
+            let rowTitle = (row[kCGWindowName as String] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let title = ax.title.isEmpty ? (rowTitle.isEmpty ? (app.localizedName ?? "Window") : rowTitle) : ax.title
+            result.append(SwitcherWindow(id: id, pid: pid, title: title, appName: app.localizedName ?? app.bundleIdentifier ?? "App", appIcon: app.icon, image: nil, minimized: ax.minimized, bounds: CGRect(x: rect["X"] ?? 0, y: rect["Y"] ?? 0, width: width, height: height)))
         }
-        return windows.sorted { $0.id > $1.id }
+
+        // Some minimized windows have no drawable WindowServer row; keep only AX-confirmed standard windows.
+        for pid in axWindows.keys.sorted() {
+            guard let app = runningApps[pid] else { continue }
+            for id in (axWindows[pid]?.keys.sorted(by: >) ?? []) {
+                guard let ax = axWindows[pid]?[id], ax.minimized, !seen.contains(id) else { continue }
+                result.append(SwitcherWindow(id: id, pid: pid, title: ax.title.isEmpty ? (app.localizedName ?? "Window") : ax.title, appName: app.localizedName ?? app.bundleIdentifier ?? "App", appIcon: app.icon, image: nil, minimized: true, bounds: .zero))
+            }
+        }
+        return result
     }
 
     func captureImage(for id: CGWindowID) -> NSImage? {
@@ -48,20 +84,8 @@ final class WindowCatalog {
         return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
 
-    private func minimizedWindows(pid: pid_t) -> [CGWindowID: Bool] {
-        let app = AXUIElementCreateApplication(pid)
-        var list: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &list) == .success,
-              let elements = list as? [AXUIElement] else { return [:] }
-        var result: [CGWindowID: Bool] = [:]
-        for element in elements {
-            var identifier: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(element, "AXWindowNumber" as CFString, &identifier) == .success,
-                  let windowID = (identifier as? NSNumber)?.uint32Value else { continue }
-            var minimized: CFTypeRef?
-            let isMinimized = AXUIElementCopyAttributeValue(element, kAXMinimizedAttribute as CFString, &minimized) == .success && (minimized as? Bool ?? false)
-            result[CGWindowID(windowID)] = isMinimized
-        }
-        return result
+    private func attribute(_ element: AXUIElement, _ name: String) -> AnyObject? {
+        var value: AnyObject?
+        return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
     }
 }

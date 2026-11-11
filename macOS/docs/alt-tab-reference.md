@@ -13,6 +13,6 @@ This implementation is original code. The upstream [AltTab for macOS](https://gi
 
 ## Canivete implementation boundaries
 
-The first implementation uses public CoreGraphics window enumeration and capture, Accessibility for restoring and raising windows, and an Option+Tab hold gesture. A snapshot is taken when opening the switcher to avoid repeated global enumeration on every key press. Private Spaces APIs and third-party code are intentionally excluded. This keeps the initial build independent and maintainable but means Space-specific filtering/focus and some edge cases do not yet match upstream.
+Canivete follows the same interaction model: a configurable global shortcut, ordered window previews, forward/reverse cycling while held, and selection on modifier release. The catalog admits AX standard windows from running GUI apps, uses WindowServer front-to-back order, and retains minimized windows confirmed by Accessibility; utility surfaces are excluded. The switcher presents four thumbnail cards at a time. Private Spaces APIs and third-party source code are intentionally excluded, so Space-specific focus and some edge cases still differ from upstream.
 
 Reference: upstream `docs/contributing.md`, `src/windowserver/`, `src/events/`, and `src/switcher/` in the repository above; inspected 2026-11-10.

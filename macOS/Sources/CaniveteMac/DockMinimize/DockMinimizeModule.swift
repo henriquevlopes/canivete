@@ -12,13 +12,13 @@ final class DockMinimizeModule {
     }
 
     private func start() {
-        guard tap == nil, AXIsProcessTrusted() else { return }
+        guard isEnabled, tap == nil, AXIsProcessTrusted() else { return }
         let mask = CGEventMask((1 << CGEventType.leftMouseDown.rawValue) | (1 << CGEventType.leftMouseUp.rawValue))
         let context = Unmanaged.passUnretained(self).toOpaque()
         tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap, eventsOfInterest: mask, callback: { _, type, event, refcon in
             Unmanaged<DockMinimizeModule>.fromOpaque(refcon!).takeUnretainedValue().handle(type, event)
         }, userInfo: context)
-        guard let tap else { return }
+        guard let tap else { NSLog("Canivete Dock Minimize: could not create event tap"); return }
         let source = CFMachPortCreateRunLoopSource(nil, tap, 0)
         self.source = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
@@ -56,8 +56,8 @@ final class DockMinimizeModule {
         guard AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &hit) == .success, let element = hit else { return false }
         var pid: pid_t = 0
         AXUIElementGetPid(element, &pid)
-        guard NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.apple.dock",
-              (attribute(element, kAXSubroleAttribute) as? String) == "AXApplicationDockItem",
+        guard NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.apple.dock" else { return false }
+        guard (attribute(element, kAXSubroleAttribute) as? String) == (kAXApplicationDockItemSubrole as String),
               let url = attribute(element, kAXURLAttribute) as? URL,
               url.standardizedFileURL.resolvingSymlinksInPath() == appURL.standardizedFileURL.resolvingSymlinksInPath() else { return false }
         let app = AXUIElementCreateApplication(frontmost.processIdentifier)
