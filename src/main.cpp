@@ -159,11 +159,53 @@ bool TaskbarIsLight() {
            v != 0;
 }
 
+bool g_badge = false;
+
+// The tray icon with a small green dot in its corner.
+HICON WithDot(HICON base) {
+    ICONINFO ii{};
+    if (!GetIconInfo(base, &ii)) return base;
+    BITMAP bm{};
+    GetObjectW(ii.hbmColor ? ii.hbmColor : ii.hbmMask, sizeof(bm), &bm);
+    const int n = bm.bmWidth;
+    if (ii.hbmColor) DeleteObject(ii.hbmColor);
+    if (ii.hbmMask) DeleteObject(ii.hbmMask);
+    BITMAPINFO bi{};
+    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), n, -n, 1, 32, BI_RGB};
+    void* bits = nullptr;
+    HDC dc = CreateCompatibleDC(nullptr);
+    HBITMAP color = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!color) { DeleteDC(dc); return base; }
+    memset(bits, 0, static_cast<size_t>(n) * n * 4);
+    HGDIOBJ old = SelectObject(dc, color);
+    DrawIconEx(dc, 0, 0, base, n, n, 0, nullptr, DI_NORMAL);
+    SelectObject(dc, old);
+    DeleteDC(dc);
+    auto* px = static_cast<uint32_t*>(bits);
+    const double cx = n - n * 0.27, cy = n - n * 0.27, rad = n * 0.27;
+    for (int y = 0; y < n; ++y)
+        for (int x = 0; x < n; ++x) {
+            const double d = std::hypot(x + 0.5 - cx, y + 0.5 - cy);
+            if (d <= rad) px[y * n + x] = 0xFF2EC27E;  // green
+            else if (d <= rad + 1.2 && (px[y * n + x] >> 24) < 0xFF) px[y * n + x] = 0xFF101010;  // thin dark rim
+        }
+    HBITMAP mask = CreateBitmap(n, n, 1, 1, nullptr);
+    ICONINFO out{TRUE, 0, 0, mask, color};
+    HICON ic = CreateIconIndirect(&out);
+    DeleteObject(mask);
+    DeleteObject(color);
+    return ic ? ic : base;
+}
+
 void LoadTrayIcon() {
     HICON ic = nullptr;
     LoadIconMetric(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(TaskbarIsLight() ? IDI_TRAY_LIGHT : IDI_TRAY_DARK),
                    LIM_SMALL, &ic);
     if (!ic) return;
+    if (g_badge) {
+        HICON dotted = WithDot(ic);
+        if (dotted != ic) { DestroyIcon(ic); ic = dotted; }
+    }
     if (g_icon) DestroyIcon(g_icon);
     g_icon = ic;
 }
@@ -186,16 +228,7 @@ std::function<void()> g_noticeClick;  // what clicking the notice on screen does
 
 void TrayBalloon(const wchar_t* title, const std::wstring& text) {
     g_noticeClick = nullptr;
-    if (TestMode()) {
-        Log(L"Notice: %s - %s", title, text.c_str());
-        return;
-    }
-    NOTIFYICONDATAW n = g_nid;
-    n.uFlags = NIF_INFO;
-    wcsncpy_s(n.szInfoTitle, title, _TRUNCATE);
-    wcsncpy_s(n.szInfo, text.c_str(), _TRUNCATE);
-    n.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND;
-    Shell_NotifyIconW(NIM_MODIFY, &n);
+    Notice_Show(title, text, nullptr);  // Canivete's own flyout, not a Windows balloon
 }
 
 // Registers the three hotkeys. Returns what went wrong, one line per hotkey ("" = all fine).
@@ -278,11 +311,21 @@ void ReloadIfChanged() {
 
 }  // namespace
 
+void Tray_UpdateBadge(bool on) {
+    if (on == g_badge) return;
+    g_badge = on;
+    LoadTrayIcon();
+    if (TestMode()) return;
+    g_nid.uFlags = NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    g_nid.hIcon = g_icon;
+    wcscpy_s(g_nid.szTip, on ? L"Canivete: an update is ready (right-click > Update)" : kAppName);
+    Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+}
+
 void Tray_Notify(const wchar_t* title, const std::wstring& text) { TrayBalloon(title, text); }
 
 void Tray_NotifyAction(const wchar_t* title, const std::wstring& text, std::function<void()> onClick) {
-    TrayBalloon(title, text);
-    g_noticeClick = std::move(onClick);
+    Notice_Show(title, text, std::move(onClick));
 }
 
 void Tray_SetTip(const std::wstring& tip) {
@@ -398,7 +441,7 @@ void ShowMenu() {
     }
     if (Update_Info().available) {
         group();
-        AppendMenuW(m, MF_STRING, ID_UPDATE, (L"Update Canivete to " + Update_Info().latest + L"…").c_str());
+        AppendMenuW(m, MF_STRING, ID_UPDATE, (L"Update to " + Update_Info().latest + L" and restart").c_str());
     }
     group();
     AppendMenuW(m, MF_STRING, ID_OPEN_FOLDER, L"Open screenshots folder");
@@ -874,6 +917,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     if (!TestMode()) TrayAdd();
     Capture_Init();
     Output_Init();
+    Notice_Init();
     RegisterHotkeysOrWarn();
     if (!TestMode()) Shell_Register();
     Log(L"Canivete %s started", CANIVETE_VERSION);

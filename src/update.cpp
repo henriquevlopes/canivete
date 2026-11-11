@@ -43,6 +43,9 @@ constexpr BYTE kUpdatePublicKey[72] = {
 
 UpdateInfo g_info;
 bool g_checking = false, g_installing = false, g_manual = false;
+int g_progress = -2;       // while updating: -1 = sliding bar, 0..1000 = download done, -2 = not updating
+std::wstring g_stage;      // what it is doing, for the Maintenance window
+std::wstring g_installError;  // why the last update didn't work
 long long g_retryAt = 0;  // offline at the last try: not before this (time())
 
 std::wstring StatePath() { return AppDataDir() + L"\\state.ini"; }
@@ -116,7 +119,8 @@ std::string JsonString(const std::string& j, const std::string& key, size_t from
 
 // GET over HTTPS. url: a full https:// URL. Into a string, or into a file when path is given (a new
 // file: an existing one is never written through, and more than kMaxSetup bytes are refused).
-bool HttpGet(const std::wstring& url, bool api, std::string* body, const std::wstring& path, std::wstring& err) {
+bool HttpGet(const std::wstring& url, bool api, std::string* body, const std::wstring& path, std::wstring& err,
+             const std::function<void(int)>& progress = nullptr) {
     URL_COMPONENTS uc{sizeof(uc)};
     wchar_t host[256], urlPath[2048];
     uc.lpszHostName = host;
@@ -146,14 +150,23 @@ bool HttpGet(const std::wstring& url, bool api, std::string* body, const std::ws
                 if (!path.empty())
                     f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
                 ok = path.empty() || f != INVALID_HANDLE_VALUE;
+                DWORD len = 0, lsz = sizeof(len);
+                if (!WinHttpQueryHeaders(r, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER, nullptr, &len, &lsz,
+                                         nullptr))
+                    len = 0;
                 char buf[65536];
                 ULONGLONG total = 0;
+                int lastPos = -2;
                 for (DWORD got = 0; ok && WinHttpReadData(r, buf, sizeof(buf), &got) && got;) {
                     if (body) body->append(buf, got);
                     DWORD wrote = 0;
                     if (f != INVALID_HANDLE_VALUE && (!WriteFile(f, buf, got, &wrote, nullptr) || wrote != got)) ok = false;
                     if (body && body->size() > (8u << 20)) ok = false;
                     if ((total += got) > kMaxSetup) ok = false;
+                    if (progress) {
+                        const int pos = len ? static_cast<int>(std::min<ULONGLONG>(total * 1000 / len, 1000)) : -1;
+                        if (pos != lastPos) progress(lastPos = pos);
+                    }
                 }
                 if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
                 if (!ok) err = L"The download didn't finish.";
@@ -249,6 +262,23 @@ UpdateInfo Fetch() {
         }
     }
     const std::string notes = JsonString(body, "body");
+    {   // what changed: after the "Canivete x.y.z" title line, before the download / fingerprint lines
+        std::string n = notes;
+        n.erase(std::remove(n.begin(), n.end(), '\r'), n.end());
+        const size_t first = n.find("\n\n");
+        n = first == std::string::npos ? "" : n.substr(first + 2);
+        for (const char* stop : {"Download Canivete-Setup", "SHA256:", "SIG:"}) {
+            const size_t s = n.find(stop);
+            if (s != std::string::npos) n.erase(s);
+        }
+        while (!n.empty() && (n.back() == '\n' || n.back() == ' ')) n.pop_back();
+        std::string crlf;
+        for (char ch : n) {
+            if (ch == '\n') crlf += '\r';
+            crlf += ch;
+        }
+        u.notes = Widen(crlf);
+    }
     const size_t p = notes.find("SHA256:");
     if (p != std::string::npos) {
         size_t i = p + 7;
@@ -316,14 +346,14 @@ struct InstallResult {
 // Downloads and checks the setup into r (r.path empty = failed, r.err says why). The file is checked
 // through a handle that lets nobody else write, rename or delete it, and that handle stays open until
 // the setup has been started.
-void Download(const UpdateInfo& u, InstallResult& r) {
+void Download(const UpdateInfo& u, InstallResult& r, const std::function<void(int)>& progress = nullptr) {
     const std::wstring dir = NewTempFolder();
     if (dir.empty()) {
         r.err = L"Couldn't make a folder for the download.";
         return;
     }
     const std::wstring path = dir + L"\\Canivete-Setup-" + u.latest + L".exe";
-    if (!HttpGet(u.url, false, nullptr, path, r.err)) {
+    if (!HttpGet(u.url, false, nullptr, path, r.err, progress)) {
         DeleteFileW(path.c_str());
         RemoveDirectoryW(dir.c_str());
         return;
@@ -345,6 +375,9 @@ void Download(const UpdateInfo& u, InstallResult& r) {
 
 const UpdateInfo& Update_Info() { return g_info; }
 bool Update_Busy() { return g_checking || g_installing; }
+int Update_Progress() { return g_installing || g_progress != -2 ? g_progress : -2; }
+const std::wstring& Update_Stage() { return g_stage; }
+const std::wstring& Update_InstallError() { return g_installError; }
 
 void Update_Check(bool manual) {
     if (g_checking) return;
@@ -352,8 +385,11 @@ void Update_Check(bool manual) {
     g_manual = manual;
     WriteState(L"LastAttempt", std::to_wstring(std::time(nullptr)));
     HWND w = g_mainWnd;
-    std::thread([w] {
+    if (manual) SettingsUI_UpdateChanged();  // feedback: "Checking…" with a moving bar in Settings
+    std::thread([w, manual] {
+        const ULONGLONG t0 = GetTickCount64();
         auto* u = new UpdateInfo(Fetch());
+        if (manual && GetTickCount64() - t0 < 800) Sleep(static_cast<DWORD>(800 - (GetTickCount64() - t0)));  // long enough to be seen
         if (!PostMessageW(w, WM_APP_UPDATE, 0, reinterpret_cast<LPARAM>(u))) delete u;
     }).detach();
 }
@@ -387,22 +423,32 @@ void Update_Background() {
 
 void Update_Install() {
     if (g_installing || !g_info.available) return;
-    const std::wstring q = L"Update Canivete to version " + g_info.latest +
-                           L" now?\n\nIt closes, installs the new version and starts again (a few seconds).";
-    if (MessageBoxW(nullptr, q.c_str(), L"Canivete update", MB_OKCANCEL | MB_ICONQUESTION | MB_SETFOREGROUND) != IDOK)
-        return;
     g_installing = true;
+    g_progress = -1;
+    g_stage = L"Downloading version " + g_info.latest + L"…";
+    g_installError.clear();
     HWND w = g_mainWnd;
     const UpdateInfo u = g_info;
     std::thread([w, u] {
         auto* r = new InstallResult;
-        Download(u, *r);
+        Download(u, *r, [w](int pos) { PostMessageW(w, WM_APP_UPDATE, 2, pos + 1); });  // lp: 0 = sliding, else pos+1
         if (!PostMessageW(w, WM_APP_UPDATE, 1, reinterpret_cast<LPARAM>(r))) delete r;
     }).detach();
-    Tray_Notify(L"Updating Canivete", L"Downloading version " + u.latest + L"…");
+    SettingsUI_UpdateChanged();
 }
 
 void Update_OnMessage(WPARAM wp, LPARAM lp) {
+    if (wp == 2) {  // download progress
+        const int pos = static_cast<int>(lp) - 1;
+        if (g_installing) {
+            g_progress = pos;
+            g_stage = L"Downloading version " + g_info.latest + L"…" + (pos >= 0 ? L"  " + std::to_wstring(pos / 10) + L"%" : L"");
+            SettingsUI_UpdateChanged();
+            UpdateDlg_Progress(pos, g_stage);
+            Notice_Progress(L"Updating Canivete", g_stage, pos);
+        }
+        return;
+    }
     if (wp == 0) {  // check finished
         std::unique_ptr<UpdateInfo> u(reinterpret_cast<UpdateInfo*>(lp));
         g_checking = false;
@@ -410,35 +456,43 @@ void Update_OnMessage(WPARAM wp, LPARAM lp) {
         if (u->checked) WriteState(L"LastCheck", std::to_wstring(std::time(nullptr)));
         Log(L"Update check: latest %s, this %s%s%s", u->latest.c_str(), CANIVETE_VERSION,
             u->error.empty() ? L"" : L", ", u->error.c_str());
-        if (u->available && (g_manual || ReadState(L"Notified") != u->latest)) {
-            WriteState(L"Notified", u->latest);
-            Tray_NotifyAction(L"A new Canivete is out", L"Version " + u->latest + L" is ready. Click here to update.",
-                              [] { Update_Install(); });
-        } else if (g_manual) {
-            Tray_Notify(L"Canivete updates", u->error.empty() ? std::wstring(L"Canivete is up to date (version ") +
-                                                                    CANIVETE_VERSION + L")."
-                                                              : L"Couldn't check: " + u->error);
-        }
-        Maint_Refresh();
+        // No pop-ups: what was found shows in the Maintenance window (Overview).
+        Tray_UpdateBadge(u->available);  // a green dot on the tray icon; clicking "Update" in its menu updates at once
+        if (u->available && g_manual) UpdateDlg_Show();
+        SettingsUI_UpdateChanged();
         return;
     }
     std::unique_ptr<InstallResult> r(reinterpret_cast<InstallResult*>(lp));
     g_installing = false;
+    g_progress = -2;
     if (r->path.empty()) {
         Log(L"Update failed: %s", r->err.c_str());
-        Tray_Notify(L"Canivete update failed", r->err);
+        g_installError = r->err;
+        UpdateDlg_Failed(r->err);
+        Notice_Show(L"Canivete update failed", r->err, nullptr);
+        SettingsUI_UpdateChanged();
         return;
     }
     if (TestMode()) {
         Log(L"Update downloaded and checked (test copy, not installing): %s", r->path.c_str());
         r->Remove();
+        SettingsUI_UpdateChanged();
         return;
     }
+    g_progress = -1;
+    g_stage = L"Installing version " + g_info.latest + L"… Canivete restarts by itself.";
+    UpdateDlg_Progress(-1, g_stage);
+    Notice_Progress(L"Updating Canivete", g_stage, -1);
+    SettingsUI_UpdateChanged();
     Log(L"Running %s", r->path.c_str());
     const HINSTANCE h = ShellExecuteW(nullptr, L"open", r->path.c_str(),
                                       L"/VERYSILENT /SUPPRESSMSGBOXES /NORESTART", nullptr, SW_SHOWNORMAL);
     if (reinterpret_cast<INT_PTR>(h) <= 32) {
-        Tray_Notify(L"Canivete update failed", L"Couldn't start the installer.");
+        g_progress = -2;
+        g_installError = L"Couldn't start the installer.";
+        UpdateDlg_Failed(g_installError);
+        Notice_Show(L"Canivete update failed", g_installError, nullptr);
+        SettingsUI_UpdateChanged();
         return;
     }
     DestroyWindow(g_mainWnd);  // the installer starts the new version when it's done

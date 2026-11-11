@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(Canivete VERSION 0.6.0 LANGUAGES CXX RC)
+project(Canivete VERSION 0.7.1 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,6 +34,8 @@ add_executable(Canivete WIN32
     src/overlay.cpp
     src/trim.cpp
     src/ocr.cpp
+    src/notice.cpp
+    src/updatedlg.cpp
     res/canivete.rc
     res/app.manifest
 )

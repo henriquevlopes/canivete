@@ -61,6 +61,7 @@ enum : int {
     IDC_QUALITY,
     IDC_QSPIN,
     IDC_FULLMODE,
+    IDC_PREVTIME,
     IDC_CLIP,
     IDC_NOTIFY,
     IDC_CURSOR,
@@ -82,6 +83,8 @@ enum : int {
     IDC_MAINTDAILY,
     IDC_CHECKUPD,
     IDC_UPDNOW,
+    IDC_UPSTATUS,
+    IDC_UPBAR,
     IDC_UPSERVICE,
     IDC_UPHELP,
     IDC_UPSHOTS,
@@ -309,6 +312,8 @@ int BeginTab(int t) {
 }
 
 void Build() {
+    INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_PROGRESS_CLASS};
+    InitCommonControlsEx(&icc);
     U.buildTab = -1;
     U.nav = Add(WC_LISTBOXW, L"",
                 LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_TABSTOP, IDC_NAV, 8, 12,
@@ -363,7 +368,9 @@ void Build() {
     Switch(IDC_CHECKUPD, L"Tell me when a new version of Canivete is out", y);
     y += kRow;
     RowLine(y);
-    Label(L"Updates", y);
+    Label(L"Canivete updates", y);
+    Add(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDC_UPSTATUS, kCX, y + 10, kFW - 200, 20, 0, kFontCaption);
+    Add(PROGRESS_CLASSW, L"", PBS_SMOOTH | PBS_MARQUEE, IDC_UPBAR, kCX, y + 34, kFW - 200, 6);
     Button(IDC_UPDNOW, L"Check for updates now", kCR - 190, y, 190);
     y = CardEnd(y + kRow);
 
@@ -383,6 +390,12 @@ void Build() {
     HWND full = Combo(IDC_FULLMODE, kCX, y, 250);
     SendMessageW(full, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"All monitors"));
     SendMessageW(full, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"The monitor under the mouse"));
+    y += kRow;
+    RowLine(y);
+    Label(L"Keep the preview for", y);
+    HWND pv = Combo(IDC_PREVTIME, kCX, y, 250);
+    for (const wchar_t* t : {L"3 seconds", L"6 seconds", L"10 seconds", L"20 seconds", L"1 minute", L"Until I close it"})
+        SendMessageW(pv, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(t));
     const std::pair<int, const wchar_t*> shotSwitches[] = {
         {IDC_CLIP, L"Copy to the clipboard"},
         {IDC_NOTIFY, L"Show a preview after each capture (click it to edit)"},
@@ -619,6 +632,7 @@ void ShowTab(int t) {
     HWND f = GetFocus();
     if (f && IsChild(U.hwnd, f) && !IsWindowVisible(f)) SetFocus(U.nav);
     ShowOffNote();
+    SettingsUI_UpdateChanged();
     InvalidateRect(U.hwnd, nullptr, TRUE);  // the cards of this tab
 }
 
@@ -949,6 +963,13 @@ void Populate() {
     SendMessageW(Item(IDC_FORMAT), CB_SETCURSEL, s.format == L"jpg" ? 1 : 0, 0);
     SendMessageW(Item(IDC_QSPIN), UDM_SETPOS32, 0, s.jpegQuality);
     SendMessageW(Item(IDC_FULLMODE), CB_SETCURSEL, s.fullScreen == L"monitor" ? 1 : 0, 0);
+    {
+        const int secs[] = {3, 6, 10, 20, 60, 0};
+        int sel = 1;
+        for (int i = 0; i < 6; ++i)
+            if (secs[i] == s.previewSeconds) sel = i;
+        SendMessageW(Item(IDC_PREVTIME), CB_SETCURSEL, sel, 0);
+    }
     SetCheck(IDC_CLIP, s.copyToClipboard);
     SetCheck(IDC_NOTIFY, s.showNotification);
     SetCheck(IDC_CURSOR, s.includeCursor);
@@ -962,6 +983,7 @@ void Populate() {
     SetCheck(IDC_VALLKEYS, s.videoAllKeys);
     SetCheck(IDC_AUTOSTART, AutostartEnabled());
     SetCheck(IDC_CHECKUPD, s.checkUpdates);
+    SettingsUI_UpdateChanged();
     SetCheck(IDC_MAINTDAILY, s.maintDaily);
     SendMessageW(Item(IDC_UPSERVICE), CB_SETCURSEL, s.uploadService == L"s3" ? 1 : 0, 0);
     SetCheck(IDC_UPSHOTS, s.uploadShots);
@@ -1001,6 +1023,11 @@ void Apply() {
     const UINT q = GetDlgItemInt(U.hwnd, IDC_QUALITY, &ok, FALSE);
     s.jpegQuality = ok ? std::clamp(static_cast<int>(q), 1, 100) : 90;
     s.fullScreen = SendMessageW(Item(IDC_FULLMODE), CB_GETCURSEL, 0, 0) == 1 ? L"monitor" : L"all";
+    {
+        const int secs[] = {3, 6, 10, 20, 60, 0};
+        const int sel = static_cast<int>(SendMessageW(Item(IDC_PREVTIME), CB_GETCURSEL, 0, 0));
+        s.previewSeconds = sel >= 0 && sel < 6 ? secs[sel] : 6;
+    }
     s.copyToClipboard = Checked(IDC_CLIP);
     s.showNotification = Checked(IDC_NOTIFY);
     s.includeCursor = Checked(IDC_CURSOR);
@@ -1350,7 +1377,7 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (!enabled) fg = p.textDis;
         } else if (id >= IDC_HKST0 && id < IDC_HKST0 + kHkSlots) {
             fg = U.bad[id - IDC_HKST0] ? p.red : p.grey;
-        } else if (id == IDC_DRVSTATUS || id == IDC_S3STATUS) {
+        } else if (id == IDC_DRVSTATUS || id == IDC_S3STATUS || id == IDC_UPSTATUS) {
             fg = (id == IDC_DRVSTATUS ? U.driveBad : U.s3Bad) ? p.red : p.grey;
         } else if (id == IDC_HINT || id == IDC_EXAMPLE || id == IDC_DESC ||
                    (id >= IDC_OFFNOTE0 && id < IDC_OFFNOTE0 + static_cast<int>(kFeatCount))) {
@@ -1441,7 +1468,8 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             Maint_Show();
             break;
         case IDC_UPDNOW:
-            Update_Check(true);
+            if (Update_Info().available) Update_Install();
+            else Update_Check(true);
             break;
         case IDC_UPSERVICE:
             if (code == CBN_SELCHANGE) ShowTab(U.tab);
@@ -1515,6 +1543,40 @@ LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 }  // namespace
 
 HWND SettingsUI_Window() { return U.hwnd; }
+
+// The General tab's Canivete update line: status text, moving or filling bar, and the button.
+void SettingsUI_UpdateChanged() {
+    if (!U.hwnd || !Item(IDC_UPSTATUS)) return;
+    const UpdateInfo& ui = Update_Info();
+    const std::wstring ver = CANIVETE_VERSION;
+    std::wstring t;
+    const int prog = Update_Progress();
+    if (prog != -2) t = Update_Stage();
+    else if (!Update_InstallError().empty()) t = L"The update didn't work: " + Update_InstallError();
+    else if (Update_Busy()) t = L"Checking for a newer version…";
+    else if (ui.available) t = L"Version " + ui.latest + L" is out (this is " + ver + L")";
+    else if (ui.checked) t = L"Up to date (version " + ver + L")";
+    else if (!ui.error.empty()) t = L"Couldn't check: " + ui.error;
+    else t = L"Version " + ver;
+    SetWindowTextW(Item(IDC_UPSTATUS), t.c_str());
+    HWND bar = Item(IDC_UPBAR);
+    const bool show = (prog != -2 || Update_Busy()) && U.tab == 0;
+    const bool slide = prog < 0 || prog == -2;
+    LONG st = GetWindowLongW(bar, GWL_STYLE);
+    if (slide) {
+        SetWindowLongW(bar, GWL_STYLE, st | PBS_MARQUEE);
+        SendMessageW(bar, PBM_SETMARQUEE, show ? TRUE : FALSE, 30);
+    } else {
+        SendMessageW(bar, PBM_SETMARQUEE, FALSE, 0);
+        SetWindowLongW(bar, GWL_STYLE, st & ~PBS_MARQUEE);
+        SendMessageW(bar, PBM_SETRANGE32, 0, 1000);
+        SendMessageW(bar, PBM_SETPOS, prog, 0);
+    }
+    ShowWindow(bar, show ? SW_SHOWNA : SW_HIDE);
+    SetWindowTextW(Item(IDC_UPDNOW), ui.available && prog == -2 ? (L"Update to " + ui.latest).c_str() : L"Check for updates now");
+    EnableWindow(Item(IDC_UPDNOW), !Update_Busy());
+    InvalidateRect(Item(IDC_UPSTATUS), nullptr, TRUE);
+}
 
 // Ctrl+Tab / Ctrl+Shift+Tab and Ctrl+PageDown / Ctrl+PageUp switch tabs.
 bool SettingsUI_Key(const MSG& m) {

@@ -1,4 +1,5 @@
 // Settings (INI file in %APPDATA%\Canivete), hotkey text parsing and a tiny log.
+#include <algorithm>
 #include "app.h"
 #include "theme.h"
 
@@ -179,6 +180,7 @@ void LoadSettings() {
     s.saveToFile = ReadBool(L"Screenshot", L"SaveToFile", true);
     s.copyToClipboard = ReadBool(L"Screenshot", L"CopyToClipboard", true);
     s.includeCursor = ReadBool(L"Screenshot", L"IncludeCursor", false);
+    s.previewSeconds = std::clamp(static_cast<int>(GetPrivateProfileIntW(L"Screenshot", L"PreviewSeconds", 6, SettingsPath().c_str())), 0, 600);
     s.fullScreen = Lower(Trim(ReadStr(L"Screenshot", L"FullScreen", L"all")));
     s.showNotification = ReadBool(L"Screenshot", L"ShowNotification", true);
     s.showMagnifier = ReadBool(L"Screenshot", L"ShowMagnifier", true);
@@ -235,6 +237,7 @@ void SaveSettings(const Settings& s) {
     WriteBool(L"Screenshot", L"SaveToFile", s.saveToFile);
     WriteBool(L"Screenshot", L"CopyToClipboard", s.copyToClipboard);
     WriteBool(L"Screenshot", L"IncludeCursor", s.includeCursor);
+    WriteStr(L"Screenshot", L"PreviewSeconds", std::to_wstring(s.previewSeconds));
     WriteStr(L"Screenshot", L"FullScreen", s.fullScreen);
     WriteBool(L"Screenshot", L"ShowNotification", s.showNotification);
     WriteBool(L"Screenshot", L"ShowMagnifier", s.showMagnifier);

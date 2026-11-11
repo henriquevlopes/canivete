@@ -904,14 +904,6 @@ void FillOverview() {
               lvl == kBad ? L"Think about a new battery" : L"");
     }
 
-    const UpdateInfo& ui = Update_Info();
-    const std::wstring ver = CANIVETE_VERSION;
-    if (Update_Busy()) AddOv(L"canivete", L"Canivete", kInfo, L"Version " + ver + L". Checking for a newer one…", L"");
-    else if (ui.available) AddOv(L"canivete", L"Canivete", kWarn, L"Version " + ui.latest + L" is out (this is " + ver + L")", L"Update Canivete");
-    else if (ui.checked) AddOv(L"canivete", L"Canivete", kOk, L"Up to date (version " + ver + L")", L"");
-    else if (!ui.error.empty()) AddOv(L"canivete", L"Canivete", kInfo, L"Version " + ver + L". Couldn't check: " + ui.error, L"Check again");
-    else AddOv(L"canivete", L"Canivete", kInfo, L"Version " + ver, L"Check for updates");
-
     AddOv(L"store", L"Microsoft Store apps", kInfo, L"They update themselves", L"Open Store updates");
 
     U.filling = true;
@@ -1677,10 +1669,6 @@ void DoRow(int row) {
         OpenTab(kCleanup);
     } else if (k == L"battery") {
         Open(L"ms-settings:batterysaver");
-    } else if (k == L"canivete") {
-        if (Update_Info().available) Update_Install();
-        else Update_Check(true);
-        FillOverview();
     } else if (k == L"store") {
         Open(L"ms-windows-store://downloadsandupdates");
     }
@@ -2102,7 +2090,10 @@ void Maint_Show(int tab) {
     SetForegroundWindow(h);
 }
 
-void Maint_Refresh() { FillOverview(); }
+void Maint_Refresh() {
+    FillOverview();
+    if (U.hwnd) SyncScanBar();
+}
 
 long long Maint_SecondsToNext() {
     if (!FeatureOn(kFeatMaint) || !g_settings.maintDaily) return LLONG_MAX;
@@ -2177,7 +2168,7 @@ void Maint_OnBackground(LPARAM lp) {
     if (!s.known || !s.on || !s.upToDate || s.sigAgeDays > 7)
         text += (text.empty() ? L"" : L" ") + std::wstring(L"Virus protection needs a look.");
     Log(L"Maintenance: daily check done: %d Windows, %d driver, %d app updates (%d new)", c.win, c.drv, c.app, fresh);
-    if (!text.empty()) Tray_NotifyAction(L"Computer maintenance", text + L" Click to see.", [] { Maint_Show(kOverview); });
+    // No pop-up: the Overview in the Maintenance window shows what needs doing.
     if (U.hwnd && U.waitBg) {
         U.waitBg = false;
         auto res = std::make_unique<ScanResult>();

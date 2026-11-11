@@ -4,7 +4,9 @@
 #include "fluent.h"
 #include "theme.h"
 
+#include <ole2.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <shellscalingapi.h>
 #include <shlobj.h>
 #include <shlwapi.h>
@@ -225,6 +227,8 @@ struct Toast {
     double scale = 1;
     int alpha = 0;
     bool canUpload = false;  // shows the Upload button
+    POINT down{};
+    bool pressed = false;
     bool overUpload = false;
     RECT uploadRect{};
 } T;
@@ -294,6 +298,63 @@ void ToastPaint(HDC dc) {
     DeleteDC(mem);
 }
 
+// Dragging the thumbnail out gives the saved file to whatever it's dropped on (a chat, a folder...).
+void HoldToast() {  // (re)starts the "stay visible" countdown; 0 seconds = never fades by itself
+    KillTimer(T.hwnd, kTimerHold);
+    if (g_settings.previewSeconds > 0) SetTimer(T.hwnd, kTimerHold, g_settings.previewSeconds * 1000, nullptr);
+}
+
+struct DropSource : IDropSource {
+    LONG rc = 1;
+    STDMETHODIMP QueryInterface(REFIID id, void** o) override {
+        if (id == IID_IUnknown || id == IID_IDropSource) { *o = this; AddRef(); return S_OK; }
+        *o = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&rc); }
+    STDMETHODIMP_(ULONG) Release() override {
+        const LONG n = InterlockedDecrement(&rc);
+        if (!n) delete this;
+        return n;
+    }
+    STDMETHODIMP QueryContinueDrag(BOOL esc, DWORD keys) override {
+        if (esc) return DRAGDROP_S_CANCEL;
+        return (keys & MK_LBUTTON) ? S_OK : DRAGDROP_S_DROP;
+    }
+    STDMETHODIMP GiveFeedback(DWORD) override { return DRAGDROP_S_USEDEFAULTCURSORS; }
+};
+
+bool DragFile(const std::wstring& path) {
+    PIDLIST_ABSOLUTE pidl = nullptr;
+    if (FAILED(SHParseDisplayName(path.c_str(), nullptr, &pidl, 0, nullptr)) || !pidl) {
+        Log(L"Drag: couldn't read %s", path.c_str());
+        return false;
+    }
+    IDataObject* data = nullptr;
+    PCUITEMID_CHILD_ARRAY items[1] = {nullptr};
+    PCUITEMID_CHILD child = nullptr;
+    IShellFolder* folder = nullptr;
+    HRESULT hr = SHBindToParent(pidl, IID_IShellFolder, reinterpret_cast<void**>(&folder), &child);
+    if (SUCCEEDED(hr)) {
+        PCUITEMID_CHILD arr[1] = {child};
+        hr = folder->GetUIObjectOf(nullptr, 1, arr, IID_IDataObject, nullptr, reinterpret_cast<void**>(&data));
+        folder->Release();
+    }
+    (void)items;
+    CoTaskMemFree(pidl);
+    if (FAILED(hr) || !data) {
+        Log(L"Drag: no data object (0x%08X)", static_cast<unsigned>(hr));
+        return false;
+    }
+    auto* src = new DropSource;
+    DWORD effect = 0;
+    const HRESULT dr = DoDragDrop(data, src, DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK, &effect);
+    Log(L"Drag of %s: result 0x%08X, effect %lu", path.c_str(), static_cast<unsigned>(dr), effect);
+    src->Release();
+    data->Release();
+    return true;
+}
+
 LRESULT CALLBACK ToastProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_ERASEBKGND:
@@ -307,11 +368,27 @@ LRESULT CALLBACK ToastProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
+    case WM_LBUTTONDOWN:
+        T.down = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        T.pressed = true;
+        SetCapture(h);
+        return 0;
     case WM_MOUSEMOVE: {  // keep it up while the mouse is on it
+        if (T.pressed && (wp & MK_LBUTTON) && !T.path.empty() &&
+            (abs(GET_X_LPARAM(lp) - T.down.x) > GetSystemMetrics(SM_CXDRAG) ||
+             abs(GET_Y_LPARAM(lp) - T.down.y) > GetSystemMetrics(SM_CYDRAG))) {
+            T.pressed = false;
+            ReleaseCapture();
+            KillTimer(h, kTimerHold);
+            const std::wstring path = T.path;
+            DragFile(path);
+            ToastHide();
+            return 0;
+        }
         KillTimer(h, kTimerFade);
         T.alpha = kAlphaFull;
         SetLayeredWindowAttributes(h, 0, static_cast<BYTE>(T.alpha), LWA_ALPHA);
-        SetTimer(h, kTimerHold, 2500, nullptr);
+        HoldToast();
         const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         const bool over = T.canUpload && PtInRect(&T.uploadRect, pt);
         if (over != T.overUpload) {
@@ -331,6 +408,8 @@ LRESULT CALLBACK ToastProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_LBUTTONUP: {  // click = edit the screenshot; the Upload button uploads it
+        T.pressed = false;
+        if (GetCapture() == h) ReleaseCapture();
         const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         if (T.canUpload && PtInRect(&T.uploadRect, pt)) {
             UploadShown();
@@ -341,6 +420,7 @@ LRESULT CALLBACK ToastProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         const std::wstring path = T.path;
         ToastHide();
         if (last) Editor_Open(std::move(last), path);
+        else if (!path.empty()) ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);  // a GIF or video: play it
         return 0;
     }
     case WM_RBUTTONUP:
@@ -410,12 +490,49 @@ void ToastShow(const CaptureResult& r, const std::wstring& path, bool copied) {
     Fluent_StylePopup(T.hwnd);  // rounded corners and the border color of the current theme
     SetWindowPos(T.hwnd, HWND_TOPMOST, x, y, W, H, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     InvalidateRect(T.hwnd, nullptr, FALSE);
-    SetTimer(T.hwnd, kTimerHold, 2500, nullptr);
+    HoldToast();
 }
 
 }  // namespace
 
 // ---- public --------------------------------------------------------------------------------
+
+// A saved GIF or video: the same corner toast, with the file's own thumbnail; drag it into a chat.
+void Output_ShowFile(const std::wstring& path, const std::wstring& line1, const std::wstring& line2) {
+    CaptureResult r;
+    POINT pt{};
+    GetCursorPos(&pt);
+    r.screenRect = {pt.x, pt.y, pt.x + 1, pt.y + 1};
+    HBITMAP hb = nullptr;
+    IShellItemImageFactory* f = nullptr;
+    if (SUCCEEDED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&f))) && f) {
+        f->GetImage({512, 340}, SIIGBF_BIGGERSIZEOK | SIIGBF_THUMBNAILONLY, &hb);
+        if (!hb) f->GetImage({256, 256}, SIIGBF_BIGGERSIZEOK, &hb);
+        f->Release();
+    }
+    BITMAP bm{};
+    if (hb && GetObjectW(hb, sizeof(bm), &bm) && bm.bmWidth > 0 && bm.bmHeight > 0) {
+        r.img.w = bm.bmWidth;
+        r.img.h = bm.bmHeight;
+        r.img.px.assign(static_cast<size_t>(r.img.w) * r.img.h, 0);
+        BITMAPINFO bi{};
+        bi.bmiHeader = {sizeof(BITMAPINFOHEADER), r.img.w, -r.img.h, 1, 32, BI_RGB};
+        HDC dc = GetDC(nullptr);
+        GetDIBits(dc, hb, 0, r.img.h, r.img.px.data(), &bi, DIB_RGB_COLORS);
+        ReleaseDC(nullptr, dc);
+        r.img.alpha = false;
+    } else {
+        r.img.w = 600;
+        r.img.h = 120;
+        r.img.px.assign(static_cast<size_t>(r.img.w) * r.img.h, 0x202020);
+    }
+    if (hb) DeleteObject(hb);
+    ToastShow(r, path, false);
+    T.last.reset();
+    T.line1 = line1;
+    T.line2 = line2;
+    InvalidateRect(T.hwnd, nullptr, FALSE);
+}
 
 void Output_ShowColor(COLORREF c, POINT at, const std::wstring& line1, const std::wstring& line2) {
     CaptureResult r;
@@ -483,6 +600,7 @@ void Output_Init() {
     RegisterClassExW(&wc);
     T.hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED, kToastClass,
                              L"Canivete", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, g_hinst, nullptr);
+    OleInitialize(nullptr);  // drag and drop of the saved file
     // Never let the notification itself end up in the next screenshot.
     if (!TestMode()) SetWindowDisplayAffinity(T.hwnd, WDA_EXCLUDEFROMCAPTURE);  // tests capture it to look at it
 }

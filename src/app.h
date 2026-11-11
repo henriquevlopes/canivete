@@ -52,6 +52,7 @@ struct Settings {
     bool saveToFile = true;
     bool copyToClipboard = true;
     bool includeCursor = false;
+    int previewSeconds = 6;  // how long the corner preview stays; 0 = until clicked or closed
     bool showNotification = true;
     bool showMagnifier = true;
     bool openEditor = false;  // open the editor after each capture instead of the preview
@@ -115,6 +116,7 @@ std::wstring Settings_Applied();     // reload after a save; returns hotkey prob
 void Hotkeys_Suspend(bool suspend);  // while a hotkey box in Settings has focus
 bool AutostartEnabled();
 void SetAutostart(bool on);
+void Tray_UpdateBadge(bool on);  // green dot on the tray icon = a new version is ready
 void Tray_Notify(const wchar_t* title, const std::wstring& text);  // balloon from the tray icon
 // The same, and clicking the balloon runs onClick.
 void Tray_NotifyAction(const wchar_t* title, const std::wstring& text, std::function<void()> onClick);
@@ -139,6 +141,7 @@ void Shell_Unregister();  // removes them all (and the Start menu Maintenance sh
 constexpr int kSettingsTabUploads = 5;
 void SettingsUI_Show(int tab = -1);  // -1 = the tab it was closed on
 bool SettingsUI_Key(const MSG& m);  // Ctrl+Tab between tabs; true = handled
+void SettingsUI_UpdateChanged();  // Canivete's own update state changed: General tab shows it
 HWND SettingsUI_Window();  // for IsDialogMessage, nullptr when closed
 void SettingsUI_UploadStatus(const std::wstring& error);  // after a Drive sign-in or S3 test ("" = fine)
 
@@ -181,9 +184,16 @@ struct UpdateInfo {
     std::wstring latest;     // "0.3.0"
     std::wstring url, sha;   // setup download and its SHA-256 (hex)
     std::wstring error;
+    std::wstring notes;      // what changed (the release notes without the download and fingerprint lines)
 };
+void UpdateDlg_Show();                                     // updatedlg.cpp: the "new version" window
+void UpdateDlg_Progress(int pos, const std::wstring& text);  // -1 sliding, 0..1000
+void UpdateDlg_Failed(const std::wstring& why);
 const UpdateInfo& Update_Info();
 bool Update_Busy();
+int Update_Progress();                 // while Canivete updates itself: -1 sliding, 0..1000, -2 = not updating
+const std::wstring& Update_Stage();    // what it is doing now (for the Maintenance window)
+const std::wstring& Update_InstallError();  // why the last update didn't work, "" if it did
 void Update_Check(bool manual);  // manual: always says what it found
 void Update_Background();        // once a day when the setting is on
 long long Update_SecondsToNext();  // until the next background check is due (LLONG_MAX = never)
@@ -272,6 +282,12 @@ RECT VirtualScreenRect();
 bool GrabScreen(const RECT& r, Image& out, bool withCursor);
 void DrawCursorAt(HDC dc, int ox, int oy);  // the mouse pointer, for a grab whose top-left is ox, oy
 
+// ---- notice.cpp: Canivete's own notices (a flyout in the corner), callable from any thread -----
+void Notice_Init();
+void Notice_Show(const wchar_t* title, const std::wstring& text, std::function<void()> onClick);
+void Notice_Progress(const wchar_t* title, const std::wstring& text, int pos);  // pos 0..1000, -1 = sliding; stays
+void Notice_Hide();
+
 // ---- ocr.cpp: Text extractor (Windows' own OCR, nothing downloaded) -------------------------
 void Ocr_Image(std::unique_ptr<Image> img);  // async: read the text, copy it, show a toast
 
@@ -279,6 +295,7 @@ void Ocr_Image(std::unique_ptr<Image> img);  // async: read the text, copy it, s
 void Output_Init();
 void Output_Process(std::unique_ptr<CaptureResult> r);  // async: encode, save, clipboard, toast
 void Output_OnDone(LPARAM job);                          // main thread part
+void Output_ShowFile(const std::wstring& path, const std::wstring& line1, const std::wstring& line2);  // toast with the file's thumbnail, draggable
 void Output_ShowColor(COLORREF c, POINT at, const std::wstring& line1, const std::wstring& line2);
 void Output_CopyImage(const Image& img);  // DIB + PNG on the clipboard
 bool LoadImageFile(const std::wstring& path, Image& out);

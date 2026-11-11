@@ -633,8 +633,8 @@ void SaveChoice(int i) {
     HWND up = GetDlgItem(R.save, IDC_UPLOADTOO);
     if (up && SendMessageW(up, BM_GETCHECK, 0, 0) == BST_CHECKED) Upload_File(path, false);  // its own notices
     else
-        Tray_Notify(video ? L"Video saved" : L"GIF saved", path.substr(path.find_last_of(L'\\') + 1) + L"  (" + what +
-                                                               L")\nCopied: paste it into a chat or a folder.");
+        Output_ShowFile(path, video ? L"Video saved and copied" : L"GIF saved and copied",
+                        path.substr(path.find_last_of(L'\\') + 1) + L"  (" + what + L")");
     DestroyWindow(R.save);
 }
 
